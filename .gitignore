@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+*.spec
+
+# build output — regenerate with packaging/build-deb.sh
+dist/
+*.deb
+
+# virtualenvs
+.venv/
+venv/
+env/
+
+# editor / OS cruft
+*.swp
+.DS_Store

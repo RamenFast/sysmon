@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SysMon
+Comment=Compact GPU, memory, CPU, network, and disk monitor
+Exec=python3 /home/ben/Dev/ClaudeWorkspace/sysmon/sysmon.py
+Icon=sysmon
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=false
+StartupWMClass=sysmon
