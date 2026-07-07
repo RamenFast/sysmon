@@ -18,13 +18,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
 # egui 0.33 ↔ wgpu 27 ↔ winit 0.30: the compatible set phosphor ships on
-# this machine — bump all together, never singly.
+# this machine — bump all together, never singly. The direct wgpu dep
+# exists to switch its BACKEND features on (eframe's "wgpu" feature
+# alone enables none → instant panic at startup).
 eframe = { version = "0.33", default-features = false, features = [
     "default_fonts",
     "wgpu",
     "x11",
     "wayland",
 ] }
+wgpu = "27"
 egui = "0.33"
 egui_extras = { version = "0.33", default-features = false }
 # icon rasterizing: PNG via image, SVG via resvg (Papirus is SVG-only)

@@ -11,6 +11,7 @@ use std::process::ExitCode;
 mod agent;
 mod control;
 mod envelope;
+mod gui;
 mod serve;
 
 fn main() -> ExitCode {
@@ -30,12 +31,10 @@ fn main() -> ExitCode {
         Some("ctl") => agent::run_ctl(&arguments[1..]),
         Some("schema") => agent::run_schema(&arguments[1..]),
         Some("serve") => serve::run(&arguments[1..]),
-        Some("--background") | None => {
-            eprintln!("sysmon: the GUI lands in wave 6 of the v2 rewrite");
-            eprintln!(
-                "fix: the engine already answers — `sysmon probe`, `sysmon tap network`, \
-                 `sysmon serve`"
-            );
+        None => gui::run(&arguments),
+        Some("--background") => {
+            eprintln!("sysmon: --background lands in wave 7 (xvfb-run re-exec)");
+            eprintln!("fix: run `sysmon` on a display, or `sysmon serve` headless");
             2
         }
         Some(other) => {
