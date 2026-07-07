@@ -1,0 +1,26 @@
+[package]
+name = "sysmon-app"
+description = "SysMon — compact system monitor with an agent-drivable CLI and socket API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sysmon"
+path = "src/main.rs"
+
+[dependencies]
+sysmon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_extras = { workspace = true }
+image = { workspace = true }
+resvg = { workspace = true }
+x11rb = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }

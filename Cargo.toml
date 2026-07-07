@@ -1,0 +1,40 @@
+# SysMon v2 workspace — Rust engine + egui shell. The v1 Python/GTK3
+# tree lives at tag v1.0.0; this tree replaces it wholesale.
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/RamenFast/sysmon"
+
+# Central version table; member crates opt in with `dep.workspace = true`.
+[workspace.dependencies]
+sysmon-core = { path = "crates/sysmon-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# egui 0.33 ↔ wgpu 27 ↔ winit 0.30: the compatible set phosphor ships on
+# this machine — bump all together, never singly.
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "x11",
+    "wayland",
+] }
+egui = "0.33"
+egui_extras = { version = "0.33", default-features = false }
+# icon rasterizing: PNG via image, SVG via resvg (Papirus is SVG-only)
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = "0.45"
+# X11 pointer state for the pop-out drag-to-dock check
+x11rb = "0.13"
+egui_kittest = { version = "0.33", features = ["wgpu", "snapshot"] }
+
+[profile.release]
+# thin LTO while under construction; revisit fat LTO at the perf polish
+# pass if the binary size or startup asks for it
+lto = "thin"

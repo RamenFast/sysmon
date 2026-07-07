@@ -1,19 +1,17 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
-*.spec
+# Rust
+/target/
+**/*.rs.bk
 
-# build output — regenerate with packaging/build-deb.sh
+# build output — regenerate with packaging/build-deb.sh / build-rpm.sh;
+# release assets belong on the GitHub release, not in git
+packaging/dist/
 dist/
 *.deb
+*.rpm
 
-# virtualenvs
-.venv/
-venv/
-env/
+# test artifacts (kittest snapshot diffs)
+**/tests/snapshots/**/*.diff.png
+**/tests/snapshots/**/*.new.png
 
 # editor / OS cruft
 *.swp
