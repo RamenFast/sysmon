@@ -1,112 +1,163 @@
 # SysMon
 
-A compact, theme-aware system monitor for Linux Mint / Cinnamon, built with
-GTK 3 so it picks up your Mint-Y theme natively.
+A compact system monitor for AMD-GPU Linux desktops — and a system
+state API you can script against. One Rust binary: the window, the
+engine, the CLI, the socket.
 
 ![overview](docs/screenshot-overview.png)
 
-## Launching
+Every number the window shows is one command away:
 
 ```bash
-python3 sysmon.py
+sysmon probe network --json | jq .result.network.top_processes
 ```
 
-No installation needed — the only dependencies are `python3-gi` and
-`python3-psutil`, both already present on Mint. It shows up as `sysmon` in
-process lists, has its own icon, and a menu entry is already installed at
-`~/.local/share/applications/sysmon.desktop` (re-copy `sysmon.desktop` there
-if you ever move the project).
+## v1 → v2, honestly
 
-## What it shows (Overview tab)
+v2.0.0 is a ground-up rewrite. The Python/GTK3 tree (tag `v1.0.0`)
+is gone; same information priority, new engine.
 
-| Section | Readings | Graph |
+| | v1 (Python/GTK3) | v2 (Rust/egui) |
 |---|---|---|
-| **GPU** | busy %, VRAM (level bar), core/VRAM clocks, power draw vs cap, edge + hot-spot temps, fan RPM, top-3 GPU processes | line |
-| **Memory** | used %, used/available/cached, swap, top-3 by RSS | bars |
-| **CPU** | overall %, per-core bars, frequency, load averages, task count, top-3 by CPU | filled area |
-| **Network** | live ↓/↑ speeds, totals, top-3 processes by combined traffic | dual line |
-| **Disks** | every mounted real drive with live read/write speed, label, mount point, and usage | none (by design) |
+| engine | psutil + nethogs | own /proc·/sys collectors, netlink sock_diag, optional nethogs merge |
+| per-process network | nethogs only (or nothing) | native TCP attribution with zero setup; nethogs upgrades it to UDP/QUIC + all users |
+| programmatic access | none | `probe` / `tap` / `ctl` / `schema` + control socket, JSON envelopes |
+| idle CPU (same display, 60 s, software rendering) | 13.0% of a core | **6.0%** — and `serve` idles at **0.00% / 5.6 MB** |
+| accuracy | trusted psutil | cross-checked live against free/df/ps//proc/sysfs in `cargo test` |
+| theming | adopts the GTK theme | six built-in palettes + a System mode that maps your GTK theme to the nearest family |
+| process icons | icon theme lookup, gaps common | desktop-entry index over the real icon-theme inherit chain, letter-tile fallback |
 
-GPU data comes straight from the `amdgpu` driver's sysfs interface, and
-per-process GPU usage from DRM fdinfo — the same source `nvtop` and
-`amdgpu_top` use.
+**Not carried over / changed, said out loud:**
+- v1 literally *wore* your GTK theme; v2 draws its own chrome. System
+  mode reads your Cinnamon/GNOME theme name and picks the closest
+  family (Blossom → Blossom Dark, `*-Dark*` → Dark, else Light).
+- Funky Pink kept its colors and lost its wonky corners — everything
+  is sharp-cornered now, by design.
+- Drag-a-pop-out-back-to-dock needs X11 (button state); on Wayland
+  use the ⧉ toggle or close the pop-out. Everything else is
+  display-server-agnostic.
+- NVIDIA/Intel GPUs: still an honest "no AMD GPU" card, like v1.
 
-### Process control
+Your v1 `settings.json` is read and migrated in place — including the
+detail that v1's "Blossom" *was* the AMOLED look, so that's what it
+becomes.
 
-Right-click any process — in the top-3 lists or the Processes tab — to end
-it, force-kill it, or set its priority. Actions that need elevation (raising
-priority, other users' processes) fall back to a `pkexec` authentication
-dialog.
+## What it shows
 
-### Processes tab
+| Card | Readings |
+|---|---|
+| **GPU** | busy %, VRAM bar, core/VRAM clocks, power vs cap, edge + hot-spot temps, fan, **GTT**, top-3 GPU processes — amdgpu sysfs + DRM fdinfo, the sources nvtop reads |
+| **Memory** | used (= total − available), available, cached, **buffers, dirty**, swap, top-3 by RSS |
+| **CPU** | overall + per-core bars, frequency + **range**, package temp, load, tasks, **ctx/s**, top-3 by CPU |
+| **Network** | live ↓/↑ (physical interfaces), totals, **per-interface rows with IPs and link speed**, top-3 by traffic with **↓/↑ split**, source disclosure |
+| **Disks** | every real mounted drive: label, R/W rates, **util %**, usage bar |
+| **Sensors** | every hwmon chip (CPU Tctl, NVMe, …), fans, battery when present |
 
-The full table: icon, name, PID, user, CPU %, memory, GPU %, VRAM, disk
-read/write rates, network rate, priority, and command line. Click any header
-to sort; type in the filter bar to search by name, command, or PID.
+Any card pops out into its own always-pinned window (⧉) — it keeps
+updating with the main window minimized, and **dropping it onto the
+main window docks it back**. Pop-outs are remembered across launches.
 
-### Pop-out windows
+The Processes page: icon, name, PID, user, CPU %, memory, GPU %,
+VRAM, disk R/W, **net ↓/↑**, threads, priority, state, age, command —
+sortable, filterable (Ctrl+F), with end/kill/renice (pkexec ladder
+for the privileged cases) and a per-process **details window with the
+live connection list**.
 
-The small ⧉ toggle in any section header pops that card out into its own
-window (pinned on top by default — its pin button toggles that). It keeps
-updating even with the main window minimized, and it's still the same single
-application. Drag a pop-out from **anywhere in its body**, not just the
-title bar. Three ways to bring a card home: close the pop-out, untoggle
-the ⧉ button, or just **drop the pop-out onto the main window** and it
-docks back into place. Popped-out sections are remembered across launches.
+![processes](docs/screenshot-processes.png)
 
-## Display options (☰ menu)
+## The API
 
-* **Appearance** — follow the system theme, force light/dark, or two looks
-  of the house: **Blossom (AMOLED)**, true-black surfaces with soft-pink
-  titles and gold numbers, and **Funky Pink**, a bubblegum pop-art look with
-  a hot-pink-to-violet header, wonky card corners, and offset shadows. Both
-  auto-select their matching graph palette. Light/dark switching swaps to
-  the matching variant of your current Mint theme (app-only; the rest of
-  the desktop is untouched).
-* **Graph colours** — seven palettes: Mint, Aqua, Sunset, Forest, Mono,
-  Blossom, Funky.
-* **Units** — decimal (GB, MB/s — what drive stickers and ISPs quote) or
-  binary (GiB, MiB/s — what htop and GNOME System Monitor show).
-* **Update interval** — 1 / 2 / 3 / 5 seconds.
-* **Always on top** and **Show pin button** — the header-bar pin toggles
-  always-on-top in one click.
-* **Compact mode** — shrinks the graphs and hides detail rows (disks drop to
-  one line per drive) so the window tucks neatly into a screen corner.
-* **Overview sections** — hide any section you don't care about.
+```bash
+sysmon probe [section]      # one-shot JSON (works with nothing running)
+sysmon tap network -i 2     # NDJSON stream — the desktop-bar diet
+sysmon ctl shot /tmp/s.png  # drive the window: pages, themes, pop-outs, screenshots
+sysmon serve                # headless daemon; idle = literally zero sampling
+sysmon schema               # the machine-readable map of everything
+```
 
-Preferences persist in `~/.config/sysmon/settings.json`.
+One envelope per reply, errors always carry a `fix`, exit codes
+0/2/3/4, JSON automatic when piped. The full contract with examples:
+[docs/API.md](docs/API.md), `man sysmon`, `sysmon schema`.
 
-## Per-process network (optional)
+### Per-process network without root
 
-Linux doesn't expose per-process bandwidth in /proc, so this one reading
-needs `nethogs` with packet-capture permission:
+The engine asks netlink `sock_diag` for every TCP socket's kernel
+byte counters (the numbers `ss -ti` shows) and resolves socket
+inodes to pids — real per-process rates, no packet capture, no
+setup. If [nethogs](https://github.com/raboof/nethogs) is installed
+with capture caps, it takes over as the source: packet truth,
+UDP/QUIC, other users' processes:
 
 ```bash
 sudo apt install nethogs
 sudo setcap 'cap_net_admin,cap_net_raw+ep' $(which nethogs)
 ```
 
-SysMon detects it automatically on the next launch — no configuration. Until
-then the Network section shows everything except the per-process top-3, and
-the Net/s column in the Processes tab stays empty.
+The UI and the API always disclose which source fed them.
+
+## Accuracy
+
+Every reading is cross-checked live against an independent authority
+— `free -b`, `df -B1`, `ps`, direct /proc and /sys re-reads — in
+`cargo test`, with justified tolerances (documented identity choices
+in [docs/dev/ACCURACY.md](docs/dev/ACCURACY.md)). A failing check is
+a collector bug; tolerances never widen to pass.
+
+## Install
+
+Packages and checksums on the
+[releases page](https://github.com/RamenFast/sysmon/releases).
+
+```bash
+# Debian / Ubuntu / Mint
+sudo apt install ./sysmon_2.0.0_amd64.deb
+
+# Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
+sudo dnf install ./sysmon-2.0.0-1.x86_64.rpm
+
+# from source
+sudo apt install build-essential curl git            # apt
+sudo dnf install gcc make curl git                   # dnf
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/RamenFast/sysmon && cd sysmon
+cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
+```
+
+Verify: `sysmon --version` → `sysmon 2.0.0 (v2)`.
+
+Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
+card, everything else degrades gracefully.
+
+## Gallery
+
+Six palettes, all first-class. Blossom Dark is the default;
+System mode follows your GTK theme's family.
+
+| | |
+|---|---|
+| ![amoled](docs/screenshot-amoled.png) *Blossom AMOLED — v1's true-black look* | ![blossom](docs/screenshot-blossom.png) *Blossom — petal on paper* |
+| ![light](docs/screenshot-light.png) *Light* | ![dark](docs/screenshot-dark.png) *Dark* |
+| ![funky](docs/screenshot-funky.png) *Funky Pink* | ![compact](docs/screenshot-compact.png) *Compact mode* |
+
+![popout](docs/screenshot-popout.png)
+*A popped-out GPU card living its own life.*
 
 ## Layout
 
 ```
-sysmon.py                  entry point
-sysmon_app/
-  application.py           Gtk.Application shell (single instance)
-  settings.py              persisted preferences
-  theming.py               dark/light switching, graph palette, CSS
-  formatting.py            human-readable units
-  monitors/                one module per subsystem + the sampler thread
-  widgets/                 Cairo graphs, top-3 lists, process actions
-  ui/                      window, Overview page, Processes page
+crates/sysmon-core   the engine: collectors, snapshot model (the wire
+                     contract), desktop-entry/icon index, accuracy suite
+crates/sysmon-app    the binary: GUI (eframe/egui), CLI verbs, control
+                     socket, kittest UI tests
+scripts/e2e.sh       the live receipt run (Xvfb: screenshots, drag-dock,
+                     single-instance, contract checks)
+packaging/           deb + rpm builds, manpage, desktop entry
 ```
 
-Sampling runs on a background thread; the UI only ever receives finished
-snapshots, so the window stays responsive regardless of system load.
+## License & credits
 
-## License
+GPL-3.0-or-later — see [LICENSE](LICENSE).
 
-GPLv3 — see [LICENSE](LICENSE).
+Built by Ben with [Claude Code](https://claude.com/claude-code)
+(Claude Fable 5) — engine, chrome, tests, and the accuracy suite in
+one very long, very pink session.

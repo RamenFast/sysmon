@@ -82,10 +82,31 @@ pub fn glyph_button(
         } else {
             palette.ink_2
         };
+        // Carved stone: these are the few controls that earn depth
+        // (house rule — dimension encodes importance; the shape never
+        // changes, the surface does). Pressed or active = sunk in.
+        let sunk = active || response.is_pointer_button_down_on();
+        painter.rect_filled(rect, 0.0, palette.stone);
+        let (top_left, bottom_right) = if sunk {
+            (palette.stone_lo, palette.stone_hi) // inset
+        } else {
+            (palette.stone_hi, palette.stone_lo) // raised
+        };
+        let edge = |a: egui::Pos2, b: egui::Pos2, color: Color32| {
+            painter.line_segment([a, b], Stroke::new(1.0, color));
+        };
+        edge(rect.left_top(), rect.right_top(), top_left);
+        edge(rect.left_top(), rect.left_bottom(), top_left);
+        edge(rect.left_bottom(), rect.right_bottom(), bottom_right);
+        edge(rect.right_top(), rect.right_bottom(), bottom_right);
         if active {
-            painter.rect_filled(rect, 0.0, palette.accent.gamma_multiply(0.18));
+            painter.rect_filled(
+                rect.shrink(1.0),
+                0.0,
+                palette.accent.gamma_multiply(0.16),
+            );
         } else if hovered {
-            painter.rect_filled(rect, 0.0, palette.ink.gamma_multiply(0.06));
+            painter.rect_filled(rect.shrink(1.0), 0.0, palette.ink.gamma_multiply(0.05));
         }
         painter.rect_stroke(
             rect,
