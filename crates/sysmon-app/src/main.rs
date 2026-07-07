@@ -32,11 +32,7 @@ fn main() -> ExitCode {
         Some("schema") => agent::run_schema(&arguments[1..]),
         Some("serve") => serve::run(&arguments[1..]),
         None => gui::run(&arguments),
-        Some("--background") => {
-            eprintln!("sysmon: --background lands in wave 7 (xvfb-run re-exec)");
-            eprintln!("fix: run `sysmon` on a display, or `sysmon serve` headless");
-            2
-        }
+        Some("--background") => run_background(&arguments),
         Some(other) => {
             eprintln!("sysmon: unknown command `{other}`");
             eprintln!("fix: run `sysmon --help`");
@@ -44,6 +40,43 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(code as u8)
+}
+
+/// `--background`: re-exec the GUI under a private Xvfb display so it
+/// renders (and serves the control socket) without ever mapping a
+/// window on the user's screen — no focus steal, game-safe. The env
+/// guard stops recursion once we're inside the virtual display.
+/// (phosphor's exact pattern.)
+fn run_background(arguments: &[String]) -> i32 {
+    if std::env::var_os("SYSMON_BACKGROUND").is_some() {
+        // Already wrapped: fall through to the GUI.
+        let rest: Vec<String> = arguments
+            .iter()
+            .filter(|a| a.as_str() != "--background")
+            .cloned()
+            .collect();
+        return gui::run(&rest);
+    }
+    let self_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("sysmon --background: cannot find own binary: {error}");
+            return 4;
+        }
+    };
+    let rest: Vec<&String> = arguments.iter().filter(|a| a.as_str() != "--background").collect();
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new("xvfb-run")
+        .arg("-a")
+        .args(["-s", "-screen 0 1280x900x24"])
+        .arg(self_exe)
+        .arg("--background")
+        .args(rest)
+        .env("SYSMON_BACKGROUND", "1")
+        .exec();
+    eprintln!("sysmon --background: could not launch xvfb-run: {error}");
+    eprintln!("fix: install it (sudo apt install xvfb), or run sysmon on your display normally");
+    2
 }
 
 fn print_help() {

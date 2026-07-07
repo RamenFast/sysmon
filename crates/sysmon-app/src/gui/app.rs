@@ -17,6 +17,7 @@ use sysmon_core::snapshot::{SystemSnapshot, Wants};
 use sysmon_core::units::Units;
 
 use super::actions::{self, ConfirmKind, PendingConfirm};
+use super::backend::GuiCommand;
 use super::cards::{self, AppAction, CardContext, Glyph, glyph_button};
 use super::details;
 use super::graphs::History;
@@ -50,10 +51,13 @@ pub struct SharedUi {
     pub connections_wanted: AtomicBool,
     /// Pop-out sections + detail windows request repaints by id.
     pub open_viewports: Mutex<Vec<ViewportId>>,
+    /// The main window's outer rect (screen coords) — the drag-dock
+    /// target the pop-outs test against.
+    pub main_window_rect: Mutex<Option<egui::Rect>>,
 }
 
 impl SharedUi {
-    fn new(interval: f64) -> Self {
+    pub fn new(interval: f64) -> Self {
         SharedUi {
             latest: RwLock::new(Arc::new(SystemSnapshot::default())),
             histories: RwLock::new(Histories::default()),
@@ -61,6 +65,7 @@ impl SharedUi {
             interval_seconds: Mutex::new(interval),
             connections_wanted: AtomicBool::new(false),
             open_viewports: Mutex::new(Vec::new()),
+            main_window_rect: Mutex::new(None),
         }
     }
 }
@@ -132,11 +137,34 @@ pub struct SysMonApp {
     system_palette_checked: Instant,
     /// Pin state per pop-out viewport (pinned-on-top by default).
     popout_pins: HashMap<&'static str, bool>,
+    command_rx: std::sync::mpsc::Receiver<GuiCommand>,
+    /// One in-flight `shot` at a time: (reply, requested path).
+    pending_screenshot: Option<(
+        std::sync::mpsc::Sender<Result<serde_json::Value, crate::control::VerbError>>,
+        Option<String>,
+    )>,
+    /// Drag state per popped-out section (drag-anywhere → dock).
+    popout_drags: HashMap<&'static str, PopoutDrag>,
+    /// Keeps the socket alive exactly as long as the app; Drop
+    /// unlinks it.
+    _control_server: Option<crate::control::ControlServer>,
+}
+
+#[derive(Clone, Copy)]
+struct PopoutDrag {
+    opened_at: Instant,
+    last_outer_min: Option<egui::Pos2>,
+    dragging: bool,
 }
 
 impl SysMonApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings) -> Self {
-        let shared = Arc::new(SharedUi::new(settings.update_interval_seconds));
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        settings: Settings,
+        shared: Arc<SharedUi>,
+        command_rx: std::sync::mpsc::Receiver<GuiCommand>,
+        control_server: Option<crate::control::ControlServer>,
+    ) -> Self {
         spawn_sampler(cc.egui_ctx.clone(), shared.clone());
         let (toast_tx, toast_rx) = std::sync::mpsc::channel();
 
@@ -154,6 +182,10 @@ impl SysMonApp {
             system_palette: theme::palette_for_system(),
             system_palette_checked: Instant::now(),
             popout_pins: HashMap::new(),
+            command_rx,
+            pending_screenshot: None,
+            popout_drags: HashMap::new(),
+            _control_server: control_server,
             settings,
         }
     }
@@ -554,10 +586,48 @@ impl SysMonApp {
                 if ctx.input(|input| input.viewport().close_requested()) {
                     close_requested = true;
                 }
+
+                // Drag-anywhere-to-dock (v1's gesture): after a grace
+                // period, movement while button 1 is down arms the
+                // drag; releasing it over the main window docks the
+                // card. X11 supplies the button state; elsewhere the
+                // gesture quietly doesn't exist.
+                let drag = self.popout_drags.entry(section).or_insert(PopoutDrag {
+                    opened_at: Instant::now(),
+                    last_outer_min: None,
+                    dragging: false,
+                });
+                let outer = ctx.input(|input| input.viewport().outer_rect);
+                if let Some(outer) = outer {
+                    let armed = drag.opened_at.elapsed() > Duration::from_millis(1200);
+                    let moved = drag
+                        .last_outer_min
+                        .map(|last| (last - outer.min).length() > 1.0)
+                        .unwrap_or(false);
+                    drag.last_outer_min = Some(outer.min);
+                    let button_down = x11_button1_down();
+                    if armed && moved && button_down == Some(true) {
+                        drag.dragging = true;
+                    }
+                    if drag.dragging {
+                        // Keep polling until the button releases.
+                        ctx.request_repaint_after(Duration::from_millis(120));
+                        if button_down == Some(false) {
+                            drag.dragging = false;
+                            let main_rect = *self.shared.main_window_rect.lock().unwrap();
+                            if let Some(main_rect) = main_rect
+                                && main_rect.contains(outer.center())
+                            {
+                                close_requested = true; // dock it home
+                            }
+                        }
+                    }
+                }
             });
 
             if close_requested {
                 self.settings.popped_out_sections.retain(|s| s != section);
+                self.popout_drags.remove(section);
                 self.settings.save();
             }
         }
@@ -674,16 +744,219 @@ impl SysMonApp {
     }
 }
 
+impl SysMonApp {
+    /// Drain ctl verbs queued by the socket backend — the one place
+    /// UI state changes off a socket request.
+    fn process_commands(&mut self, ctx: &egui::Context) {
+        while let Ok(command) = self.command_rx.try_recv() {
+            let GuiCommand {
+                verb,
+                value,
+                path,
+                reply,
+            } = command;
+            let value_or = |value: &Option<String>| value.clone().unwrap_or_default();
+            let result: Result<serde_json::Value, crate::control::VerbError> = match verb.as_str()
+            {
+                "raise" => {
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                    Ok(serde_json::json!({"raised": true}))
+                }
+                "page" => match value_or(&value).as_str() {
+                    "overview" => {
+                        self.page = Page::Overview;
+                        Ok(serde_json::json!({"page": "overview"}))
+                    }
+                    "processes" => {
+                        self.page = Page::Processes;
+                        Ok(serde_json::json!({"page": "processes"}))
+                    }
+                    other => Err((
+                        format!("unknown page `{other}`"),
+                        "pages: overview processes".to_string(),
+                    )),
+                },
+                "theme" => {
+                    let wanted = value_or(&value);
+                    if wanted == "system" || theme::palette_by_id(&wanted).is_some() {
+                        self.settings.theme_mode = wanted.clone();
+                        if let Some(companion) = theme::companion_graph_palette(&wanted) {
+                            self.settings.graph_palette = companion.to_string();
+                        }
+                        self.settings.save();
+                        Ok(serde_json::json!({"theme": wanted}))
+                    } else {
+                        Err((
+                            format!("unknown theme `{wanted}`"),
+                            "themes: system blossom_dark blossom amoled light dark funky"
+                                .to_string(),
+                        ))
+                    }
+                }
+                "palette" => {
+                    let wanted = value_or(&value);
+                    if theme::GRAPH_PALETTES.iter().any(|p| p.id == wanted) {
+                        self.settings.graph_palette = wanted.clone();
+                        self.settings.save();
+                        Ok(serde_json::json!({"palette": wanted}))
+                    } else {
+                        Err((
+                            format!("unknown graph palette `{wanted}`"),
+                            "palettes: mint aqua sunset forest mono blossom funky".to_string(),
+                        ))
+                    }
+                }
+                "popout" | "popin" => {
+                    let wanted = value_or(&value);
+                    match SECTION_KEYS.iter().find(|key| **key == wanted) {
+                        Some(section) => {
+                            let currently = self
+                                .settings
+                                .popped_out_sections
+                                .iter()
+                                .any(|s| s == section);
+                            if verb == "popout" && !currently {
+                                self.settings.popped_out_sections.push(section.to_string());
+                                self.popout_pins.insert(section, true);
+                            } else if verb == "popin" && currently {
+                                self.settings.popped_out_sections.retain(|s| s != section);
+                            }
+                            self.settings.save();
+                            Ok(serde_json::json!({
+                                "section": section,
+                                "popped_out": verb == "popout",
+                            }))
+                        }
+                        None => Err((
+                            format!("unknown section `{wanted}`"),
+                            "sections: gpu memory cpu network disks sensors".to_string(),
+                        )),
+                    }
+                }
+                "compact" => {
+                    let on = matches!(value_or(&value).as_str(), "on" | "true" | "1");
+                    self.settings.compact_mode = on;
+                    self.settings.save();
+                    Ok(serde_json::json!({"compact": on}))
+                }
+                "units" => {
+                    let binary = matches!(value_or(&value).as_str(), "binary" | "gib");
+                    self.settings.use_binary_units = binary;
+                    self.settings.save();
+                    Ok(serde_json::json!({
+                        "units": if binary { "binary" } else { "decimal" },
+                    }))
+                }
+                "shot" => {
+                    if self.pending_screenshot.is_some() {
+                        Err((
+                            "a screenshot is already in flight".to_string(),
+                            "wait for it, then retry".to_string(),
+                        ))
+                    } else {
+                        self.pending_screenshot = Some((reply, path));
+                        ctx.send_viewport_cmd(ViewportCommand::Screenshot(
+                            egui::UserData::default(),
+                        ));
+                        continue; // deferred reply after the render
+                    }
+                }
+                other => Err((
+                    format!("the GUI does not know `{other}`"),
+                    "see `sysmon schema`".to_string(),
+                )),
+            };
+            let _ = reply.send(result);
+        }
+    }
+
+    /// When the requested screenshot frame arrives, encode + reply.
+    fn collect_screenshot(&mut self, ctx: &egui::Context) {
+        if self.pending_screenshot.is_none() {
+            return;
+        }
+        let image = ctx.input(|input| {
+            input.raw.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        let Some(image) = image else { return };
+        let (reply, requested_path) = self.pending_screenshot.take().expect("checked above");
+
+        let path = requested_path.unwrap_or_else(|| {
+            let directory = crate::control::socket_directory().join("shots");
+            let _ = std::fs::create_dir_all(&directory);
+            directory
+                .join(format!("shot-{}.png", std::process::id()))
+                .to_string_lossy()
+                .to_string()
+        });
+        let result = save_color_image_png(&image, &path)
+            .map(|()| serde_json::json!({"path": path}))
+            .map_err(|error| {
+                (
+                    format!("could not write the screenshot: {error}"),
+                    "pass a writable path: `sysmon ctl shot /tmp/shot.png`".to_string(),
+                )
+            });
+        let _ = reply.send(result);
+    }
+}
+
+/// True while X11 reports button 1 held anywhere on screen — the
+/// signal that a pop-out is mid-drag. None off X11 (Wayland): the
+/// dock-on-drop gesture degrades to the ⧉ toggle.
+fn x11_button1_down() -> Option<bool> {
+    use std::sync::OnceLock;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt, KeyButMask};
+    static CONNECTION: OnceLock<Option<(x11rb::rust_connection::RustConnection, u32)>> =
+        OnceLock::new();
+    let connection = CONNECTION
+        .get_or_init(|| {
+            x11rb::connect(None).ok().map(|(connection, screen)| {
+                let root = connection.setup().roots[screen].root;
+                (connection, root)
+            })
+        })
+        .as_ref()?;
+    let reply = connection
+        .0
+        .query_pointer(connection.1)
+        .ok()?
+        .reply()
+        .ok()?;
+    Some(reply.mask.contains(KeyButMask::BUTTON1))
+}
+
+fn save_color_image_png(image: &egui::ColorImage, path: &str) -> Result<(), String> {
+    let [width, height] = image.size;
+    let mut buffer = image::RgbaImage::new(width as u32, height as u32);
+    for (index, pixel) in image.pixels.iter().enumerate() {
+        let x = (index % width) as u32;
+        let y = (index / width) as u32;
+        buffer.put_pixel(x, y, image::Rgba(pixel.to_srgba_unmultiplied()));
+    }
+    buffer.save(path).map_err(|error| error.to_string())
+}
+
 impl eframe::App for SysMonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_theme(ctx);
         self.keyboard(ctx);
+        self.process_commands(ctx);
+        self.collect_screenshot(ctx);
 
-        // Remember the window size for next launch.
+        // Remember the window size for next launch, and the outer
+        // rect for the pop-outs' drag-dock test.
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
             self.settings.window_width = rect.width() as i32;
             self.settings.window_height = rect.height() as i32;
         }
+        *self.shared.main_window_rect.lock().unwrap() =
+            ctx.input(|input| input.viewport().outer_rect);
 
         let mut frame_actions: Vec<AppAction> = Vec::new();
 
