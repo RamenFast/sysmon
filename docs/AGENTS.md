@@ -60,8 +60,10 @@ samples locally — either way the consumer code is identical.
 ```bash
 sysmon ctl status                  # who owns the socket: mode gui|serve, pid, version
 sysmon ctl page processes          # overview | processes
-sysmon ctl theme blossom_dark      # system blossom_dark blossom amoled light dark funky
-sysmon ctl palette sunset          # graph colors: mint aqua sunset forest mono blossom funky
+sysmon ctl theme blossom_dark      # system blossom_dark blossom amoled light dark
+                                   #   funky paper basalt amber chromacore
+sysmon ctl palette sunset          # graph colors: mint aqua sunset forest mono
+                                   #   blossom funky amber terminal
 sysmon ctl popout gpu              # gpu memory cpu network disks sensors
 sysmon ctl popin gpu
 sysmon ctl compact on              # on|off

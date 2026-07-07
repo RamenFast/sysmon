@@ -14,8 +14,8 @@ sysmon probe network --json | jq .result.network.top_processes
 
 ## v1 → v2, honestly
 
-v2.0.0 is a ground-up rewrite. The Python/GTK3 tree (tag `v1.0.0`)
-is gone; same information priority, new engine.
+v2 is a ground-up rewrite. The Python/GTK3 tree (tag `v1.0.0`) is
+gone; same information priority, new engine.
 
 | | v1 (Python/GTK3) | v2 (Rust/egui) |
 |---|---|---|
@@ -24,7 +24,7 @@ is gone; same information priority, new engine.
 | programmatic access | none | `probe` / `tap` / `ctl` / `schema` + control socket, JSON envelopes |
 | idle CPU (same display, 60 s, software rendering) | 13.0% of a core | **6.0%** — and `serve` idles at **0.00% / 5.6 MB** |
 | accuracy | trusted psutil | cross-checked live against free/df/ps//proc/sysfs in `cargo test` |
-| theming | adopts the GTK theme | six built-in palettes + a System mode that maps your GTK theme to the nearest family |
+| theming | adopts the GTK theme | ten built-in palettes + a System mode that maps your GTK theme to the nearest family |
 | process icons | icon theme lookup, gaps common | desktop-entry index over the real icon-theme inherit chain, letter-tile fallback |
 
 **Not carried over / changed, said out loud:**
@@ -110,10 +110,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_2.0.0_amd64.deb
+sudo apt install ./sysmon_2.1.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-2.0.0-1.x86_64.rpm
+sudo dnf install ./sysmon-2.1.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -123,20 +123,23 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 2.0.0 (v2)`.
+Verify: `sysmon --version` → `sysmon 2.1.0 (v2)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully.
 
 ## Gallery
 
-Six palettes, all first-class. Blossom Dark is the default;
-System mode follows your GTK theme's family.
+Ten palettes, all first-class — switching themes changes the room,
+not just the paint. Blossom Dark is the default; System mode follows
+your GTK theme's family.
 
 | | |
 |---|---|
 | ![amoled](docs/screenshot-amoled.png) *Blossom AMOLED — v1's true-black look* | ![blossom](docs/screenshot-blossom.png) *Blossom — petal on paper* |
 | ![light](docs/screenshot-light.png) *Light* | ![dark](docs/screenshot-dark.png) *Dark* |
+| ![paper](docs/screenshot-paper.png) *Paper — warm reading light* | ![basalt](docs/screenshot-basalt.png) *Basalt — bevel city* |
+| ![amber](docs/screenshot-amber.png) *Amber CRT* | ![chromacore](docs/screenshot-chromacore.png) *Chromacore — the 1905 terminal* |
 | ![funky](docs/screenshot-funky.png) *Funky Pink* | ![compact](docs/screenshot-compact.png) *Compact mode* |
 
 ![popout](docs/screenshot-popout.png)

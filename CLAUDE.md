@@ -19,7 +19,7 @@ lib + thin bin).
 
 ```bash
 cargo build --release          # binary at target/release/sysmon
-cargo test                     # all 41 tests (needs this machine: live /proc, network)
+cargo test                     # the full suite (needs this machine: live /proc, network)
 cargo test -p sysmon-core --lib                 # parsers only, fast, machine-agnostic
 cargo test -p sysmon-core --test accuracy       # live cross-checks vs free/df/ps
 cargo test -p sysmon-app  --test ui_kittest     # UI through AccessKit
@@ -32,6 +32,11 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
 - **Version law**: workspace version == `sysmon --version` == package
   filenames == git tag. One source: `[workspace.package]` in
   `Cargo.toml`.
+- **Release law**: every commit landing on main IS a release — bump
+  the version on the branch, merge `--no-ff`, run
+  `scripts/release.sh <notes-file>` (tags, builds deb+rpm+tarball+
+  SHA256SUMS, publishes on GitHub). main never carries an unreleased
+  version.
 - **Accuracy law**: a failing `tests/accuracy.rs` check means fix the
   collector — never widen the tolerance. Identities are documented in
   `docs/dev/ACCURACY.md`; changing one is a breaking API change.

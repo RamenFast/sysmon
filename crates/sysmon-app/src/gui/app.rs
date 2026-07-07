@@ -139,16 +139,19 @@ pub struct SysMonApp {
     popout_pins: HashMap<&'static str, bool>,
     command_rx: std::sync::mpsc::Receiver<GuiCommand>,
     /// One in-flight `shot` at a time: (reply, requested path).
-    pending_screenshot: Option<(
-        std::sync::mpsc::Sender<Result<serde_json::Value, crate::control::VerbError>>,
-        Option<String>,
-    )>,
+    pending_screenshot: Option<PendingScreenshot>,
     /// Drag state per popped-out section (drag-anywhere → dock).
     popout_drags: HashMap<&'static str, PopoutDrag>,
     /// Keeps the socket alive exactly as long as the app; Drop
     /// unlinks it.
     _control_server: Option<crate::control::ControlServer>,
 }
+
+/// The `shot` verb's deferred reply: where to answer, where to write.
+type PendingScreenshot = (
+    std::sync::mpsc::Sender<Result<serde_json::Value, crate::control::VerbError>>,
+    Option<String>,
+);
 
 #[derive(Clone, Copy)]
 struct PopoutDrag {
@@ -813,7 +816,8 @@ impl SysMonApp {
                     } else {
                         Err((
                             format!("unknown theme `{wanted}`"),
-                            "themes: system blossom_dark blossom amoled light dark funky"
+                            "themes: system blossom_dark blossom amoled light dark funky paper \
+                             basalt amber chromacore"
                                 .to_string(),
                         ))
                     }
@@ -827,7 +831,8 @@ impl SysMonApp {
                     } else {
                         Err((
                             format!("unknown graph palette `{wanted}`"),
-                            "palettes: mint aqua sunset forest mono blossom funky".to_string(),
+                            "palettes: mint aqua sunset forest mono blossom funky amber terminal"
+                                .to_string(),
                         ))
                     }
                 }

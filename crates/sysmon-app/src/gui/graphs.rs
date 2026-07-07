@@ -42,6 +42,10 @@ impl History {
         self.samples.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
     pub fn max(&self) -> f64 {
         self.samples.iter().copied().fold(0.0, f64::max)
     }
@@ -103,7 +107,7 @@ pub fn history_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config
     let step = drawable.width() / (HISTORY_LENGTH.saturating_sub(1)) as f32;
 
     for (series_index, history) in series.iter().enumerate() {
-        if history.len() == 0 {
+        if history.is_empty() {
             continue;
         }
         let color = config
