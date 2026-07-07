@@ -9,7 +9,7 @@ use std::fs;
 
 use crate::snapshot::CpuSnapshot;
 
-use super::read::{read_trimmed, read_u64};
+use super::read::{SelfInterval, read_trimmed, read_u64};
 
 /// One /proc/stat cpu line, in ticks.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -106,6 +106,7 @@ pub fn parse_loadavg(content: &str) -> LoadAvg {
 }
 
 pub struct CpuCollector {
+    window: SelfInterval,
     previous: Option<ProcStat>,
     /// (cur, min, max) sysfs paths per core, discovered once.
     cpufreq_paths: Vec<(String, String, String)>,
@@ -140,6 +141,7 @@ impl CpuCollector {
             }
         }
         CpuCollector {
+            window: SelfInterval::default(),
             previous: None,
             cpufreq_paths,
         }
@@ -158,7 +160,8 @@ impl CpuCollector {
             .unwrap_or(0.0)
     }
 
-    pub fn collect(&mut self, interval_seconds: f64) -> CpuSnapshot {
+    pub fn collect(&mut self, now: std::time::Instant) -> CpuSnapshot {
+        let interval_seconds = self.window.tick(now);
         let mut snapshot = CpuSnapshot::default();
 
         let current = fs::read_to_string("/proc/stat")

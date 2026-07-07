@@ -15,7 +15,7 @@ use std::path::Path;
 
 use crate::snapshot::{InterfaceKind, InterfaceSnapshot, NetworkSnapshot};
 
-use super::read::read_trimmed;
+use super::read::{SelfInterval, read_trimmed};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InterfaceCounters {
@@ -105,6 +105,7 @@ fn addresses() -> HashMap<String, (Vec<String>, Vec<String>)> {
 }
 
 pub struct NetCollector {
+    window: SelfInterval,
     previous: HashMap<String, InterfaceCounters>,
 }
 
@@ -117,11 +118,13 @@ impl Default for NetCollector {
 impl NetCollector {
     pub fn new() -> Self {
         NetCollector {
+            window: SelfInterval::default(),
             previous: HashMap::new(),
         }
     }
 
-    pub fn collect(&mut self, interval_seconds: f64) -> NetworkSnapshot {
+    pub fn collect(&mut self, now: std::time::Instant) -> NetworkSnapshot {
+        let interval_seconds = self.window.tick(now);
         let counters = fs::read_to_string("/proc/net/dev")
             .map(|content| parse_net_dev(&content))
             .unwrap_or_default();

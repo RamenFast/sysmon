@@ -101,7 +101,7 @@ impl Sampler {
             snapshot.sensors = Some(self.sensors.collect());
         }
         if wants.cpu {
-            let mut cpu = self.cpu.collect(interval_seconds);
+            let mut cpu = self.cpu.collect(now);
             cpu.temperature_celsius = snapshot
                 .sensors
                 .as_ref()
@@ -115,16 +115,16 @@ impl Sampler {
             snapshot.memory = Some(self.memory.collect());
         }
         if wants.gpu {
-            snapshot.gpu = Some(self.gpu.collect(interval_seconds));
+            snapshot.gpu = Some(self.gpu.collect(now));
         }
         if wants.network {
-            snapshot.network = Some(self.net.collect(interval_seconds));
+            snapshot.network = Some(self.net.collect(now));
         }
         if wants.disks {
-            snapshot.disks = Some(self.disk.collect(interval_seconds));
+            snapshot.disks = Some(self.disk.collect(now));
         }
         if wants.processes {
-            let mut records = self.process.collect(interval_seconds, self.boot_ts);
+            let mut records = self.process.collect(now, self.boot_ts);
             // Merge per-process GPU usage into the process records.
             if let Some(gpu) = &snapshot.gpu {
                 for usage in &gpu.processes {
@@ -137,9 +137,7 @@ impl Sampler {
             snapshot.processes = Some(records);
         }
         if wants.per_process_net || wants.connections {
-            let net_sample = self
-                .net_process
-                .collect(interval_seconds, wants.connections);
+            let net_sample = self.net_process.collect(now, wants.connections);
             if let Some(network) = &mut snapshot.network {
                 network.process_source = net_sample.source;
                 network.process_source_hint = net_sample.hint.clone();

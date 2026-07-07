@@ -8,6 +8,11 @@
 
 use std::process::ExitCode;
 
+mod agent;
+mod control;
+mod envelope;
+mod serve;
+
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let first = arguments.first().map(String::as_str);
@@ -20,15 +25,23 @@ fn main() -> ExitCode {
             print_help();
             0
         }
-        Some(other) => {
-            eprintln!("sysmon: unknown command `{other}` (wave 1 scaffold — verbs land next)");
-            eprintln!("fix: run `sysmon --help` for what exists right now");
-            3
-        }
-        None => {
+        Some("probe") => agent::run_probe(&arguments[1..]),
+        Some("tap") => agent::run_tap(&arguments[1..]),
+        Some("ctl") => agent::run_ctl(&arguments[1..]),
+        Some("schema") => agent::run_schema(&arguments[1..]),
+        Some("serve") => serve::run(&arguments[1..]),
+        Some("--background") | None => {
             eprintln!("sysmon: the GUI lands in wave 6 of the v2 rewrite");
-            eprintln!("fix: `sysmon --version` works today; check back after the build");
+            eprintln!(
+                "fix: the engine already answers — `sysmon probe`, `sysmon tap network`, \
+                 `sysmon serve`"
+            );
             2
+        }
+        Some(other) => {
+            eprintln!("sysmon: unknown command `{other}`");
+            eprintln!("fix: run `sysmon --help`");
+            3
         }
     };
     ExitCode::from(code as u8)
@@ -39,14 +52,26 @@ fn print_help() {
         "sysmon {} — compact system monitor with an agent-drivable API
 
 USAGE
-    sysmon                 launch the GUI (default)
-    sysmon probe [section] one-shot system state as JSON
-    sysmon tap [section]   stream NDJSON samples
-    sysmon ctl <verb>      drive the running instance
-    sysmon serve           headless sampling daemon
-    sysmon schema          machine-readable map of all of the above
-    sysmon --background    GUI on a private Xvfb display
-    sysmon --version       print the version",
+    sysmon                          launch the GUI (default; re-launch raises it)
+    sysmon --background             GUI on a private Xvfb display (no focus steal)
+    sysmon probe [sections…]        one-shot system state (JSON when piped)
+    sysmon tap [sections…] [-i N]   stream NDJSON snapshots (default: network, 1s)
+    sysmon ctl <verb> […]           drive the running instance
+    sysmon serve                    headless daemon on the control socket
+    sysmon schema                   machine-readable map of all of the above
+    sysmon --version                print the version
+
+SECTIONS
+    all system cpu memory gpu network disks processes sensors connections
+
+CTL VERBS
+    status quit pause resume interval <s> raise page <p> theme <t>
+    palette <p> popout <section> popin <section> shot [path]
+    compact <on|off> units <decimal|binary>
+
+Everything exits 0 on success, 2 when a needed piece isn't running,
+3 on bad arguments, 4 on runtime failure. Piped output is always
+JSON envelopes; errors always carry a `fix`.",
         sysmon_core::VERSION
     );
 }

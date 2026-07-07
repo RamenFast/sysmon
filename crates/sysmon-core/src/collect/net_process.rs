@@ -30,6 +30,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::snapshot::{ConnectionRecord, ProcessNetRates, ProcessNetSource, ProcessNetTopEntry};
 
+use super::read::SelfInterval;
+
 // ---------------------------------------------------------------- netlink
 
 const NETLINK_SOCK_DIAG: i32 = 4;
@@ -526,6 +528,7 @@ pub struct NetProcessSample {
 }
 
 pub struct NetProcessCollector {
+    window: SelfInterval,
     diag_works: bool,
     previous_socket_bytes: HashMap<u64, (u64, u64)>,
     resolver: InodeResolver,
@@ -543,6 +546,7 @@ impl NetProcessCollector {
     pub fn new(enable_nethogs: bool, refresh_seconds: u32) -> Self {
         let diag_works = dump_sockets(false).is_ok();
         NetProcessCollector {
+            window: SelfInterval::default(),
             diag_works,
             previous_socket_bytes: HashMap::new(),
             resolver: InodeResolver::new(),
@@ -585,7 +589,8 @@ impl NetProcessCollector {
         comm
     }
 
-    pub fn collect(&mut self, interval_seconds: f64, want_connections: bool) -> NetProcessSample {
+    pub fn collect(&mut self, now: std::time::Instant, want_connections: bool) -> NetProcessSample {
+        let interval_seconds = self.window.tick(now);
         self.ensure_nethogs();
 
         let mut sample = NetProcessSample {

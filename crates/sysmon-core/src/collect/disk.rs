@@ -15,6 +15,8 @@ use std::path::Path;
 
 use crate::snapshot::DiskSnapshot;
 
+use super::read::SelfInterval;
+
 /// One mounted filesystem from /proc/self/mountinfo.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MountEntry {
@@ -172,6 +174,7 @@ fn statvfs_usage(mount_point: &str) -> Option<(u64, u64)> {
 }
 
 pub struct DiskCollector {
+    window: SelfInterval,
     previous: HashMap<String, DiskCounters>,
 }
 
@@ -184,11 +187,13 @@ impl Default for DiskCollector {
 impl DiskCollector {
     pub fn new() -> Self {
         DiskCollector {
+            window: SelfInterval::default(),
             previous: HashMap::new(),
         }
     }
 
-    pub fn collect(&mut self, interval_seconds: f64) -> Vec<DiskSnapshot> {
+    pub fn collect(&mut self, now: std::time::Instant) -> Vec<DiskSnapshot> {
+        let interval_seconds = self.window.tick(now);
         let mounts = fs::read_to_string("/proc/self/mountinfo")
             .map(|content| parse_mountinfo(&content))
             .unwrap_or_default();

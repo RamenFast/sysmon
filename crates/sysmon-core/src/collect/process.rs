@@ -15,6 +15,8 @@ use std::os::unix::fs::MetadataExt;
 
 use crate::snapshot::ProcessRecord;
 
+use super::read::SelfInterval;
+
 /// The bits we lift from one /proc/<pid>/stat line.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StatLine {
@@ -94,6 +96,7 @@ struct PreviousProcess {
 }
 
 pub struct ProcessCollector {
+    window: SelfInterval,
     previous: HashMap<i32, PreviousProcess>,
     users: UserCache,
     clk_tck: f64,
@@ -110,6 +113,7 @@ impl Default for ProcessCollector {
 impl ProcessCollector {
     pub fn new() -> Self {
         ProcessCollector {
+            window: SelfInterval::default(),
             previous: HashMap::new(),
             users: UserCache::new(),
             clk_tck: unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64,
@@ -126,7 +130,8 @@ impl ProcessCollector {
         Some(self.read_buffer.as_str())
     }
 
-    pub fn collect(&mut self, interval_seconds: f64, boot_ts: f64) -> Vec<ProcessRecord> {
+    pub fn collect(&mut self, now: std::time::Instant, boot_ts: f64) -> Vec<ProcessRecord> {
+        let interval_seconds = self.window.tick(now);
         self.users.refresh_if_stale();
         let core_count = std::thread::available_parallelism()
             .map(|n| n.get())

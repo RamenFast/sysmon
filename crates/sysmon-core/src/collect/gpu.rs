@@ -14,7 +14,7 @@ use std::process::Command;
 
 use crate::snapshot::{GpuProcessUsage, GpuSnapshot};
 
-use super::read::{read_trimmed, read_u64};
+use super::read::{SelfInterval, read_trimmed, read_u64};
 
 const AMD_PCI_VENDOR_ID: &str = "0x1002";
 const DRM_CHAR_MAJOR: u32 = 226;
@@ -96,6 +96,7 @@ pub fn drm_usage_from_fdinfo(
 }
 
 pub struct GpuCollector {
+    window: SelfInterval,
     device_path: Option<PathBuf>,
     hwmon_path: Option<PathBuf>,
     pci_address: String,
@@ -113,6 +114,7 @@ impl Default for GpuCollector {
 impl GpuCollector {
     pub fn new() -> Self {
         let mut collector = GpuCollector {
+            window: SelfInterval::default(),
             device_path: None,
             hwmon_path: None,
             pci_address: String::new(),
@@ -160,7 +162,8 @@ impl GpuCollector {
         }
     }
 
-    pub fn collect(&mut self, interval_seconds: f64) -> GpuSnapshot {
+    pub fn collect(&mut self, now: std::time::Instant) -> GpuSnapshot {
+        let interval_seconds = self.window.tick(now);
         let Some(device) = self.device_path.clone() else {
             return GpuSnapshot::default(); // available: false
         };
