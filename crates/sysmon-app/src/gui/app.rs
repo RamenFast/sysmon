@@ -26,7 +26,7 @@ use super::processes::{ProcessTableState, processes_page};
 use super::settings::{SECTION_KEYS, Settings};
 use super::theme::{self, Palette};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
     Overview,
     Processes,
@@ -125,8 +125,8 @@ pub struct SysMonApp {
     pub settings: Settings,
     shared: Arc<SharedUi>,
     icon_cache: IconCache,
-    page: Page,
-    table_state: ProcessTableState,
+    pub page: Page,
+    pub table_state: ProcessTableState,
     details_open: Vec<i32>,
     pending_confirm: Option<PendingConfirm>,
     toast_tx: std::sync::mpsc::Sender<String>,
@@ -526,6 +526,22 @@ impl SysMonApp {
                             .inner_margin(egui::Margin::same(8)),
                     )
                     .show(ctx, |ui| {
+                        // v1's gesture: the whole body is a drag
+                        // handle. A background interact registered
+                        // FIRST loses to every widget drawn after it,
+                        // so buttons/scroll still work; dragging the
+                        // leftovers moves the window.
+                        let body = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with("popout_body_drag"),
+                            egui::Sense::drag(),
+                        );
+                        if body.drag_started() {
+                            ctx.send_viewport_cmd_to(
+                                viewport_id,
+                                ViewportCommand::StartDrag,
+                            );
+                        }
                         ui.horizontal(|ui| {
                             let pin_response = glyph_button(
                                 ui,
@@ -598,6 +614,14 @@ impl SysMonApp {
                     dragging: false,
                 });
                 let outer = ctx.input(|input| input.viewport().outer_rect);
+                if std::env::var_os("SYSMON_DEBUG_DRAG").is_some() {
+                    eprintln!(
+                        "drag[{section}] outer={outer:?} button={:?} dragging={} main={:?}",
+                        x11_button1_down(),
+                        drag.dragging,
+                        *self.shared.main_window_rect.lock().unwrap(),
+                    );
+                }
                 if let Some(outer) = outer {
                     let armed = drag.opened_at.elapsed() > Duration::from_millis(1200);
                     let moved = drag
@@ -944,6 +968,19 @@ fn save_color_image_png(image: &egui::ColorImage, path: &str) -> Result<(), Stri
 
 impl eframe::App for SysMonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::env::var_os("SYSMON_DEBUG_FPS").is_some() {
+            use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+            static FRAMES: AtomicU64 = AtomicU64::new(0);
+            static WINDOW_START: Mutex<Option<Instant>> = Mutex::new(None);
+            let count = FRAMES.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            let mut start = WINDOW_START.lock().unwrap();
+            let begin = start.get_or_insert_with(Instant::now);
+            if begin.elapsed() > Duration::from_secs(10) {
+                eprintln!("frames in 10s: {count}");
+                FRAMES.store(0, AtomicOrdering::Relaxed);
+                *start = Some(Instant::now());
+            }
+        }
         self.apply_theme(ctx);
         self.keyboard(ctx);
         self.process_commands(ctx);

@@ -39,7 +39,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = "0.45"
 # X11 pointer state for the pop-out drag-to-dock check
 x11rb = "0.13"
-egui_kittest = { version = "0.33", features = ["wgpu", "snapshot"] }
+egui_kittest = { version = "0.33", features = ["wgpu", "snapshot", "eframe"] }
 
 [profile.release]
 # thin LTO while under construction; revisit fat LTO at the perf polish

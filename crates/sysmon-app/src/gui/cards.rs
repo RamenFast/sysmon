@@ -68,6 +68,10 @@ pub fn glyph_button(
 ) -> egui::Response {
     let size = vec2(22.0, 18.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    // Screen readers (and the kittest harness) see the tooltip text.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tooltip)
+    });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let hovered = response.hovered();

@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "sysmon_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sysmon"
 path = "src/main.rs"
