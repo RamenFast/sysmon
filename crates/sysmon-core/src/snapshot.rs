@@ -158,6 +158,19 @@ pub struct NetworkSnapshot {
     /// install nethogs for UDP/QUIC coverage: …").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_source_hint: Option<String>,
+    /// Busiest processes on the network right now (rx+tx desc) —
+    /// answers the bar's click without a full process scan.
+    pub top_processes: Vec<ProcessNetTopEntry>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProcessNetTopEntry {
+    /// -1 when the owning process isn't resolvable (another user's,
+    /// without nethogs).
+    pub pid: i32,
+    pub name: String,
+    pub rx_bps: f64,
+    pub tx_bps: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

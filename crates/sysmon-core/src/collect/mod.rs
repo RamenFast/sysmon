@@ -10,15 +10,32 @@ pub mod disk;
 pub mod gpu;
 pub mod memory;
 pub mod net;
+pub mod net_process;
 pub mod process;
 pub(crate) mod read;
 pub mod sensors;
 
 use std::time::Instant;
 
-use crate::snapshot::{ProcessNetSource, SystemInfo, SystemSnapshot, Wants};
+use crate::snapshot::{SystemInfo, SystemSnapshot, Wants};
 
 use read::read_trimmed;
+
+/// How a long-lived sampler differs from a one-shot one.
+#[derive(Clone, Copy, Debug)]
+pub struct SamplerOptions {
+    /// Keep a nethogs child for full-protocol per-process rates.
+    /// One-shot probes pass false (never leave children behind).
+    pub enable_nethogs: bool,
+}
+
+impl Default for SamplerOptions {
+    fn default() -> Self {
+        SamplerOptions {
+            enable_nethogs: true,
+        }
+    }
+}
 
 pub struct Sampler {
     previous_sample_at: Option<Instant>,
@@ -27,6 +44,7 @@ pub struct Sampler {
     gpu: gpu::GpuCollector,
     disk: disk::DiskCollector,
     net: net::NetCollector,
+    net_process: net_process::NetProcessCollector,
     process: process::ProcessCollector,
     sensors: sensors::SensorsCollector,
     boot_ts: f64,
@@ -34,6 +52,10 @@ pub struct Sampler {
 
 impl Sampler {
     pub fn new() -> Self {
+        Self::with_options(SamplerOptions::default())
+    }
+
+    pub fn with_options(options: SamplerOptions) -> Self {
         let mut cpu = cpu::CpuCollector::new();
         let boot_ts = cpu.boot_ts();
         Sampler {
@@ -43,6 +65,7 @@ impl Sampler {
             gpu: gpu::GpuCollector::new(),
             disk: disk::DiskCollector::new(),
             net: net::NetCollector::new(),
+            net_process: net_process::NetProcessCollector::new(options.enable_nethogs, 1),
             process: process::ProcessCollector::new(),
             sensors: sensors::SensorsCollector,
             boot_ts,
@@ -95,14 +118,7 @@ impl Sampler {
             snapshot.gpu = Some(self.gpu.collect(interval_seconds));
         }
         if wants.network {
-            let mut network = self.net.collect(interval_seconds);
-            // Per-process attribution lands in wave 4; until then the
-            // section says so honestly instead of silently showing
-            // nothing.
-            network.process_source = ProcessNetSource::None;
-            network.process_source_hint =
-                Some("per-process network attribution lands in wave 4".to_string());
-            snapshot.network = Some(network);
+            snapshot.network = Some(self.net.collect(interval_seconds));
         }
         if wants.disks {
             snapshot.disks = Some(self.disk.collect(interval_seconds));
@@ -119,6 +135,27 @@ impl Sampler {
                 }
             }
             snapshot.processes = Some(records);
+        }
+        if wants.per_process_net || wants.connections {
+            let net_sample = self
+                .net_process
+                .collect(interval_seconds, wants.connections);
+            if let Some(network) = &mut snapshot.network {
+                network.process_source = net_sample.source;
+                network.process_source_hint = net_sample.hint.clone();
+                network.top_processes = net_sample.top.clone();
+            }
+            if let Some(records) = &mut snapshot.processes {
+                for record in records.iter_mut() {
+                    if let Some((rx, tx)) = net_sample.rates_by_pid.get(&record.pid) {
+                        record.net_rx_bps = Some(*rx);
+                        record.net_tx_bps = Some(*tx);
+                    }
+                }
+            }
+            if wants.connections {
+                snapshot.connections = Some(net_sample.connections);
+            }
         }
 
         snapshot
