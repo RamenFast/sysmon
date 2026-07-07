@@ -111,6 +111,12 @@ pub struct CpuCollector {
     cpufreq_paths: Vec<(String, String, String)>,
 }
 
+impl Default for CpuCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuCollector {
     pub fn new() -> Self {
         let mut cpufreq_paths = Vec::new();

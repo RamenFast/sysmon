@@ -45,11 +45,10 @@ impl SensorsCollector {
                 }
                 return chip.temps.first().map(|t| t.celsius);
             }
-            if chip.name == "coretemp" {
-                if let Some(reading) = chip.temps.iter().find(|t| t.label.starts_with("Package")) {
+            if chip.name == "coretemp"
+                && let Some(reading) = chip.temps.iter().find(|t| t.label.starts_with("Package")) {
                     return Some(reading.celsius);
                 }
-            }
         }
         None
     }

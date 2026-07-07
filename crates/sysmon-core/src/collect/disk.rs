@@ -52,13 +52,12 @@ fn unescape_octal(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() {
-            if let Ok(value) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
+        if bytes[i] == b'\\' && i + 3 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
                 out.push(value as char);
                 i += 4;
                 continue;
             }
-        }
         out.push(bytes[i] as char);
         i += 1;
     }
@@ -146,13 +145,12 @@ pub fn unescape_udev(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1] == b'x' {
-            if let Ok(value) = u8::from_str_radix(&s[i + 2..i + 4], 16) {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1] == b'x'
+            && let Ok(value) = u8::from_str_radix(&s[i + 2..i + 4], 16) {
                 out.push(value as char);
                 i += 4;
                 continue;
             }
-        }
         out.push(bytes[i] as char);
         i += 1;
     }
@@ -175,6 +173,12 @@ fn statvfs_usage(mount_point: &str) -> Option<(u64, u64)> {
 
 pub struct DiskCollector {
     previous: HashMap<String, DiskCounters>,
+}
+
+impl Default for DiskCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DiskCollector {

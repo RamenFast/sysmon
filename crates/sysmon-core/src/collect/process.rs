@@ -101,6 +101,12 @@ pub struct ProcessCollector {
     read_buffer: String,
 }
 
+impl Default for ProcessCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessCollector {
     pub fn new() -> Self {
         ProcessCollector {

@@ -63,11 +63,7 @@ impl ThemeDirectory {
                 let max = self.max_size * self.scale;
                 if wanted < min {
                     min - wanted
-                } else if wanted > max {
-                    wanted - max
-                } else {
-                    0
-                }
+                } else { wanted.saturating_sub(max) }
             }
             _ => wanted.abs_diff(have),
         }

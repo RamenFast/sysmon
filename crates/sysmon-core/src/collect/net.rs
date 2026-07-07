@@ -108,6 +108,12 @@ pub struct NetCollector {
     previous: HashMap<String, InterfaceCounters>,
 }
 
+impl Default for NetCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetCollector {
     pub fn new() -> Self {
         NetCollector {

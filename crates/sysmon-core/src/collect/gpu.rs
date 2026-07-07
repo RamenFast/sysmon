@@ -78,11 +78,10 @@ pub fn drm_usage_from_fdinfo(
     if fields.get("drm-pdev").and_then(|v| v.text()) != Some(pci_address) {
         return None;
     }
-    if let Some(client_id) = fields.get("drm-client-id").and_then(|v| v.number()) {
-        if !seen_client_ids.insert(client_id) {
+    if let Some(client_id) = fields.get("drm-client-id").and_then(|v| v.number())
+        && !seen_client_ids.insert(client_id) {
             return None; // duplicate fd for the same client (dup/fork)
         }
-    }
     let engine_ns = ENGINE_TIME_KEYS
         .iter()
         .filter_map(|key| fields.get(key).and_then(|v| v.number()))
@@ -103,6 +102,12 @@ pub struct GpuCollector {
     device_name: String,
     previous_engine_ns: HashMap<i32, u64>,
     pids_without_drm: HashMap<i32, u8>,
+}
+
+impl Default for GpuCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GpuCollector {
