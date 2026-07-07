@@ -142,7 +142,7 @@ System mode follows your GTK theme's family.
 ![popout](docs/screenshot-popout.png)
 *A popped-out GPU card living its own life.*
 
-## Layout
+## Layout & docs
 
 ```
 crates/sysmon-core   the engine: collectors, snapshot model (the wire
@@ -153,6 +153,16 @@ scripts/e2e.sh       the live receipt run (Xvfb: screenshots, drag-dock,
                      single-instance, contract checks)
 packaging/           deb + rpm builds, manpage, desktop entry
 ```
+
+Working on it (human or agent)? The docs assume zero context:
+
+- [CLAUDE.md](CLAUDE.md) — laws, commands, gotchas (auto-loaded by Claude Code)
+- [docs/AGENTS.md](docs/AGENTS.md) — driving the app/API as an agent
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the developer map: crates, data flow, threading
+- [docs/dev/EXTENDING.md](docs/dev/EXTENDING.md) — checklists: add a collector/card/verb/palette/column
+- [docs/dev/TESTING.md](docs/dev/TESTING.md) — the five test layers + the Xvfb gotchas
+- [docs/dev/ACCURACY.md](docs/dev/ACCURACY.md) — every number's authority and tolerance
+- [HANDOFF.md](HANDOFF.md) — project state and the next-session ledger
 
 ## License & credits
 

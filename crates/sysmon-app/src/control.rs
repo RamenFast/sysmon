@@ -213,11 +213,11 @@ fn dispatch(verb: &str, request: &Value, backend: &Arc<dyn Backend>) -> Value {
         },
         "quit" => Ok(json!({"quitting": true})),
         "raise" | "page" | "theme" | "palette" | "popout" | "popin" | "shot" | "compact"
-        | "sections" | "units" => backend.gui_verb(verb, request),
+        | "units" => backend.gui_verb(verb, request),
         other => Err((
             format!("unknown verb `{other}`"),
             "verbs: status snapshot subscribe pause resume interval quit raise page theme \
-             palette popout popin shot compact sections units"
+             palette popout popin shot compact units"
                 .to_string(),
         )),
     };

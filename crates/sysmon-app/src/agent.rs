@@ -282,7 +282,7 @@ fn build_schema() -> Value {
                 "protocol": "one JSON object per line in; one envelope line out; `subscribe` upgrades to a raw NDJSON snapshot stream",
                 "verbs": ["status", "snapshot", "subscribe", "pause", "resume", "interval",
                            "quit", "raise", "page", "theme", "palette", "popout", "popin",
-                           "shot", "compact", "sections", "units"],
+                           "shot", "compact", "units"],
                 "single_owner": "GUI or serve — whoever binds first; `sysmon serve` exits 2 if occupied",
             },
         },

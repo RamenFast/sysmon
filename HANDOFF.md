@@ -73,3 +73,13 @@ tarball + SHA256SUMS, notes via `--notes-file`.
 `docs/dev/RECEIPTS.md` (tests, e2e, resource table),
 `docs/dev/ACCURACY.md` (identities + tolerances),
 `docs/dev/PLAN.md` (the approved era plan).
+
+## Documentation map (written for zero-context agents)
+
+`CLAUDE.md` (laws + commands, auto-loaded) → `docs/AGENTS.md`
+(driving) · `docs/ARCHITECTURE.md` (the developer map) ·
+`docs/dev/EXTENDING.md` (touch-point checklists for every common
+change) · `docs/dev/TESTING.md` (test layers + GUI-testing gotchas).
+Keep them true: the three user-facing mirrors (schema, manpage,
+docs/API.md) must agree after any surface change — EXTENDING.md
+says so per recipe.
