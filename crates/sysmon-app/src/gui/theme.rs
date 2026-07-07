@@ -52,7 +52,7 @@ const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
     Color32::from_rgba_premultiplied(r, g, b, a)
 }
 
-pub const PALETTES: [Palette; 6] = [
+pub const PALETTES: [Palette; 10] = [
     // ── Blossom Dark — warm wine-plum ground, sakura-rose accent.
     //    The wanted default (house tokens verbatim). ──
     Palette {
@@ -181,6 +181,95 @@ pub const PALETTES: [Palette; 6] = [
         stone: rgb(0xff, 0xc6, 0xe2),
         stone_hi: rgb(0xff, 0xf0, 0xf8),
         stone_lo: rgb(0xe8, 0x8f, 0xc0),
+    },
+    // ── Paper — warm reading light: tan paper, leather accent.
+    //    Deliberately paper-tan, not generic cream. ──
+    Palette {
+        id: "paper",
+        label: "Paper",
+        dark: false,
+        plane: rgb(0xef, 0xe8, 0xda),
+        surface: rgb(0xfa, 0xf6, 0xec),
+        surface_2: rgb(0xf3, 0xed, 0xdf),
+        ink: rgb(0x2e, 0x29, 0x20),
+        ink_2: rgb(0x5e, 0x55, 0x44),
+        muted: rgb(0x96, 0x8a, 0x70),
+        line: rgba(46, 41, 32, 41),
+        line_strong: rgba(46, 41, 32, 82),
+        accent: rgb(0x9c, 0x5c, 0x24),
+        on_accent: rgb(0xfd, 0xf8, 0xf0),
+        title: rgb(0x6b, 0x4a, 0x28),
+        value: rgb(0x8a, 0x58, 0x1e),
+        stone: rgb(0xe4, 0xdb, 0xc8),
+        stone_hi: rgb(0xff, 0xfb, 0xf2),
+        stone_lo: rgb(0xc4, 0xb6, 0x9c),
+    },
+    // ── Basalt — bevel city: carved gray stone, steel-blue accent.
+    //    The room where the stone controls do the talking. ──
+    Palette {
+        id: "basalt",
+        label: "Basalt",
+        dark: true,
+        plane: rgb(0x0f, 0x11, 0x13),
+        surface: rgb(0x18, 0x1b, 0x1e),
+        surface_2: rgb(0x21, 0x25, 0x29),
+        ink: rgb(0xe6, 0xeb, 0xf0),
+        ink_2: rgb(0xad, 0xb6, 0xbf),
+        muted: rgb(0x74, 0x7e, 0x88),
+        line: rgba(230, 235, 240, 33),
+        line_strong: rgba(230, 235, 240, 74),
+        accent: rgb(0x7a, 0xa4, 0xc4),
+        on_accent: rgb(0x0c, 0x12, 0x18),
+        title: rgb(0xb4, 0xc2, 0xd0),
+        value: rgb(0x8a, 0xb4, 0xd4),
+        stone: rgb(0x26, 0x2b, 0x30),
+        stone_hi: rgb(0x38, 0x3f, 0x46),
+        stone_lo: rgb(0x12, 0x15, 0x18),
+    },
+    // ── Amber CRT — the service-terminal instrument: warm black,
+    //    amber phosphor text. ──
+    Palette {
+        id: "amber",
+        label: "Amber CRT",
+        dark: true,
+        plane: rgb(0x0b, 0x08, 0x04),
+        surface: rgb(0x15, 0x10, 0x08),
+        surface_2: rgb(0x1e, 0x17, 0x0c),
+        ink: rgb(0xf4, 0xe3, 0xc2),
+        ink_2: rgb(0xcd, 0xb2, 0x86),
+        muted: rgb(0x8f, 0x78, 0x56),
+        line: rgba(244, 227, 194, 36),
+        line_strong: rgba(244, 227, 194, 82),
+        accent: rgb(0xf0, 0xa8, 0x30),
+        on_accent: rgb(0x1a, 0x10, 0x02),
+        title: rgb(0xf0, 0xa8, 0x30),
+        value: rgb(0xff, 0xd2, 0x70),
+        stone: rgb(0x26, 0x1d, 0x10),
+        stone_hi: rgb(0x3d, 0x30, 0x1c),
+        stone_lo: rgb(0x10, 0x0b, 0x05),
+    },
+    // ── Chromacore — the 1905 terminal: near-black green-cast
+    //    ground, phosphor-green semantic ink (the NFO discipline
+    //    this design language grew from). ──
+    Palette {
+        id: "chromacore",
+        label: "Chromacore",
+        dark: true,
+        plane: rgb(0x04, 0x08, 0x06),
+        surface: rgb(0x09, 0x0f, 0x0c),
+        surface_2: rgb(0x0f, 0x17, 0x12),
+        ink: rgb(0xd2, 0xe8, 0xdc),
+        ink_2: rgb(0x9c, 0xc4, 0xae),
+        muted: rgb(0x5f, 0x8a, 0x72),
+        line: rgba(120, 220, 160, 40),
+        line_strong: rgba(120, 220, 160, 90),
+        accent: rgb(0x2f, 0xd2, 0x7a),
+        on_accent: rgb(0x03, 0x14, 0x0a),
+        title: rgb(0x2f, 0xd2, 0x7a),
+        value: rgb(0x7c, 0xe8, 0xa8),
+        stone: rgb(0x12, 0x1e, 0x17),
+        stone_hi: rgb(0x1f, 0x33, 0x27),
+        stone_lo: rgb(0x06, 0x0c, 0x08),
     },
 ];
 
@@ -343,7 +432,7 @@ const fn c(r: f32, g: f32, b: f32) -> Color32 {
     Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
-pub const GRAPH_PALETTES: [GraphPalette; 7] = [
+pub const GRAPH_PALETTES: [GraphPalette; 9] = [
     GraphPalette {
         id: "mint",
         label: "Mint",
@@ -470,6 +559,44 @@ pub const GRAPH_PALETTES: [GraphPalette; 7] = [
             c(1.00, 0.72, 0.30),
         ],
     },
+    GraphPalette {
+        // Warm phosphor family for the Amber CRT room.
+        id: "amber",
+        label: "Amber",
+        light: [
+            c(0.69, 0.42, 0.06),
+            c(0.54, 0.42, 0.06),
+            c(0.75, 0.35, 0.09),
+            c(0.56, 0.44, 0.06),
+            c(0.48, 0.29, 0.13),
+        ],
+        dark: [
+            c(0.94, 0.66, 0.19),
+            c(1.00, 0.82, 0.44),
+            c(1.00, 0.56, 0.24),
+            c(0.91, 0.78, 0.49),
+            c(0.75, 0.47, 0.25),
+        ],
+    },
+    GraphPalette {
+        // Green-cyan family for the Chromacore terminal.
+        id: "terminal",
+        label: "Terminal",
+        light: [
+            c(0.06, 0.54, 0.28),
+            c(0.16, 0.48, 0.32),
+            c(0.06, 0.54, 0.47),
+            c(0.35, 0.54, 0.06),
+            c(0.05, 0.42, 0.23),
+        ],
+        dark: [
+            c(0.18, 0.82, 0.48),
+            c(0.49, 0.91, 0.66),
+            c(0.22, 0.91, 0.78),
+            c(0.66, 0.91, 0.24),
+            c(0.13, 0.66, 0.38),
+        ],
+    },
 ];
 
 pub fn graph_palette_by_id(id: &str) -> &'static GraphPalette {
@@ -491,6 +618,10 @@ pub fn companion_graph_palette(theme_id: &str) -> Option<&'static str> {
     match theme_id {
         "blossom" | "blossom_dark" | "amoled" => Some("blossom"),
         "funky" => Some("funky"),
+        "amber" => Some("amber"),
+        "chromacore" => Some("terminal"),
+        "basalt" => Some("mono"),
+        "paper" => Some("sunset"),
         _ => None,
     }
 }

@@ -128,9 +128,9 @@ src/gui/backend.rs     GuiBackend (Backend impl): reads answer from
                        SharedUi without waking the window; UI verbs queue
                        GuiCommand{verb,value,path,reply} + request_repaint;
                        shot waits ≤10 s on the reply channel.
-src/gui/theme.rs       Palette table (6) + system-theme mapping via
+src/gui/theme.rs       Palette table (10) + system-theme mapping via
                        gsettings + apply() (sharp corners, tokens→egui
-                       style) + GraphPalette table (7) + companions
+                       style) + GraphPalette table (9) + companions
 src/gui/settings.rs    v1-compatible settings.json (era sniffed by absent
                        settings_version; v1 "blossom" → "amoled")
 src/gui/cards.rs       the six overview cards + card chrome (glyph_button
@@ -201,12 +201,13 @@ fatal).
 ## Design system
 
 Hard rules live in `gui/theme.rs` header and CLAUDE.md. Palettes are
-data (six token blocks); `apply()` maps tokens onto egui's style
+data (ten token blocks); `apply()` maps tokens onto egui's style
 with `CornerRadius::ZERO` everywhere. `title`/`value` are the two
 signature text colors (v1's pink titles / gold numbers). The stone
 triple (`stone`, `stone_hi`, `stone_lo`) is worn only by
 `glyph_button` — depth encodes importance, shape never changes.
-Graph palettes are v1's seven, verbatim, light+dark variants;
+Graph palettes: v1's seven verbatim plus amber and terminal, all with
+light+dark variants;
 `companion_graph_palette` re-creates v1's theme-brings-its-palette
 behavior.
 

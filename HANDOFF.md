@@ -11,8 +11,9 @@ One binary (`crates/sysmon-app`, lib + bin) over one engine
 `probe`/`tap`/`ctl`/`schema`/`serve`/`--background` on the phosphor
 contract (JSON envelopes, errors carry `fix`, exit 0/2/3/4, control
 socket at `$XDG_RUNTIME_DIR/sysmon/ctl.sock`, single owner, plain
-relaunch raises). Six palettes (Blossom Dark default, `amoled` is
-v1's true-black look and v1 settings migrate to it), stone-carved
+relaunch raises). Ten palettes (Blossom Dark default; `amoled` is
+v1's true-black look and v1 settings migrate to it; paper/basalt/
+amber/chromacore are the distinct-room additions), stone-carved
 primary controls, sharp corners everywhere.
 
 ## Load-bearing decisions
@@ -49,10 +50,12 @@ primary controls, sharp corners everywhere.
 
 ## Ship mechanics
 
-`packaging/build-deb.sh` and `packaging/build-rpm.sh` →
-`packaging/dist/` (gitignored). Version law: workspace ==
-`--version` == filenames == tag. Release = deb + rpm + `git archive`
-tarball + SHA256SUMS, notes via `--notes-file`.
+**Every commit that lands on main is a release**: bump
+`[workspace.package].version` on the feature branch, merge `--no-ff`,
+then `scripts/release.sh <notes-file>` tags, builds deb + rpm +
+source tarball + SHA256SUMS, publishes the GitHub release, and
+prints the local install command. main never carries an unreleased
+version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 

@@ -25,6 +25,12 @@ pub struct IconCache {
     by_path: HashMap<String, Option<TextureHandle>>,
 }
 
+impl Default for IconCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IconCache {
     pub fn new() -> Self {
         IconCache {

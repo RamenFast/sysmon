@@ -135,7 +135,7 @@ section that exists on the wire but not in the UI (or vice versa).
   readable on surface, muted readable on plane, hairline visible on
   both plane and surface.
 - ⚠ Graph palettes are a separate table (`GRAPH_PALETTES`, same
-  file, `[GraphPalette; 7]` — same bump rule; five semantic series:
+  file — same array-length bump rule; five semantic series:
   gpu, memory, cpu, net-down, net-up; light AND dark variants).
 
 ---
