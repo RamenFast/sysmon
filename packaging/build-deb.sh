@@ -1,69 +1,51 @@
 #!/usr/bin/env bash
-# Build a Debian package for SysMon.
+# Build the Debian package for SysMon v2 (the compiled Rust binary)
+# straight from the working tree.
 #
-#   Usage:   packaging/build-deb.sh
-#   Output:  dist/sysmon_<version>_all.deb
+#   packaging/build-deb.sh   ->  packaging/dist/sysmon_<version>_<arch>.deb
 #
-# The package installs:
-#   /usr/share/sysmon/             the application code and assets
-#   /usr/bin/sysmon                launcher
-#   /usr/share/applications/       desktop entry (menu integration)
-#   /usr/share/icons/hicolor/      application icon
-#   /usr/share/doc/sysmon/         README
-#
-# Dependencies are declared on Ubuntu/Mint archive packages, so recipients
-# can install with:  sudo apt install ./sysmon_<version>_all.deb
-
+# The v1 python-tree packaging lives in git history (tag v1.0.0,
+# last shipped as sysmon_1.0.0_all.deb); this deb upgrades it.
 set -euo pipefail
 
-project_root="$(cd "$(dirname "$0")/.." && pwd)"
-version="$(python3 -c "
-import sys
-sys.path.insert(0, '$project_root')
-from sysmon_app import APPLICATION_VERSION
-print(APPLICATION_VERSION)
-")"
+project_directory="$(cd "$(dirname "$0")/.." && pwd)"
+packaging_directory="$project_directory/packaging"
 
-staging_root="$(mktemp -d)"
-trap 'rm -rf "$staging_root"' EXIT
-package_dir="$staging_root/sysmon_${version}_all"
+# The binary: build fresh, package a stripped copy. Version comes
+# from the workspace so the filename can never drift from --version.
+(cd "$project_directory" && cargo build --release --quiet -p sysmon-app)
+binary="$project_directory/target/release/sysmon"
+[ -f "$binary" ] || { echo "no release binary at $binary" >&2; exit 1; }
+version="$("$binary" --version | awk '{print $2}')"
+architecture="$(dpkg --print-architecture)"
 
-# ---- application code and assets -> /usr/share/sysmon -----------------------
-install -d "$package_dir/usr/share/sysmon"
-cp "$project_root/sysmon.py" "$package_dir/usr/share/sysmon/"
-cp -r "$project_root/sysmon_app" "$package_dir/usr/share/sysmon/"
-cp -r "$project_root/assets" "$package_dir/usr/share/sysmon/"
-find "$package_dir" -type d -name __pycache__ -prune -exec rm -rf {} +
+staging_directory="$(mktemp -d)"
+trap 'rm -rf "$staging_directory"' EXIT
 
-# ---- launcher -> /usr/bin/sysmon ---------------------------------------------
-install -d "$package_dir/usr/bin"
-cat > "$package_dir/usr/bin/sysmon" <<'LAUNCHER'
-#!/bin/sh
-exec python3 /usr/share/sysmon/sysmon.py "$@"
-LAUNCHER
-chmod 755 "$package_dir/usr/bin/sysmon"
+install -d \
+    "$staging_directory/DEBIAN" \
+    "$staging_directory/usr/bin" \
+    "$staging_directory/usr/share/applications" \
+    "$staging_directory/usr/share/icons/hicolor/scalable/apps" \
+    "$staging_directory/usr/share/man/man1" \
+    "$staging_directory/usr/share/doc/sysmon"
 
-# ---- desktop entry and icon --------------------------------------------------
-# The repo's desktop file points at the development checkout; the packaged
-# one launches the installed binary instead.
-install -d "$package_dir/usr/share/applications"
-sed 's|^Exec=.*|Exec=sysmon|' "$project_root/sysmon.desktop" \
-    > "$package_dir/usr/share/applications/sysmon.desktop"
-chmod 644 "$package_dir/usr/share/applications/sysmon.desktop"
+install -m 755 "$binary" "$staging_directory/usr/bin/sysmon"
+strip --strip-unneeded "$staging_directory/usr/bin/sysmon"
 
-install -d "$package_dir/usr/share/icons/hicolor/scalable/apps"
-cp "$project_root/assets/sysmon.svg" \
-    "$package_dir/usr/share/icons/hicolor/scalable/apps/sysmon.svg"
+install -m 644 "$project_directory/assets/sysmon.svg" \
+    "$staging_directory/usr/share/icons/hicolor/scalable/apps/sysmon.svg"
+install -m 644 "$packaging_directory/sysmon.desktop" \
+    "$staging_directory/usr/share/applications/sysmon.desktop"
 
-# ---- documentation -----------------------------------------------------------
-install -d "$package_dir/usr/share/doc/sysmon"
-cp "$project_root/README.md" "$package_dir/usr/share/doc/sysmon/"
+scdoc < "$packaging_directory/sysmon.1.scd" > "$staging_directory/usr/share/man/man1/sysmon.1"
+gzip -9n "$staging_directory/usr/share/man/man1/sysmon.1"
 
-# Debian convention: the copyright file references the system copy of the
-# GPL-3 rather than shipping the full text again.
-cat > "$package_dir/usr/share/doc/sysmon/copyright" <<'COPYRIGHT'
+install -m 644 "$project_directory/README.md" "$staging_directory/usr/share/doc/sysmon/"
+cat > "$staging_directory/usr/share/doc/sysmon/copyright" <<'COPYRIGHT'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: sysmon
+Source: https://github.com/RamenFast/sysmon
 
 Files: *
 Copyright: 2026 Ben Miller <2bmillerb@gmail.com>
@@ -81,33 +63,32 @@ License: GPL-3+
  On Debian systems, the complete text of the GNU General Public
  License version 3 can be found in "/usr/share/common-licenses/GPL-3".
 COPYRIGHT
-chmod 644 "$package_dir/usr/share/doc/sysmon/copyright"
+chmod 644 "$staging_directory/usr/share/doc/sysmon/copyright"
 
-# ---- package metadata ----------------------------------------------------------
-installed_size_kilobytes="$(du -sk "$package_dir/usr" | cut -f1)"
-install -d "$package_dir/DEBIAN"
-cat > "$package_dir/DEBIAN/control" <<CONTROL
+installed_size_kilobytes="$(du -sk "$staging_directory/usr" | cut -f1)"
+cat > "$staging_directory/DEBIAN/control" <<CONTROL
 Package: sysmon
 Version: ${version}
 Section: utils
 Priority: optional
-Architecture: all
+Architecture: ${architecture}
 Installed-Size: ${installed_size_kilobytes}
-Depends: python3 (>= 3.10), python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, python3-psutil
-Recommends: nethogs
+Depends: libc6 (>= 2.34)
+Recommends: nethogs, pciutils, xvfb
 Maintainer: Ben Miller <2bmillerb@gmail.com>
-Description: Compact GPU, memory, CPU, network, and disk monitor
- A compact, theme-aware GTK 3 system monitor for Cinnamon and other
- GTK desktops. Live graphs for AMD GPU, memory, CPU, network, and
- disks, with per-process top lists, a full sortable process table,
- pop-out section windows, compact mode, and switchable themes
- including Blossom (AMOLED) and Funky Pink.
+Homepage: https://github.com/RamenFast/sysmon
+Description: Compact system monitor with an agent-drivable API
+ Live cards for AMD GPU, memory, CPU, network, disks, and sensors,
+ per-process top lists with real application icons, a full sortable
+ process table, pop-out card windows that dock back on drop, and six
+ built-in themes.
  .
- Per-process network rates need the optional nethogs package with
- packet-capture permission; everything else works out of the box.
+ The same engine answers a JSON API: sysmon probe/tap/ctl/schema and
+ a control socket, so scripts and desktop bars can query any system
+ state — networking first, with native no-setup per-process TCP
+ attribution (nethogs upgrades it to all protocols and users).
 CONTROL
 
-# ---- build -------------------------------------------------------------------
-mkdir -p "$project_root/dist"
+mkdir -p "$packaging_directory/dist"
 dpkg-deb --build --root-owner-group \
-    "$package_dir" "$project_root/dist/sysmon_${version}_all.deb"
+    "$staging_directory" "$packaging_directory/dist/sysmon_${version}_${architecture}.deb"

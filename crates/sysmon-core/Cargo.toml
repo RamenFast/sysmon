@@ -1,0 +1,14 @@
+[package]
+name = "sysmon-core"
+description = "SysMon's engine: /proc and /sys collectors, the snapshot model, and the wire contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SysMon
+Comment=Compact system monitor with an agent-drivable API
+Exec=sysmon
+Icon=sysmon
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=false
+StartupWMClass=sysmon
+Keywords=system;monitor;cpu;gpu;memory;network;processes;task;

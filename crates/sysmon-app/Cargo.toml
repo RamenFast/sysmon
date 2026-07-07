@@ -1,0 +1,45 @@
+[package]
+name = "sysmon-app"
+description = "SysMon — compact system monitor with an agent-drivable CLI and socket API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "sysmon_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sysmon"
+path = "src/main.rs"
+
+[dependencies]
+sysmon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+eframe = { workspace = true }
+wgpu = { workspace = true }
+egui = { workspace = true }
+egui_extras = { workspace = true }
+image = { workspace = true }
+resvg = { workspace = true }
+x11rb = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+
+# cargo-generate-rpm asset table (packaging/build-rpm.sh)
+[package.metadata.generate-rpm]
+name = "sysmon"
+summary = "Compact system monitor with an agent-drivable API"
+license = "GPL-3.0-or-later"
+url = "https://github.com/RamenFast/sysmon"
+assets = [
+    { source = "target/release/sysmon", dest = "/usr/bin/sysmon", mode = "755" },
+    { source = "assets/sysmon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/sysmon.svg", mode = "644" },
+    { source = "packaging/sysmon.desktop", dest = "/usr/share/applications/sysmon.desktop", mode = "644" },
+    { source = "target/sysmon.1.gz", dest = "/usr/share/man/man1/sysmon.1.gz", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/sysmon/README.md", mode = "644", doc = true },
+]
