@@ -26,6 +26,10 @@ eframe = { version = "0.33", default-features = false, features = [
     "wgpu",
     "x11",
     "wayland",
+    # a11y + what egui_kittest drives the UI through; must be on
+    # everywhere or egui-winit's non-accesskit pattern breaks under
+    # test-build feature unification
+    "accesskit",
 ] }
 wgpu = "27"
 egui = "0.33"
