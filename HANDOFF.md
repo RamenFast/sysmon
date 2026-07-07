@@ -1,6 +1,7 @@
 # HANDOFF — SysMon
 
-**Era: v2.0.0** (2026-07-07) — the Rust rewrite, shipped. The
+**Era: v2.1.0** (2026-07-07) — the Rust rewrite plus the ten-room
+theme set; releases now cut per main commit via scripts/release.sh. The
 Python/GTK3 v1 lives at tag `v1.0.0`; nothing of it remains in the
 tree.
 

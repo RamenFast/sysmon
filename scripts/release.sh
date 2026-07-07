@@ -30,6 +30,8 @@ version="$(target/release/sysmon --version | awk '{print $2}')"
 manifest_version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
 [ "$version" = "$manifest_version" ] || fail "binary $version != workspace $manifest_version"
 git rev-parse "v$version" >/dev/null 2>&1 && fail "v$version already tagged — bump the version"
+grep -q "sysmon_${version}_amd64.deb" README.md || \
+    fail "README install commands don't mention $version — update them (the page must never show a stale version)"
 
 say "test suite"
 cargo test --release --quiet 2>&1 | tail -2

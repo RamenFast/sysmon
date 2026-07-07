@@ -14,8 +14,8 @@ sysmon probe network --json | jq .result.network.top_processes
 
 ## v1 → v2, honestly
 
-v2.0.0 is a ground-up rewrite. The Python/GTK3 tree (tag `v1.0.0`)
-is gone; same information priority, new engine.
+v2 is a ground-up rewrite. The Python/GTK3 tree (tag `v1.0.0`) is
+gone; same information priority, new engine.
 
 | | v1 (Python/GTK3) | v2 (Rust/egui) |
 |---|---|---|
@@ -110,10 +110,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_2.0.0_amd64.deb
+sudo apt install ./sysmon_2.1.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-2.0.0-1.x86_64.rpm
+sudo dnf install ./sysmon-2.1.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -123,7 +123,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 2.0.0 (v2)`.
+Verify: `sysmon --version` → `sysmon 2.1.0 (v2)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully.
