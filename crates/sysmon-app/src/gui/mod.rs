@@ -152,3 +152,21 @@ pub fn run(_arguments: &[String]) -> i32 {
         }
     }
 }
+
+#[cfg(test)]
+mod icon_tests {
+    /// The embedded SVG must survive resvg (clipPath + filters are
+    /// easy to break) — a parse failure here would ship a silently
+    /// iconless window.
+    #[test]
+    fn app_icon_renders() {
+        let icon = super::app_icon().expect("icon SVG must parse and render");
+        assert_eq!((icon.width, icon.height), (128, 128));
+        let lit = icon
+            .rgba
+            .chunks(4)
+            .filter(|px| px[3] > 0 && (px[0] > 40 || px[1] > 40 || px[2] > 40))
+            .count();
+        assert!(lit > 500, "icon rendered nearly blank ({lit} lit pixels)");
+    }
+}

@@ -1,13 +1,19 @@
 # HANDOFF — SysMon
 
-**Era: v2.2.0** (2026-07-07) — Ben's first-feedback release: fully
-sortable table (any column, ▲▼ affordance, persisted), horizontal
-table scroll, phosphor's pin button (animated carve + `P`),
-theme-carved scrollbars, hover-lit menu rows, "Open in process
-viewer" from anywhere, and Ctrl+click multi-select (≤5) feeding a
-combined-details window with per-metric share bars. Before that:
-v2.1.0 ten-room theme set; the Rust rewrite. The Python/GTK3 v1
-lives at tag `v1.0.0`; nothing of it remains in the tree.
+**Era: v2.2.2** (2026-07-07) — the "refix everything" release, fixes
+by code where v2.2.1 had fixed by diagnosis: pin button's active
+glyph stays ink (phosphor's rule — it no longer converges with the
+accent-tinted face; that wash-out is why Ben hid it), scrollbar
+handles wear text-grade tones (ink_2/ink/accent, 11 px), the GUI
+names its render adapter and discloses a CPU-rasterizer fallback
+loudly (toast + stderr + `status.renderer_hint` — never silently
+slow), the sensors walk survives hwmon index gaps (k10temp Tccd1 was
+silently dropped; new accuracy identity pins it) and grew voltage
+rails / power vs cap / fan max / drive temps with the drive named,
+and the icon is finally the round-1 ask: phosphor-language magnifying
+glass over a traced screen. Before that: v2.2.0 the seven asks;
+v2.1.0 ten rooms; the Rust rewrite. The Python/GTK3 v1 lives at tag
+`v1.0.0`; nothing of it remains in the tree.
 
 ## What this is now
 
@@ -73,9 +79,26 @@ version. Version law: workspace == `--version` == filenames == tag.
   check_row`), not egui radios — egui radios paint no hover at all
   (Ben's complaint). Hover glow everywhere else comes from
   `hovered.weak_bg_fill` (theme.rs), which egui menu buttons use.
-- **Scrollbars are solid + carved**: handle = `widgets.*.bg_fill`
-  (stone / stone_hi / accent), rail = `extreme_bg_color`. Floating
-  overlay bars are gone on purpose.
+- **Scrollbars are solid, ink-handled**: handle = `widgets.*.bg_fill`
+  (ink_2 / ink / accent-while-dragged, 11 px), rail =
+  `extreme_bg_color`. Stone handles (v2.2.0) blended into every room
+  — the ink tones hold text-grade contrast by construction. egui has
+  no handle-stroke channel; contrast is fill + width only.
+- **Glyph buttons: the glyph never chases the accent** (phosphor's
+  bevel_toggle rule). Active = face eased toward accent (0.22 mix,
+  cap 0.32) + accent border + inset bevel; the glyph stays ink. The
+  v2.2.0 port recolored the active glyph toward the accent too — it
+  converged with the face and washed out in every room; that's the
+  bug Ben hid the pin button over.
+- **Never silently slow**: `SysMonApp::new` reads the wgpu adapter;
+  `DeviceType::Cpu` (llvmpipe) ⇒ stderr with fix + toast +
+  `status.renderer`/`renderer_hint`. Xvfb/e2e always runs in this
+  mode — the toast is IN the first ~6 s of screenshots by design.
+- **hwmon channel indices gap** (k10temp: temp1 + temp3, no temp2) —
+  the sensors walk enumerates directory entries, never counts up
+  from 1; `accuracy.rs::sensor_channels_match_sysfs_files` pins it.
+  Drive chips resolve their block device + model (`device/block/*`,
+  `device/model`), so four `drivetemp` chips read as sda…sdd.
 - **The table lives in a horizontal ScrollArea** — inside it,
   `Column::remainder()` would see unbounded width, so the Command
   column takes the viewport-derived spare width at build time.

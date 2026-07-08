@@ -275,8 +275,21 @@ pub struct SensorsSnapshot {
 pub struct SensorChip {
     /// hwmon driver name (k10temp, nvme, amdgpu, …).
     pub name: String,
+    /// Block device the chip measures (drivetemp/nvme chips), e.g.
+    /// "sda" — without it, four SATA drives all read "drivetemp".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The measured device's model string, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_model: Option<String>,
     pub temps: Vec<TempReading>,
     pub fans: Vec<FanReading>,
+    /// Voltage rails (hwmon `in*` channels), volts.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub voltages: Vec<VoltageReading>,
+    /// Power rails (hwmon `power*` channels), watts.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub power: Vec<PowerReading>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -293,6 +306,24 @@ pub struct TempReading {
 pub struct FanReading {
     pub label: String,
     pub rpm: u32,
+    /// The fan's rated maximum, when the driver states one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_rpm: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VoltageReading {
+    pub label: String,
+    pub volts: f32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PowerReading {
+    pub label: String,
+    pub watts: f32,
+    /// The enforced power limit, when the driver states one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_watts: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

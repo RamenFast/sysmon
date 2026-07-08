@@ -16,3 +16,6 @@ dist/
 # editor / OS cruft
 *.swp
 .DS_Store
+
+# live receipt runs (scripts/e2e.sh output; curated shots live in docs/)
+e2e-out/

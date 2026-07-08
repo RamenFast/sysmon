@@ -22,6 +22,7 @@ contract and never get widened to make a red test green.**
 | GPU edge temp | hwmon `temp1_input` | sysfs re-read | 10 °C (thermal drift between reads) |
 | Load 1m | /proc/loadavg field 1 | /proc re-read | 0.5 (5 s kernel recompute tick) |
 | Uptime / boot | /proc/uptime; btime from /proc/stat | `btime + uptime ≈ now` | 3–5 s |
+| Sensor census | one reading per readable hwmon channel file: temps/fans/voltages from `<prefix>N_input`, power from `powerN_average`-or-`_input` | sysfs directory re-scan | exact (channel **indices gap** — k10temp has temp1+temp3, no temp2; counting up from 1 was the v2.2.1 bug that hid Tccd1) |
 
 ## Deliberate identity choices
 

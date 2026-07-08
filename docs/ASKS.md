@@ -23,6 +23,17 @@ era first, with where it landed. Bugs rediscover themselves here.*
 | 9 | "README should always be sharp and consistent — not a journal" | README feature prose collapsed into the standing description, extra screenshot embed dropped; rule encoded in the `ben-repo-packaging-preferences` skill (what-changed narrative → release notes / HANDOFF / docs/dev only) |
 | 10 | "only one branch (main/master) by the end" | standing law (AGENTS.md §4) — work branch folded after every merge |
 
+## 2026-07-07 · v2.2.2 round ("refix everything")
+
+| # | ask (Ben's words, condensed) | landed |
+|---|---|---|
+| 11 | "Pin button unreadable when selected (washed out) regardless of theme — I hid it because it looked horrible. Fix it. Issue still present" | the real fix this time: the active glyph no longer chases the accent (phosphor's bevel_toggle rule — glyph stays ink, the face tint + accent border + inset bevel signal active); mixes matched to phosphor's numbers (`gui/cards.rs::glyph_button`). Verified active+inactive across dark and light rooms |
+| 12 | "Scrollbars hard af to see cross theme, blend into ui too much. Fix it." | handles now wear the palette's text-grade tones (ink_2 idle / ink hover / accent drag) on the recessed rail — readable in all ten rooms by construction — and widened 8→11 px (`gui/theme.rs`) |
+| 13 | "Ensure this [mysterious slowness] never happens when a user is using the program" | never-silently-slow: the GUI names its adapter at startup; a CPU-rasterizer fallback (llvmpipe) is disclosed loudly — stderr with the fix, an in-window toast, and `status.renderer`/`renderer_hint` on the wire. Idle receipts: 7.9% of one core *on software rendering* (the worst case), event-driven repaints (zero work between samples) |
+| 14 | "You can't find any other sensor/temp information?" (round 2 ask, now landed) | plenty: fixed the gap bug that HID k10temp's Tccd1 (channel indices aren't contiguous — now a directory scan, pinned by a new accuracy identity); added voltage rails, power draw vs cap, fan rated max; drive temps with the drive resolved (`sda · KINGSTON…`) via drivetemp/nvme, `drivetemp` loaded + persisted on Ben's machine; a gentle in-card hint names the modprobe when drives are temp-less |
+| 15 | "Make a new icon — the phosphor scope art, magnifying glass over a computer screen" (round-1 ask, was never done) | drawn in phosphor's icon language: CRT-black, hairline frame, two-layer glow traces (P7-green CPU spikes + blossom-pink baseline) on a monitor, ice-blue magnifying glass showing them at 1.6×; guard-band scanned, 64 px squint-tested, resvg chain pinned by a new test |
+| 16 | "Delete any other branches you have active on github, update readme/all that" | verified: `main` is the only branch, local and remote; README evergreen-edited (sensors/Sensors-card truth, disclosure line, live version strings), screenshots regenerated from the release build |
+
 Standing (memory + AGENTS.md): always push GitHub · one working
 branch at a time · deb+rpm every release · install the fresh deb on
 Ben's machine · README stays evergreen.

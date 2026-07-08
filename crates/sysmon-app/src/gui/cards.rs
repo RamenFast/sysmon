@@ -108,24 +108,29 @@ pub fn glyph_button(
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
         let pressed = response.is_pointer_button_down_on();
-        let stroke_color = if active {
-            palette.on_accent.lerp_to_gamma(palette.accent, 0.35)
-        } else if hovered {
+        // The glyph NEVER chases the accent (phosphor's bevel_toggle
+        // rule): the accent lives in the face tint and the border,
+        // the glyph stays ink. The v2.2.0 port recolored the active
+        // glyph toward the accent while the face also eased toward
+        // it — the two converged and the pin washed out in every
+        // room (Ben hid the button over it).
+        let stroke_color = if active || hovered {
             palette.ink
         } else {
             palette.ink_2
         };
         // Carved stone, phosphor's bevel_toggle feel (ported at Ben's
-        // ask): the face EASES toward the accent on hover/active —
-        // short, purposeful animation — and the glyph nudges 1px when
-        // pressed. Dimension encodes importance; the shape never
-        // changes, the surface does. Pressed or active = sunk in.
-        let active_mix = ui.ctx().animate_bool(response.id, active) * 0.30;
+        // ask, mixes matched to its numbers): the face EASES toward
+        // the accent on hover/active — short, purposeful animation —
+        // and the glyph nudges 1px when pressed. Dimension encodes
+        // importance; the shape never changes, the surface does.
+        // Pressed or active = sunk in.
+        let active_mix = ui.ctx().animate_bool(response.id, active) * 0.22;
         let hover_mix =
             ui.ctx().animate_bool(response.id.with("hover"), hovered) * 0.10;
         let face = palette
             .stone
-            .lerp_to_gamma(palette.accent, (active_mix + hover_mix).min(0.38));
+            .lerp_to_gamma(palette.accent, (active_mix + hover_mix).min(0.32));
         let painter = ui.painter();
         let sunk = active || pressed;
         painter.rect_filled(rect, 0.0, face);
@@ -1138,8 +1143,15 @@ pub fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
             for temp in &chip.temps {
                 any = true;
                 ui.horizontal(|ui| {
+                    // A drive chip names its drive ("sda · KINGSTON…"),
+                    // or four SATA drives all read "drivetemp · temp1".
+                    let row_label = match (&chip.device, &chip.device_model) {
+                        (Some(device), Some(model)) => format!("{device} · {model}"),
+                        (Some(device), None) => format!("{device} · {}", temp.label),
+                        _ => format!("{} · {}", chip.name, temp.label),
+                    };
                     ui.label(
-                        RichText::new(format!("{} · {}", chip.name, temp.label))
+                        RichText::new(row_label)
                             .color(cx.palette.muted)
                             .size(11.0),
                     );
@@ -1164,12 +1176,69 @@ pub fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
                             .size(11.0),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let value = match fan.max_rpm {
+                            Some(max) => format!("{} / {} rpm", fan.rpm, max),
+                            None => format!("{} rpm", fan.rpm),
+                        };
+                        ui.label(RichText::new(value).monospace().size(11.5));
+                    });
+                });
+            }
+            for voltage in &chip.voltages {
+                any = true;
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} · {}", chip.name, voltage.label))
+                            .color(cx.palette.muted)
+                            .size(11.0),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("{} rpm", fan.rpm)).monospace().size(11.5),
+                            RichText::new(format!("{:.3} V", voltage.volts))
+                                .monospace()
+                                .size(11.5),
                         );
                     });
                 });
             }
+            for power in &chip.power {
+                any = true;
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} · {}", chip.name, power.label))
+                            .color(cx.palette.muted)
+                            .size(11.0),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let value = match power.cap_watts {
+                            Some(cap) => format!("{:.1} W · cap {:.0} W", power.watts, cap),
+                            None => format!("{:.1} W", power.watts),
+                        };
+                        ui.label(RichText::new(value).monospace().size(11.5));
+                    });
+                });
+            }
+        }
+        // Drives report temperatures only through the `drivetemp`
+        // (SATA) or `nvme` hwmon drivers — when neither is loaded but
+        // disks exist, say what would unlock them instead of showing
+        // silently less (the never-hide-a-degraded-mode rule).
+        let has_drive_chip = sensors
+            .chips
+            .iter()
+            .any(|chip| chip.name == "drivetemp" || chip.name == "nvme");
+        if !has_drive_chip
+            && cx.snapshot.disks.as_ref().is_some_and(|disks| !disks.is_empty())
+        {
+            ui.label(
+                RichText::new(
+                    "Drive temperatures appear once the kernel's drivetemp \
+                     module is loaded (modprobe drivetemp).",
+                )
+                .color(cx.palette.muted)
+                .italics()
+                .size(11.0),
+            );
         }
         if let Some(battery) = &sensors.battery {
             any = true;

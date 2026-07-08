@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText, ViewportBuilder, ViewportCommand, ViewportId};
@@ -56,6 +56,16 @@ pub struct SharedUi {
     /// The main window's outer rect (screen coords) — the drag-dock
     /// target the pop-outs test against.
     pub main_window_rect: Mutex<Option<egui::Rect>>,
+    /// The adapter the window renders on, set once at startup.
+    /// `degraded` = a CPU rasterizer (llvmpipe): the app still runs,
+    /// but slower and hungrier than it should be — `status` and the
+    /// startup toast say so out loud (never silently slow).
+    pub renderer: OnceLock<RendererInfo>,
+}
+
+pub struct RendererInfo {
+    pub description: String,
+    pub degraded: bool,
 }
 
 impl SharedUi {
@@ -68,6 +78,7 @@ impl SharedUi {
             connections_wanted: AtomicBool::new(false),
             open_viewports: Mutex::new(Vec::new()),
             main_window_rect: Mutex::new(None),
+            renderer: OnceLock::new(),
         }
     }
 }
@@ -175,6 +186,36 @@ impl SysMonApp {
     ) -> Self {
         spawn_sampler(cc.egui_ctx.clone(), shared.clone());
         let (toast_tx, toast_rx) = std::sync::mpsc::channel();
+
+        // Name the adapter the window landed on. A CPU rasterizer
+        // (llvmpipe — no usable Vulkan driver) still works, but slow
+        // and CPU-hungry; a monitor must never be mysteriously slow,
+        // so the degraded mode is disclosed: stderr with a fix, a
+        // toast in the window, and `status` on the wire.
+        if let Some(render_state) = &cc.wgpu_render_state {
+            let info = render_state.adapter.get_info();
+            let degraded = info.device_type == wgpu::DeviceType::Cpu;
+            let description = format!("{} · {:?}", info.name, info.backend);
+            if degraded {
+                eprintln!(
+                    "sysmon: rendering on a CPU rasterizer ({description}) — \
+                     no GPU acceleration, the window costs more CPU than it should"
+                );
+                eprintln!(
+                    "fix: install Vulkan drivers for this GPU (e.g. mesa-vulkan-drivers), \
+                     then relaunch"
+                );
+                let _ = toast_tx.send(
+                    "No GPU acceleration — rendering on the CPU. \
+                     Vulkan drivers would fix this."
+                        .to_string(),
+                );
+            }
+            let _ = shared.renderer.set(RendererInfo {
+                description,
+                degraded,
+            });
+        }
 
         // The table's sort choice survives restarts.
         let mut table_state = ProcessTableState::default();

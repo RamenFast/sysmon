@@ -340,7 +340,7 @@ fn build_schema() -> Value {
             "disks": "[{device, mount_point, display_name (label if any), fs_type, read_bps, write_bps, used_bytes, total_bytes, util_percent}] — real block devices, deduped",
             "processes": "[{pid, ppid, name, user, state, state_word, is_kernel_thread, cpu_percent (can exceed 100 when multithreaded), memory_rss_bytes, memory_virtual_bytes, threads, nice, started_ts, cpu_time_seconds, disk_read_bps?, disk_write_bps? (None = unreadable, not zero), gpu_busy_percent, gpu_vram_bytes, net_rx_bps?, net_tx_bps?, command_line, exe_basename?}]",
             "sensors": {
-                "chips": "[{name, temps: [{label, celsius, max_celsius?, crit_celsius?}], fans: [{label, rpm}]}] — every hwmon chip",
+                "chips": "[{name, device? (block dev a drive chip measures, e.g. sda), device_model?, temps: [{label, celsius, max_celsius?, crit_celsius?}], fans: [{label, rpm, max_rpm?}], voltages?: [{label, volts}], power?: [{label, watts, cap_watts?}]}] — every hwmon chip (indices scanned, gaps honored)",
                 "battery": "{name, percent, status, power_draw_watts?, seconds_remaining?} when present",
             },
             "connections": "[{pid (-1 = unresolved), process_name?, protocol tcp|tcp6|udp|udp6, local_address, remote_address, state, rx_bps?, tx_bps? (TCP only)}] — the full socket table",
