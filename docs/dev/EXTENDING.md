@@ -142,12 +142,13 @@ section that exists on the wire but not in the UI (or vice versa).
 
 ## Recipe 5 — add a process-table column
 
-- ▸ 📁 `crates/sysmon-app/src/gui/processes.rs` — four places:
-  `SortColumn` enum · the `columns` array (title, sort id, width —
-  ⚠ bump its `[…; N]` length) · a compare arm in `sort_records`
-  (default sort direction for the column lives in `header_cell`'s
-  descending-set) · the row cell in body order (cells MUST stay in
-  column-array order — there's no keying, order is the contract).
+- ▸ 📁 `crates/sysmon-app/src/gui/processes.rs` — five places:
+  `SortColumn` enum · its `id()`/`from_id()` maps (stable settings
+  ids) · the `columns` array (title, sort id, width — ⚠ bump its
+  `[…; N]` length) · a compare arm in `sort_records` (default sort
+  direction lives in `SortColumn::defaults_descending`) · the row
+  cell in body order (cells MUST stay in column-array order —
+  there's no keying, order is the contract).
 - ▸ Numeric cells: right-aligned mono via `mono_cell`; blank noise
   below a threshold with `blank_under`; `None` renders "—" (means
   unreadable) vs "" (means zero/noise) — keep that distinction.

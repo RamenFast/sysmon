@@ -1,9 +1,13 @@
 # HANDOFF — SysMon
 
-**Era: v2.1.0** (2026-07-07) — the Rust rewrite plus the ten-room
-theme set; releases now cut per main commit via scripts/release.sh. The
-Python/GTK3 v1 lives at tag `v1.0.0`; nothing of it remains in the
-tree.
+**Era: v2.2.0** (2026-07-07) — Ben's first-feedback release: fully
+sortable table (any column, ▲▼ affordance, persisted), horizontal
+table scroll, phosphor's pin button (animated carve + `P`),
+theme-carved scrollbars, hover-lit menu rows, "Open in process
+viewer" from anywhere, and Ctrl+click multi-select (≤5) feeding a
+combined-details window with per-metric share bars. Before that:
+v2.1.0 ten-room theme set; the Rust rewrite. The Python/GTK3 v1
+lives at tag `v1.0.0`; nothing of it remains in the tree.
 
 ## What this is now
 
@@ -57,6 +61,23 @@ then `scripts/release.sh <notes-file>` tags, builds deb + rpm +
 source tarball + SHA256SUMS, publishes the GitHub release, and
 prints the local install command. main never carries an unreleased
 version. Version law: workspace == `--version` == filenames == tag.
+
+## 2.2 load-bearing details
+
+- **Selection colors ARE the graph palette's five series** — slot i
+  of the multi-selection wears series color i everywhere (row tint,
+  overview rows, combined window chips + share bars). Changing the
+  graph palette recolors the selection; that identity is the point.
+- **Menus use custom rows** (`cards.rs::menu_option_row/chip/
+  check_row`), not egui radios — egui radios paint no hover at all
+  (Ben's complaint). Hover glow everywhere else comes from
+  `hovered.weak_bg_fill` (theme.rs), which egui menu buttons use.
+- **Scrollbars are solid + carved**: handle = `widgets.*.bg_fill`
+  (stone / stone_hi / accent), rail = `extreme_bg_color`. Floating
+  overlay bars are gone on purpose.
+- **The table lives in a horizontal ScrollArea** — inside it,
+  `Column::remainder()` would see unbounded width, so the Command
+  column takes the viewport-derived spare width at build time.
 
 ## Known edges & next-session ideas
 

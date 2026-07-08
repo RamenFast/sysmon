@@ -29,6 +29,10 @@ pub struct Settings {
     pub popped_out_sections: Vec<String>,
     pub window_width: i32,
     pub window_height: i32,
+    /// Process-table sort choice (stable column ids from
+    /// `SortColumn::id`); new in 2.2 — absent in older files.
+    pub sort_column: String,
+    pub sort_descending: bool,
 }
 
 impl Default for Settings {
@@ -46,6 +50,8 @@ impl Default for Settings {
             popped_out_sections: Vec::new(),
             window_width: 430,
             window_height: 780,
+            sort_column: "cpu".to_string(),
+            sort_descending: true,
         }
     }
 }
@@ -97,6 +103,11 @@ impl Settings {
             .popped_out_sections
             .retain(|key| SECTION_KEYS.contains(&key.as_str()));
         settings.update_interval_seconds = settings.update_interval_seconds.clamp(0.5, 60.0);
+        // An edited/future sort id falls back gently (the app also
+        // validates through SortColumn::from_id at startup).
+        if super::processes::SortColumn::from_id(&settings.sort_column).is_none() {
+            settings.sort_column = Settings::default().sort_column;
+        }
         Some(settings)
     }
 
@@ -143,6 +154,21 @@ mod tests {
         assert_eq!(settings.window_width, 428);
         // sensors is new in v2 — must default visible.
         assert!(settings.section_visible("sensors"));
+        // sort persistence is new in 2.2 — must default sanely.
+        assert_eq!(settings.sort_column, "cpu");
+        assert!(settings.sort_descending);
+    }
+
+    #[test]
+    fn sort_preference_round_trips_and_validates() {
+        let json = r#"{"settings_version": 2, "sort_column": "vram", "sort_descending": false}"#;
+        let settings = Settings::from_json(json).expect("parses");
+        assert_eq!(settings.sort_column, "vram");
+        assert!(!settings.sort_descending);
+
+        let junk = r#"{"settings_version": 2, "sort_column": "no_such_column"}"#;
+        let settings = Settings::from_json(junk).expect("parses");
+        assert_eq!(settings.sort_column, "cpu", "unknown sort id falls back");
     }
 
     #[test]

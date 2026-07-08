@@ -34,6 +34,9 @@ pub struct CardContext<'a> {
     pub icon_cache: &'a mut IconCache,
     pub actions: &'a mut Vec<AppAction>,
     pub popped_out: &'a [String],
+    /// The app-wide multi-selection (shared with the process table) —
+    /// Ctrl+click on any top-process row joins it.
+    pub selected: &'a mut Vec<i32>,
 }
 
 /// Deferred effects a frame's widgets request.
@@ -41,10 +44,40 @@ pub struct CardContext<'a> {
 pub enum AppAction {
     TogglePopOut(&'static str),
     OpenDetails(i32),
+    /// Combined details for a multi-selection (≤ MAX_SELECTED pids).
+    OpenCombinedDetails(Vec<i32>),
+    /// Jump to the Processes page with this pid selected + scrolled to.
+    RevealInProcesses(i32),
     ConfirmTerminate(i32, String),
     ConfirmKill(i32, String),
     SetPriority(i32, String, i32),
     CopyPid(i32),
+    /// Surface a short toast (selection full, etc.).
+    Notify(String),
+}
+
+/// The multi-select ceiling (Ben's spec: up to 5) — also exactly the
+/// number of semantic series colors a graph palette carries, so every
+/// selected process owns a stable color.
+pub const MAX_SELECTED: usize = 5;
+
+/// The color a selected process wears everywhere (row tint, combined
+/// details): its slot in the active graph palette's five series.
+pub fn selection_color(graph_palette_id: &str, dark: bool, slot: usize) -> Color32 {
+    graph_color(graph_palette_id, slot.min(MAX_SELECTED - 1), dark)
+}
+
+/// Toggle a pid in the shared multi-selection, honoring the ceiling.
+pub fn toggle_selection(selected: &mut Vec<i32>, pid: i32, actions: &mut Vec<AppAction>) {
+    if let Some(index) = selected.iter().position(|p| *p == pid) {
+        selected.remove(index);
+    } else if selected.len() < MAX_SELECTED {
+        selected.push(pid);
+    } else {
+        actions.push(AppAction::Notify(format!(
+            "Selection is full ({MAX_SELECTED}) — deselect one first (Ctrl+click)"
+        )));
+    }
 }
 
 // ---------------------------------------------------------------- glyphs
@@ -73,20 +106,29 @@ pub fn glyph_button(
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tooltip)
     });
     if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
         let hovered = response.hovered();
+        let pressed = response.is_pointer_button_down_on();
         let stroke_color = if active {
-            palette.accent
+            palette.on_accent.lerp_to_gamma(palette.accent, 0.35)
         } else if hovered {
             palette.ink
         } else {
             palette.ink_2
         };
-        // Carved stone: these are the few controls that earn depth
-        // (house rule — dimension encodes importance; the shape never
-        // changes, the surface does). Pressed or active = sunk in.
-        let sunk = active || response.is_pointer_button_down_on();
-        painter.rect_filled(rect, 0.0, palette.stone);
+        // Carved stone, phosphor's bevel_toggle feel (ported at Ben's
+        // ask): the face EASES toward the accent on hover/active —
+        // short, purposeful animation — and the glyph nudges 1px when
+        // pressed. Dimension encodes importance; the shape never
+        // changes, the surface does. Pressed or active = sunk in.
+        let active_mix = ui.ctx().animate_bool(response.id, active) * 0.30;
+        let hover_mix =
+            ui.ctx().animate_bool(response.id.with("hover"), hovered) * 0.10;
+        let face = palette
+            .stone
+            .lerp_to_gamma(palette.accent, (active_mix + hover_mix).min(0.38));
+        let painter = ui.painter();
+        let sunk = active || pressed;
+        painter.rect_filled(rect, 0.0, face);
         let (top_left, bottom_right) = if sunk {
             (palette.stone_lo, palette.stone_hi) // inset
         } else {
@@ -99,15 +141,6 @@ pub fn glyph_button(
         edge(rect.left_top(), rect.left_bottom(), top_left);
         edge(rect.left_bottom(), rect.right_bottom(), bottom_right);
         edge(rect.right_top(), rect.right_bottom(), bottom_right);
-        if active {
-            painter.rect_filled(
-                rect.shrink(1.0),
-                0.0,
-                palette.accent.gamma_multiply(0.16),
-            );
-        } else if hovered {
-            painter.rect_filled(rect.shrink(1.0), 0.0, palette.ink.gamma_multiply(0.05));
-        }
         painter.rect_stroke(
             rect,
             0.0,
@@ -115,7 +148,8 @@ pub fn glyph_button(
             StrokeKind::Inside,
         );
         let stroke = Stroke::new(1.4, stroke_color);
-        let center = rect.center();
+        let nudge = if pressed { vec2(1.0, 1.0) } else { vec2(0.0, 0.0) };
+        let center = rect.center() + nudge;
         match glyph {
             Glyph::Pause => {
                 for offset in [-2.5f32, 2.5] {
@@ -140,10 +174,27 @@ pub fn glyph_button(
                 ));
             }
             Glyph::Pin => {
-                painter.circle_stroke(pos2(center.x, center.y - 2.0), 3.0, stroke);
+                // Phosphor's push-pin, hand-painted (its icon font
+                // would tofu here): diagonal thumbtack — round head
+                // upper-right, shoulder plate, needle to lower-left.
                 painter.line_segment(
-                    [pos2(center.x, center.y + 1.0), pos2(center.x, center.y + 5.0)],
+                    [
+                        pos2(center.x - 4.6, center.y + 4.6),
+                        pos2(center.x - 1.4, center.y + 1.4),
+                    ],
                     stroke,
+                );
+                painter.line_segment(
+                    [
+                        pos2(center.x - 3.4, center.y - 0.6),
+                        pos2(center.x + 0.6, center.y + 3.4),
+                    ],
+                    stroke,
+                );
+                painter.circle_filled(
+                    pos2(center.x + 2.1, center.y - 2.1),
+                    2.4,
+                    stroke_color,
                 );
             }
             Glyph::Menu => {
@@ -166,6 +217,119 @@ pub fn glyph_button(
         }
     }
     response.on_hover_text(tooltip)
+}
+
+// ------------------------------------------------------------- menu rows
+
+#[derive(Clone, Copy, PartialEq)]
+enum MenuMark {
+    Radio,
+    Check,
+}
+
+/// One hover-lit menu item: full-width (or chip-sized) hit target, an
+/// eased ink glow under the pointer (the effect Ben asked for — bare
+/// egui radios paint nothing on hover), a sharp engraved mark, and an
+/// accent spine on the selected row.
+fn menu_item(
+    ui: &mut Ui,
+    palette: &Palette,
+    selected: bool,
+    label: &str,
+    mark: MenuMark,
+    full_width: bool,
+) -> egui::Response {
+    let text_color = if selected { palette.ink } else { palette.ink_2 };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::proportional(12.5),
+        text_color,
+    );
+    let mark_span = 17.0;
+    let intrinsic = galley.size().x + mark_span + 10.0;
+    let width = if full_width {
+        ui.available_width().max(intrinsic)
+    } else {
+        intrinsic
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 19.0), Sense::click());
+    let label_owned = label.to_string();
+    response.widget_info(move || {
+        egui::WidgetInfo::selected(
+            match mark {
+                MenuMark::Radio => egui::WidgetType::RadioButton,
+                MenuMark::Check => egui::WidgetType::Checkbox,
+            },
+            true,
+            selected,
+            label_owned.clone(),
+        )
+    });
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let hover_t = ui
+            .ctx()
+            .animate_bool(response.id.with("hover"), response.hovered());
+        if hover_t > 0.0 {
+            painter.rect_filled(rect, 0.0, palette.ink.gamma_multiply(0.08 * hover_t));
+        }
+        if selected && full_width {
+            painter.rect_filled(
+                Rect::from_min_max(rect.min, pos2(rect.min.x + 2.0, rect.max.y)),
+                0.0,
+                palette.accent,
+            );
+        }
+        let mark_rect =
+            Rect::from_center_size(pos2(rect.min.x + 10.0, rect.center().y), vec2(8.0, 8.0));
+        let frame_color = if selected {
+            palette.accent
+        } else {
+            palette.line_strong
+        };
+        painter.rect_stroke(mark_rect, 0.0, Stroke::new(1.0, frame_color), StrokeKind::Inside);
+        if selected {
+            match mark {
+                MenuMark::Radio => {
+                    painter.rect_filled(mark_rect.shrink(2.5), 0.0, palette.accent);
+                }
+                MenuMark::Check => {
+                    let check = Stroke::new(1.4, palette.accent);
+                    let low = pos2(mark_rect.center().x - 0.8, mark_rect.max.y - 2.2);
+                    painter.line_segment(
+                        [pos2(mark_rect.min.x + 1.6, mark_rect.center().y + 0.4), low],
+                        check,
+                    );
+                    painter.line_segment(
+                        [low, pos2(mark_rect.max.x - 1.4, mark_rect.min.y + 1.6)],
+                        check,
+                    );
+                }
+            }
+        }
+        let text_pos = pos2(
+            rect.min.x + mark_span + 3.0,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        painter.galley(text_pos, galley, text_color);
+    }
+    response
+}
+
+/// Full-width single-choice row (theme list and friends).
+pub fn menu_option_row(ui: &mut Ui, palette: &Palette, selected: bool, label: &str) -> egui::Response {
+    menu_item(ui, palette, selected, label, MenuMark::Radio, true)
+}
+
+/// Chip-sized single-choice item for horizontal groups (units,
+/// intervals, graph palettes).
+pub fn menu_chip(ui: &mut Ui, palette: &Palette, selected: bool, label: &str) -> egui::Response {
+    menu_item(ui, palette, selected, label, MenuMark::Radio, false)
+}
+
+/// Full-width toggle row; returns the response — callers flip on click.
+pub fn menu_check_row(ui: &mut Ui, palette: &Palette, checked: bool, label: &str) -> egui::Response {
+    menu_item(ui, palette, checked, label, MenuMark::Check, true)
 }
 
 // ------------------------------------------------------------ card chrome
@@ -282,8 +446,25 @@ fn top_process_row(
     let full_width = ui.available_width();
     let (rect, response) =
         ui.allocate_exact_size(vec2(full_width, row_height), Sense::click());
+    // Assistive tech (and kittest) sees each row as a named button.
+    let a11y_label = format!("{} — PID {}", record.name, record.pid);
+    response.widget_info(move || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, a11y_label.clone())
+    });
     if !ui.is_rect_visible(rect) {
         return;
+    }
+    // Multi-selected rows wear their slot color (the same color the
+    // combined-details window uses for this process).
+    let selection_slot = cx.selected.iter().position(|p| *p == record.pid);
+    if let Some(slot) = selection_slot {
+        let color = selection_color(cx.graph_palette_id, cx.palette.dark, slot);
+        ui.painter().rect_filled(rect, 0.0, color.gamma_multiply(0.12));
+        ui.painter().rect_filled(
+            Rect::from_min_max(rect.min, pos2(rect.min.x + 3.0, rect.max.y)),
+            0.0,
+            color,
+        );
     }
     if response.hovered() {
         ui.painter()
@@ -342,11 +523,19 @@ fn top_process_row(
         cx.palette.ink,
     );
 
-    let response = response.on_hover_text(format!("PID {}", record.pid));
+    let response = response.on_hover_text(format!(
+        "PID {} — click for details, Ctrl+click to multi-select",
+        record.pid
+    ));
     if response.clicked() {
-        cx.actions.push(AppAction::OpenDetails(record.pid));
+        let modifiers = ui.input(|input| input.modifiers);
+        if modifiers.command || modifiers.ctrl {
+            toggle_selection(cx.selected, record.pid, cx.actions);
+        } else {
+            cx.actions.push(AppAction::OpenDetails(record.pid));
+        }
     }
-    process_context_menu(&response, cx.actions, record);
+    process_context_menu(&response, cx.actions, record, cx.selected, false);
 }
 
 fn truncate_to_width(text: &str, width: f32, per_char: f32) -> String {
@@ -360,21 +549,37 @@ fn truncate_to_width(text: &str, width: f32, per_char: f32) -> String {
     }
 }
 
-/// The shared right-click menu (top-3 rows and the process table).
+/// The shared right-click menu (top-3 rows, the process table, and
+/// the combined-details blocks). `in_process_table` hides the "Open
+/// in process viewer" jump when the row already lives there.
 pub fn process_context_menu(
     response: &egui::Response,
     actions: &mut Vec<AppAction>,
     record: &ProcessRecord,
+    selected: &[i32],
+    in_process_table: bool,
 ) {
     let pid = record.pid;
     let name = record.name.clone();
     let nice = record.nice;
+    let combined: Option<Vec<i32>> = (selected.len() >= 2 && selected.contains(&pid))
+        .then(|| selected.to_vec());
     response.context_menu(|ui| {
         ui.label(
             RichText::new(format!("{name}  (PID {pid})"))
                 .monospace()
                 .size(11.5),
         );
+        if let Some(pids) = &combined {
+            ui.separator();
+            if ui
+                .button(format!("Combined details ({} selected)…", pids.len()))
+                .clicked()
+            {
+                actions.push(AppAction::OpenCombinedDetails(pids.clone()));
+                ui.close();
+            }
+        }
         ui.separator();
         if ui.button("End process").clicked() {
             actions.push(AppAction::ConfirmTerminate(pid, name.clone()));
@@ -403,6 +608,10 @@ pub fn process_context_menu(
         ui.separator();
         if ui.button("Details…").clicked() {
             actions.push(AppAction::OpenDetails(pid));
+            ui.close();
+        }
+        if !in_process_table && ui.button("Open in process viewer").clicked() {
+            actions.push(AppAction::RevealInProcesses(pid));
             ui.close();
         }
         if ui.button("Copy PID").clicked() {

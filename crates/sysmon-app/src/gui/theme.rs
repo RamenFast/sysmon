@@ -373,6 +373,31 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     widgets.hovered.expansion = 0.0;
     widgets.active.expansion = 0.0;
 
+    // Hovering any menu/list item must SHOW (Ben's feedback): egui
+    // paints menu-button hover with `hovered.weak_bg_fill`, which was
+    // identical to the resting fill — invisible. A translucent ink
+    // tint reads on every palette, dark or light.
+    widgets.hovered.weak_bg_fill = palette.ink.gamma_multiply(0.08);
+    widgets.active.weak_bg_fill = palette.ink.gamma_multiply(0.14);
+
+    // Scrollbars are chrome, so they wear the room's tokens: solid
+    // carved rail (recessed surface), stone handle, accent while
+    // dragged. The egui default is a floating overlay whose colors
+    // ignore the palette — the one un-themed element Ben could see.
+    // (`bg_fill` is what a solid-mode handle is painted with.)
+    widgets.inactive.bg_fill = palette.stone;
+    widgets.hovered.bg_fill = palette.stone_hi;
+    widgets.active.bg_fill = palette.accent;
+    style.spacing.scroll = egui::style::ScrollStyle {
+        floating: false,
+        bar_width: 8.0,
+        bar_inner_margin: 4.0,
+        bar_outer_margin: 0.0,
+        handle_min_length: 24.0,
+        foreground_color: false,
+        ..egui::style::ScrollStyle::solid()
+    };
+
     // Data app: monospace numbers everywhere they matter.
     use egui::{FontFamily, FontId, TextStyle};
     style.text_styles.insert(

@@ -59,11 +59,24 @@ main window docks it back**. Pop-outs are remembered across launches.
 
 The Processes page: icon, name, PID, user, CPU %, memory, GPU %,
 VRAM, disk R/W, **net ↓/↑**, threads, priority, state, age, command —
-sortable, filterable (Ctrl+F), with end/kill/renice (pkexec ladder
-for the privileged cases) and a per-process **details window with the
-live connection list**.
+**every column sorts** (whole-header click targets with a ▲▼
+affordance, the choice survives restarts), the table **scrolls
+horizontally** when the columns outgrow the window, filterable
+(Ctrl+F), with end/kill/renice (pkexec ladder for the privileged
+cases) and a per-process **details window with the live connection
+list**. Right-clicking a process anywhere else in the app offers
+**"Open in process viewer"** — the table opens scrolled to it.
+
+**Ctrl+click selects up to five processes** (table or overview rows —
+each wears its own color); right-click → *Combined details* or the
+toolbar's *Compare* button opens one window with their **summed
+usage**, per-metric **share bars** in the selection colors, and a
+color-coded block per process.
 
 ![processes](docs/screenshot-processes.png)
+
+![combined details](docs/screenshot-combined.png)
+*Three processes compared: the share bars say who owns how much.*
 
 ## The API
 
@@ -110,10 +123,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_2.1.0_amd64.deb
+sudo apt install ./sysmon_2.2.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-2.1.0-1.x86_64.rpm
+sudo dnf install ./sysmon-2.2.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -123,7 +136,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 2.1.0 (v2)`.
+Verify: `sysmon --version` → `sysmon 2.2.0 (v2)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully.
