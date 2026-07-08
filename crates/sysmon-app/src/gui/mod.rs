@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The GUI: eframe shell over the shared sampler state. `run` is the
-//! binary's default command; a plain re-launch raises the running
-//! instance (exit 0), and a running `sysmon serve` hands the socket
-//! over to the GUI (the GUI answers everything serve did, plus verbs).
+//! binary's default command; a plain re-launch raises a same-version
+//! running instance (exit 0) and REPLACES an older one (upgrade day:
+//! the freshly installed binary must be the one on screen), and a
+//! running `sysmon serve` hands the socket over to the GUI (the GUI
+//! answers everything serve did, plus verbs).
 
 pub mod actions;
 pub mod app;
@@ -43,23 +45,39 @@ fn app_icon() -> Option<egui::IconData> {
 }
 
 /// Bind the control socket, negotiating with whoever holds it:
-/// another GUI → raise it and exit 0; a serve daemon → ask it to
-/// quit and take over (the GUI is a superset).
+/// a same-version GUI → raise it and exit 0; an OLDER GUI (upgrade
+/// day: the deb was installed while the old window was up) → ask it
+/// to quit and take over, so a plain relaunch always shows the
+/// version you just installed; a serve daemon → quit + take over
+/// (the GUI is a superset).
 fn negotiate_socket(backend: Arc<backend::GuiBackend>) -> Result<Option<ControlServer>, i32> {
-    for attempt in 0..2 {
+    // A GUI teardown (wgpu + viewports) takes longer than serve's —
+    // give the old owner a few grace windows before giving up.
+    const ATTEMPTS: u32 = 4;
+    for attempt in 0..ATTEMPTS {
         match ControlServer::bind(backend.clone()) {
             Ok(server) => return Ok(Some(server)),
             Err(BindError::AlreadyRunning(status)) => {
                 let owner_mode = status["result"]["mode"].as_str().unwrap_or("?").to_string();
-                if owner_mode == "gui" {
+                let owner_version =
+                    status["result"]["version"].as_str().unwrap_or("?").to_string();
+                if owner_mode == "gui" && owner_version == sysmon_core::VERSION {
                     let _ = control::request(&json!({"verb": "raise"}));
                     println!("sysmon: raised the running instance");
                     return Err(EXIT_OK);
                 }
-                // serve (or something unreachable): ask it to leave.
+                if owner_mode == "gui" && attempt == 0 {
+                    println!(
+                        "sysmon: replacing the running {owner_version} instance \
+                         with {}",
+                        sysmon_core::VERSION
+                    );
+                }
+                // serve, an older GUI, or something unreachable:
+                // ask it to leave and take the socket over.
                 let _ = control::request(&json!({"verb": "quit"}));
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                if attempt == 1 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if attempt == ATTEMPTS - 1 {
                     eprintln!("sysmon: the control socket is held by `{owner_mode}` and won't yield");
                     eprintln!("fix: `sysmon ctl quit`, then relaunch");
                     return Err(EXIT_UNAVAILABLE);

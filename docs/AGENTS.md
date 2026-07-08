@@ -90,9 +90,12 @@ sysmon --background &              # full GUI on a private Xvfb — no window on
 ```
 
 Single-owner socket at `$XDG_RUNTIME_DIR/sysmon/ctl.sock`: a plain
-`sysmon` launch while one runs **raises the running instance and
-exits 0**; a launching GUI asks a running `serve` to hand over; a
-second `serve` exits 2 naming the owner.
+`sysmon` launch while a **same-version** GUI runs raises it and
+exits 0; if the running GUI is **older** (upgrade day: deb installed
+while the old window was up) the new binary asks it to quit and
+takes over, so a relaunch always shows the installed version; a
+launching GUI asks a running `serve` to hand over; a second `serve`
+exits 2 naming the owner.
 
 Raw socket, no CLI:
 

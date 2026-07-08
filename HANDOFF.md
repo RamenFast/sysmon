@@ -16,7 +16,8 @@ One binary (`crates/sysmon-app`, lib + bin) over one engine
 `probe`/`tap`/`ctl`/`schema`/`serve`/`--background` on the phosphor
 contract (JSON envelopes, errors carry `fix`, exit 0/2/3/4, control
 socket at `$XDG_RUNTIME_DIR/sysmon/ctl.sock`, single owner, plain
-relaunch raises). Ten palettes (Blossom Dark default; `amoled` is
+relaunch raises a same-version GUI and replaces an older one —
+upgrade day always shows the installed version). Ten palettes (Blossom Dark default; `amoled` is
 v1's true-black look and v1 settings migrate to it; paper/basalt/
 amber/chromacore are the distinct-room additions), stone-carved
 primary controls, sharp corners everywhere.
