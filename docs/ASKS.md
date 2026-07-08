@@ -15,9 +15,17 @@ era first, with where it landed. Bugs rediscover themselves here.*
 | 6 | "Multi select (≤5), right click Details → combined meta overview, color/icon coded per process" | Ctrl+click / Shift+range in table + overview rows; Compare button; combined window: summed metrics + per-metric share bars + color-spined per-process blocks (`details.rs::combined_details_window`) |
 | 7 | "Menu options have no hover effect" | custom hover-lit menu rows/chips + `hovered.weak_bg_fill` ink tint for stock menu buttons (`cards.rs::menu_item`, `theme.rs`) |
 
+## 2026-07-07 · v2.2.1 round
+
+| # | ask | landed |
+|---|---|---|
+| 8 | same seven, re-sent | diagnosis, not re-implementation: all seven live in 2.2.0; Ben's settings carried `show_pin_button:false` from an earlier era (hiding the new pin), and upgrade-day left a plain relaunch raising the OLD binary. Fixed: relaunch now replaces an older running GUI (`gui/mod.rs::negotiate_socket` compares `status.version`) |
+| 9 | "README should always be sharp and consistent — not a journal" | README feature prose collapsed into the standing description, extra screenshot embed dropped; rule encoded in the `ben-repo-packaging-preferences` skill (what-changed narrative → release notes / HANDOFF / docs/dev only) |
+| 10 | "only one branch (main/master) by the end" | standing law (AGENTS.md §4) — work branch folded after every merge |
+
 Standing (memory + AGENTS.md): always push GitHub · one working
 branch at a time · deb+rpm every release · install the fresh deb on
-Ben's machine.
+Ben's machine · README stays evergreen.
 
 ## Earlier eras
 

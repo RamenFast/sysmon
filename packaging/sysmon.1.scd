@@ -30,8 +30,9 @@ networking first — without scraping a UI.
 # COMMANDS
 
 *sysmon*
-	Launch the GUI (the default command). If an instance is already
-	running, raise it and exit 0.
+	Launch the GUI (the default command). If a same-version instance
+	is already running, raise it and exit 0; an older instance (left
+	up across an upgrade) is asked to quit and replaced.
 
 *sysmon --background*
 	Run the GUI on a private Xvfb display: it renders and serves the
