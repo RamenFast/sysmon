@@ -1,58 +1,76 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     viewBox="0 0 256 256" width="256" height="256">
+  <!-- SysMon icon: a monitor carrying two phosphor traces (P7-green
+       CPU spikes, blossom-pink baseline — the app's default accent),
+       inspected by a glowing ice-blue magnifying glass whose lens
+       shows the traces magnified 1.6x. Phosphor's art language:
+       CRT-black ground, sharp corners, neutral hairline frame,
+       two-layer traces (saturated halo UNDER a bright core). The
+       waveforms are SEMANTICALLY open (they run off both screen
+       edges); every other figure closes. -->
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3a4148"/>
-      <stop offset="1" stop-color="#22272c"/>
-    </linearGradient>
-    <linearGradient id="chassis" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#c3cad2"/>
-      <stop offset="1" stop-color="#939ba5"/>
-    </linearGradient>
-    <linearGradient id="lens-glass" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#9adeff" stop-opacity="0.30"/>
-      <stop offset="1" stop-color="#46c2ff" stop-opacity="0.10"/>
-    </linearGradient>
+    <filter id="halo" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="2.6"/>
+    </filter>
+    <filter id="core" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="0.55"/>
+    </filter>
+
+    <!-- green trace: a CPU-history spike line, baseline y=120,
+         endpoints ON the screen edges (x=40 and x=216) so nothing
+         dangles mid-air -->
+    <path id="g-cpu" d="M 36 120 L 56 120 L 64 96 L 72 128 L 84 88 L 92 116
+                        L 104 76 L 112 122 L 124 104 L 136 128 L 148 92
+                        L 160 118 L 172 84 L 184 126 L 200 108 L 220 112"/>
+
+    <!-- pink trace: the gentler baseline metric below -->
+    <path id="g-net" d="M 36 148 L 60 148 L 72 138 L 88 152 L 104 142
+                        L 120 154 L 136 140 L 152 152 L 168 144 L 184 154
+                        L 200 146 L 220 150"/>
+
+    <!-- the lens clip: everything magnified lives inside the glass -->
+    <clipPath id="lens">
+      <circle cx="164" cy="140" r="42"/>
+    </clipPath>
   </defs>
 
-  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#background)"
-        stroke="#11151a" stroke-width="4"/>
+  <rect width="256" height="256" fill="#050807"/>
+  <rect x="8" y="8" width="240" height="240" fill="none"
+        stroke="#2a3a32" stroke-width="1.5"/>
 
-  <!-- computer tower -->
-  <g>
-    <rect x="158" y="46" width="56" height="150" rx="9" fill="url(#chassis)"
-          stroke="#1b2026" stroke-width="5"/>
-    <line x1="168" y1="68" x2="204" y2="68" stroke="#3a4148" stroke-width="6" stroke-linecap="round"/>
-    <line x1="168" y1="84" x2="204" y2="84" stroke="#3a4148" stroke-width="6" stroke-linecap="round"/>
-    <circle cx="186" cy="112" r="7" fill="#2bb3e8"/>
-    <line x1="170" y1="160" x2="202" y2="160" stroke="#79828c" stroke-width="4" stroke-linecap="round"/>
-    <line x1="170" y1="172" x2="202" y2="172" stroke="#79828c" stroke-width="4" stroke-linecap="round"/>
+  <!-- ══ the hardware: monitor + stand, neutral, sharp corners ══ -->
+  <g fill="none" stroke="#5a7266" stroke-width="4.5">
+    <rect x="36" y="48" width="184" height="128"/>
+    <path d="M 118 176 L 118 192 L 138 192 L 138 176"/>
+    <path d="M 92 198 L 164 198"/>
   </g>
 
-  <!-- CRT monitor -->
-  <g>
-    <rect x="32" y="58" width="118" height="106" rx="12" fill="url(#chassis)"
-          stroke="#1b2026" stroke-width="5"/>
-    <rect x="46" y="72" width="90" height="76" rx="6" fill="#0d1418"
-          stroke="#1b2026" stroke-width="3"/>
-    <polyline points="54,128 72,112 86,120 102,96 116,106 128,86"
-              fill="none" stroke="#46c2ff" stroke-width="7"
-              stroke-linecap="round" stroke-linejoin="round"/>
-    <!-- stand -->
-    <rect x="72" y="164" width="38" height="12" fill="#79828c" stroke="#1b2026" stroke-width="4"/>
-    <rect x="56" y="176" width="70" height="14" rx="6" fill="url(#chassis)"
-          stroke="#1b2026" stroke-width="4"/>
+  <!-- ══ the screen: two phosphor traces ══ -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <use xlink:href="#g-cpu" stroke="#63ffa8" stroke-width="6.0" opacity="0.8" filter="url(#halo)"/>
+    <use xlink:href="#g-cpu" stroke="#baffd6" stroke-width="2.8" filter="url(#core)"/>
+    <use xlink:href="#g-net" stroke="#ec8fac" stroke-width="5.2" opacity="0.8" filter="url(#halo)"/>
+    <use xlink:href="#g-net" stroke="#ffd3e0" stroke-width="2.4" filter="url(#core)"/>
   </g>
 
-  <!-- magnifying glass -->
-  <g>
-    <line x1="86" y1="178" x2="46" y2="218" stroke="#1b2026" stroke-width="26" stroke-linecap="round"/>
-    <line x1="86" y1="178" x2="46" y2="218" stroke="#c9882a" stroke-width="17" stroke-linecap="round"/>
-    <circle cx="118" cy="146" r="44" fill="url(#lens-glass)"
-            stroke="#1b2026" stroke-width="21"/>
-    <circle cx="118" cy="146" r="44" fill="none"
-            stroke="#e9a83c" stroke-width="13"/>
-    <path d="M 92 128 A 32 32 0 0 1 116 114" fill="none" stroke="#ffffff"
-          stroke-opacity="0.55" stroke-width="7" stroke-linecap="round"/>
+  <!-- ══ the lens interior: glass tint, then the traces again at
+       1.6x about the lens centre — thicker, brighter, magnified ══ -->
+  <circle cx="164" cy="140" r="42" fill="#59bfff" opacity="0.07"/>
+  <g clip-path="url(#lens)" fill="none" stroke-linecap="round" stroke-linejoin="round"
+     transform="translate(164,140) scale(1.6) translate(-164,-140)">
+    <rect x="-20" y="-20" width="296" height="296" fill="#050807"/>
+    <use xlink:href="#g-cpu" stroke="#63ffa8" stroke-width="6.4" opacity="0.85" filter="url(#halo)"/>
+    <use xlink:href="#g-cpu" stroke="#d6ffe6" stroke-width="3.0" filter="url(#core)"/>
+    <use xlink:href="#g-net" stroke="#ec8fac" stroke-width="5.6" opacity="0.85" filter="url(#halo)"/>
+    <use xlink:href="#g-net" stroke="#ffe0ea" stroke-width="2.6" filter="url(#core)"/>
+  </g>
+
+  <!-- ══ the magnifying glass: ice-blue phosphor ring + handle
+       (the ring closes; the handle is a deliberate capsule) ══ -->
+  <g fill="none" stroke-linecap="round">
+    <circle cx="164" cy="140" r="42" stroke="#59bfff" stroke-width="8.5" opacity="0.8" filter="url(#halo)"/>
+    <circle cx="164" cy="140" r="42" stroke="#b3e2ff" stroke-width="4.0" filter="url(#core)"/>
+    <path d="M 195 169 L 226 200" stroke="#59bfff" stroke-width="13.0" opacity="0.8" filter="url(#halo)"/>
+    <path d="M 195 169 L 226 200" stroke="#b3e2ff" stroke-width="7.0" filter="url(#core)"/>
   </g>
 </svg>

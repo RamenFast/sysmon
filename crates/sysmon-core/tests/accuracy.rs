@@ -352,3 +352,60 @@ fn load_and_uptime_match_proc() {
         now
     );
 }
+
+#[test]
+fn sensor_channels_match_sysfs_files() {
+    // Identity: one reading per readable hwmon channel file, per
+    // family — temps/fans/voltages sum over `<prefix>N_input`,
+    // power over `powerN_average`-or-`powerN_input` (dedup, the
+    // collector's rule). Channel indices GAP (k10temp: temp1 Tctl,
+    // temp3 Tccd1, no temp2); counting files instead of counting up
+    // from 1 is exactly the regression this test pins.
+    let mut wants = Wants::none();
+    wants.sensors = true;
+    let sensors = sampled(wants, 0).sensors.expect("sensors");
+
+    let readable = |dir: &std::path::Path, prefix: &str, suffixes: &[&str]| -> usize {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut indices: Vec<u32> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let file = entry.file_name();
+                let file = file.to_string_lossy();
+                let rest = file.strip_prefix(prefix)?;
+                let index = suffixes
+                    .iter()
+                    .find_map(|suffix| rest.strip_suffix(suffix))?
+                    .parse::<u32>()
+                    .ok()?;
+                std::fs::read_to_string(entry.path()).ok().map(|_| index)
+            })
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        indices.len()
+    };
+
+    let mut expected_temps = 0;
+    let mut expected_fans = 0;
+    let mut expected_voltages = 0;
+    let mut expected_power = 0;
+    for entry in std::fs::read_dir("/sys/class/hwmon").expect("hwmon").flatten() {
+        let dir = entry.path();
+        expected_temps += readable(&dir, "temp", &["_input"]);
+        expected_fans += readable(&dir, "fan", &["_input"]);
+        expected_voltages += readable(&dir, "in", &["_input"]);
+        expected_power += readable(&dir, "power", &["_average", "_input"]);
+    }
+
+    let temps: usize = sensors.chips.iter().map(|chip| chip.temps.len()).sum();
+    let fans: usize = sensors.chips.iter().map(|chip| chip.fans.len()).sum();
+    let voltages: usize = sensors.chips.iter().map(|chip| chip.voltages.len()).sum();
+    let power: usize = sensors.chips.iter().map(|chip| chip.power.len()).sum();
+    assert_eq!(temps, expected_temps, "one TempReading per readable tempN_input");
+    assert_eq!(fans, expected_fans, "one FanReading per readable fanN_input");
+    assert_eq!(voltages, expected_voltages, "one VoltageReading per readable inN_input");
+    assert_eq!(power, expected_power, "one PowerReading per readable power channel");
+}

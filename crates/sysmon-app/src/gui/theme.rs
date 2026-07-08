@@ -381,19 +381,22 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     widgets.active.weak_bg_fill = palette.ink.gamma_multiply(0.14);
 
     // Scrollbars are chrome, so they wear the room's tokens: solid
-    // carved rail (recessed surface), stone handle, accent while
-    // dragged. The egui default is a floating overlay whose colors
-    // ignore the palette — the one un-themed element Ben could see.
-    // (`bg_fill` is what a solid-mode handle is painted with.)
-    widgets.inactive.bg_fill = palette.stone;
-    widgets.hovered.bg_fill = palette.stone_hi;
+    // recessed rail, INK handle, accent while dragged. Stone handles
+    // (v2.2.0) sat a few shades from the rail and vanished in every
+    // room (Ben: "hard af to see") — ink_2/ink are the palette's
+    // guaranteed-readable-on-surface tones, so the handle now holds
+    // text-grade contrast in all ten rooms by construction.
+    // (`bg_fill` is what a solid-mode handle is painted with; egui
+    // offers no handle stroke, so contrast is fill + width.)
+    widgets.inactive.bg_fill = palette.ink_2;
+    widgets.hovered.bg_fill = palette.ink;
     widgets.active.bg_fill = palette.accent;
     style.spacing.scroll = egui::style::ScrollStyle {
         floating: false,
-        bar_width: 8.0,
+        bar_width: 11.0,
         bar_inner_margin: 4.0,
         bar_outer_margin: 0.0,
-        handle_min_length: 24.0,
+        handle_min_length: 28.0,
         foreground_color: false,
         ..egui::style::ScrollStyle::solid()
     };

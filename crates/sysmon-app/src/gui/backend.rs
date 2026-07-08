@@ -72,11 +72,23 @@ impl Backend for GuiBackend {
     }
 
     fn status(&self) -> Value {
-        json!({
+        let mut payload = json!({
             "socket": socket_path(),
             "paused": self.shared.paused.load(Ordering::Relaxed),
             "interval_seconds": *self.shared.interval_seconds.lock().unwrap(),
-        })
+        });
+        // Disclosed like process_source/_hint: the hint key exists
+        // only in the degraded mode, and names the fix.
+        if let Some(renderer) = self.shared.renderer.get() {
+            payload["renderer"] = json!(renderer.description);
+            if renderer.degraded {
+                payload["renderer_hint"] = json!(
+                    "CPU rasterizer — no GPU acceleration; install Vulkan \
+                     drivers (e.g. mesa-vulkan-drivers) and relaunch"
+                );
+            }
+        }
+        payload
     }
 
     fn snapshot(&self, wants: Wants) -> Result<Value, VerbError> {

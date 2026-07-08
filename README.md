@@ -51,7 +51,7 @@ becomes.
 | **CPU** | overall + per-core bars, frequency + **range**, package temp, load, tasks, **ctx/s**, top-3 by CPU |
 | **Network** | live ↓/↑ (physical interfaces), totals, **per-interface rows with IPs and link speed**, top-3 by traffic with **↓/↑ split**, source disclosure |
 | **Disks** | every real mounted drive: label, R/W rates, **util %**, usage bar |
-| **Sensors** | every hwmon chip (CPU Tctl, NVMe, …), fans, battery when present |
+| **Sensors** | every hwmon chip, gaps and all (CPU Tctl *and* Tccd dies), **drive temps with the drive named** (`sda · KINGSTON…`, via drivetemp/nvme), fans with rated max, **voltage rails, power draw vs cap**, battery when present |
 
 Any card pops out into its own always-pinned window (⧉) — it keeps
 updating with the main window minimized, and **dropping it onto the
@@ -82,6 +82,11 @@ sysmon schema               # the machine-readable map of everything
 One envelope per reply, errors always carry a `fix`, exit codes
 0/2/3/4, JSON automatic when piped. The full contract with examples:
 [docs/API.md](docs/API.md), `man sysmon`, `sysmon schema`.
+
+Degraded modes are disclosed, never silent: if the window has to
+render without GPU acceleration (no usable Vulkan driver), it says
+so at startup and `ctl status` carries `renderer_hint` with the fix
+— a monitor is never allowed to be mysteriously slow.
 
 ### Per-process network without root
 
@@ -114,10 +119,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_2.2.1_amd64.deb
+sudo apt install ./sysmon_2.2.2_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-2.2.1-1.x86_64.rpm
+sudo dnf install ./sysmon-2.2.2-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -127,7 +132,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 2.2.1 (v2)`.
+Verify: `sysmon --version` → `sysmon 2.2.2 (v2)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully.

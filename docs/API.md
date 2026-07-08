@@ -67,6 +67,11 @@ GUI; `status snapshot subscribe pause resume interval quit` work on
 either the GUI or `sysmon serve`. With nothing running, ctl exits 2
 and the fix names your options.
 
+A GUI's `status` also names the adapter the window renders on
+(`renderer`); if it had to fall back to a CPU rasterizer (no usable
+Vulkan driver), `renderer_hint` appears and names the fix — degraded
+modes are disclosed, never silent.
+
 ## The socket
 
 `$XDG_RUNTIME_DIR/sysmon/ctl.sock` — one JSON object per line in,
