@@ -253,3 +253,33 @@ pub fn level_bar(ui: &mut Ui, palette: &Palette, fraction: f32, color: Color32) 
     painter.rect_filled(filled, 0.0, color.gamma_multiply(0.85));
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
 }
+
+/// A stacked share bar: each segment's width is its share of the
+/// summed values, in its own color — how the combined-details window
+/// shows who owns how much of each metric. Zero-sum renders the empty
+/// rail (honest: nothing to apportion).
+pub fn share_bar(ui: &mut Ui, palette: &Palette, segments: &[(Color32, f64)]) {
+    let height = 6.0;
+    let width = ui.available_width();
+    let (rect, _response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, palette.ink.gamma_multiply(0.08));
+    let total: f64 = segments.iter().map(|(_, value)| value.max(0.0)).sum();
+    if total > 0.0 {
+        let mut x = rect.min.x;
+        for (color, value) in segments {
+            let share = (value.max(0.0) / total) as f32;
+            let segment_width = rect.width() * share;
+            painter.rect_filled(
+                Rect::from_min_size(pos2(x, rect.min.y), vec2(segment_width, height)),
+                0.0,
+                color.gamma_multiply(0.85),
+            );
+            x += segment_width;
+        }
+    }
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
+}

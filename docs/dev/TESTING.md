@@ -42,11 +42,18 @@ Patterns to keep:
   where possible (e.g. panel_fill color after a theme switch).
 - One `#[test]` fn, sequential — harnesses mutate process-global
   env; parallel harnesses race.
+- After clicking anything animated (glyph buttons, menu rows — they
+  ease via `animate_bool` for ~0.1 s), use `run_steps(8)`, never
+  `run()`: `run()` demands quiescence within 4 steps and the easing
+  legitimately repaints for ~6.
+- `click_secondary()` opens context menus; `click_modifiers` does
+  Ctrl+click multi-select. Off-screen columns (horizontal scroll)
+  can't be clicked — `set_size` the harness wider first.
 
 ## The e2e script (`scripts/e2e.sh`)
 
 One command, full live receipts: boots Xvfb + openbox, launches the
-GUI with scratch config/socket, screenshots all 6 themes × 2 pages
+GUI with scratch config/socket, screenshots all 10 themes × 2 pages
 through `ctl shot`, opens a pop-out and **docks it by drag-drop**,
 checks single-instance raise, probe-via-socket, tap streaming, exit
 codes, clean socket removal. Screenshots land in the output dir —

@@ -18,11 +18,13 @@ use sysmon_core::units::Units;
 
 use super::actions::{self, ConfirmKind, PendingConfirm};
 use super::backend::GuiCommand;
-use super::cards::{self, AppAction, CardContext, Glyph, glyph_button};
+use super::cards::{
+    self, AppAction, CardContext, Glyph, glyph_button, menu_check_row, menu_chip, menu_option_row,
+};
 use super::details;
 use super::graphs::History;
 use super::icons::IconCache;
-use super::processes::{ProcessTableState, processes_page};
+use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
 use super::settings::{SECTION_KEYS, Settings};
 use super::theme::{self, Palette};
 
@@ -128,6 +130,9 @@ pub struct SysMonApp {
     pub page: Page,
     pub table_state: ProcessTableState,
     details_open: Vec<i32>,
+    /// The one combined-details window (multi-select → Details);
+    /// opening a new selection replaces it.
+    combined_details_open: Option<Vec<i32>>,
     pending_confirm: Option<PendingConfirm>,
     toast_tx: std::sync::mpsc::Sender<String>,
     toast_rx: std::sync::mpsc::Receiver<String>,
@@ -171,12 +176,20 @@ impl SysMonApp {
         spawn_sampler(cc.egui_ctx.clone(), shared.clone());
         let (toast_tx, toast_rx) = std::sync::mpsc::channel();
 
+        // The table's sort choice survives restarts.
+        let mut table_state = ProcessTableState::default();
+        if let Some(column) = SortColumn::from_id(&settings.sort_column) {
+            table_state.sort_column = column;
+            table_state.sort_descending = settings.sort_descending;
+        }
+
         SysMonApp {
             shared,
             icon_cache: IconCache::new(),
             page: Page::Overview,
-            table_state: ProcessTableState::default(),
+            table_state,
             details_open: Vec::new(),
+            combined_details_open: None,
             pending_confirm: None,
             toast_tx,
             toast_rx,
@@ -191,6 +204,12 @@ impl SysMonApp {
             _control_server: control_server,
             settings,
         }
+    }
+
+    /// The open combined-details selection, if any (tests + future
+    /// introspection verbs read this).
+    pub fn combined_details(&self) -> Option<&[i32]> {
+        self.combined_details_open.as_deref()
     }
 
     pub fn palette(&mut self) -> &'static Palette {
@@ -236,7 +255,7 @@ impl SysMonApp {
                             palette,
                             Glyph::Pin,
                             self.settings.always_on_top,
-                            "Keep window on top",
+                            "Keep window on top (P)",
                         )
                         .clicked()
                     {
@@ -296,19 +315,32 @@ impl SysMonApp {
                     ui.label(RichText::new(text).color(palette.muted).size(10.5));
                 };
 
+                // Every option row/chip below is a menu_* widget —
+                // full-target, hover-lit (Ben: bare radios showed no
+                // hover effect at all).
                 heading(ui, "Appearance");
                 let before = self.settings.theme_mode.clone();
-                ui.radio_value(
-                    &mut self.settings.theme_mode,
-                    "system".to_string(),
+                if menu_option_row(
+                    ui,
+                    palette,
+                    self.settings.theme_mode == "system",
                     "Follow system theme",
-                );
+                )
+                .clicked()
+                {
+                    self.settings.theme_mode = "system".to_string();
+                }
                 for candidate in theme::PALETTES.iter() {
-                    ui.radio_value(
-                        &mut self.settings.theme_mode,
-                        candidate.id.to_string(),
+                    if menu_option_row(
+                        ui,
+                        palette,
+                        self.settings.theme_mode == candidate.id,
                         candidate.label,
-                    );
+                    )
+                    .clicked()
+                    {
+                        self.settings.theme_mode = candidate.id.to_string();
+                    }
                 }
                 if before != self.settings.theme_mode {
                     settings_changed = true;
@@ -324,12 +356,13 @@ impl SysMonApp {
                 heading(ui, "Graph colours");
                 ui.horizontal_wrapped(|ui| {
                     for graph_palette in theme::GRAPH_PALETTES.iter() {
-                        if ui
-                            .radio(
-                                self.settings.graph_palette == graph_palette.id,
-                                graph_palette.label,
-                            )
-                            .clicked()
+                        if menu_chip(
+                            ui,
+                            palette,
+                            self.settings.graph_palette == graph_palette.id,
+                            graph_palette.label,
+                        )
+                        .clicked()
                         {
                             self.settings.graph_palette = graph_palette.id.to_string();
                             settings_changed = true;
@@ -340,16 +373,14 @@ impl SysMonApp {
                 ui.separator();
                 heading(ui, "Units");
                 ui.horizontal(|ui| {
-                    if ui
-                        .radio(!self.settings.use_binary_units, "Decimal (GB)")
+                    if menu_chip(ui, palette, !self.settings.use_binary_units, "Decimal (GB)")
                         .on_hover_text("what drive stickers and ISPs quote")
                         .clicked()
                     {
                         self.settings.use_binary_units = false;
                         settings_changed = true;
                     }
-                    if ui
-                        .radio(self.settings.use_binary_units, "Binary (GiB)")
+                    if menu_chip(ui, palette, self.settings.use_binary_units, "Binary (GiB)")
                         .on_hover_text("what htop and GNOME System Monitor show")
                         .clicked()
                     {
@@ -364,7 +395,8 @@ impl SysMonApp {
                     for interval in [1.0f64, 2.0, 3.0, 5.0] {
                         let selected =
                             (self.settings.update_interval_seconds - interval).abs() < 0.01;
-                        if ui.radio(selected, format!("{interval:.0}s")).clicked() {
+                        if menu_chip(ui, palette, selected, &format!("{interval:.0}s")).clicked()
+                        {
                             self.settings.update_interval_seconds = interval;
                             *self.shared.interval_seconds.lock().unwrap() = interval;
                             settings_changed = true;
@@ -374,10 +406,10 @@ impl SysMonApp {
 
                 ui.separator();
                 heading(ui, "Window");
-                if ui
-                    .checkbox(&mut self.settings.always_on_top, "Always on top")
-                    .changed()
+                if menu_check_row(ui, palette, self.settings.always_on_top, "Always on top")
+                    .clicked()
                 {
+                    self.settings.always_on_top = !self.settings.always_on_top;
                     ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(
                         if self.settings.always_on_top {
                             egui::WindowLevel::AlwaysOnTop
@@ -387,24 +419,24 @@ impl SysMonApp {
                     ));
                     settings_changed = true;
                 }
-                if ui
-                    .checkbox(&mut self.settings.show_pin_button, "Show pin button")
-                    .changed()
+                if menu_check_row(ui, palette, self.settings.show_pin_button, "Show pin button")
+                    .clicked()
                 {
+                    self.settings.show_pin_button = !self.settings.show_pin_button;
                     settings_changed = true;
                 }
-                if ui
-                    .checkbox(&mut self.settings.compact_mode, "Compact mode")
+                if menu_check_row(ui, palette, self.settings.compact_mode, "Compact mode")
                     .on_hover_text("shrink graphs and hide detail rows — for a screen corner")
-                    .changed()
+                    .clicked()
                 {
+                    self.settings.compact_mode = !self.settings.compact_mode;
                     settings_changed = true;
                 }
 
                 ui.separator();
                 heading(ui, "Overview sections");
                 for key in SECTION_KEYS {
-                    let mut visible = self.settings.section_visible(key);
+                    let visible = self.settings.section_visible(key);
                     let label = match key {
                         "gpu" => "GPU",
                         "memory" => "Memory",
@@ -414,9 +446,9 @@ impl SysMonApp {
                         "sensors" => "Sensors",
                         _ => key,
                     };
-                    if ui.checkbox(&mut visible, label).changed() {
-                        self.settings.visible_sections.insert(key.to_string(), visible);
-                        if !visible {
+                    if menu_check_row(ui, palette, visible, label).clicked() {
+                        self.settings.visible_sections.insert(key.to_string(), !visible);
+                        if visible {
                             self.settings.popped_out_sections.retain(|s| s != key);
                         }
                         settings_changed = true;
@@ -451,6 +483,7 @@ impl SysMonApp {
                     icon_cache: &mut self.icon_cache,
                     actions: actions_out,
                     popped_out: &self.settings.popped_out_sections,
+                    selected: &mut self.table_state.selected_pids,
                 };
                 let popped = |cx: &CardContext, key: &str| {
                     cx.popped_out.iter().any(|s| s == key)
@@ -583,6 +616,7 @@ impl SysMonApp {
                                     icon_cache: &mut self.icon_cache,
                                     actions: actions_out,
                                     popped_out: &self.settings.popped_out_sections,
+                                    selected: &mut self.table_state.selected_pids,
                                 };
                                 match section {
                                     "gpu" => cards::gpu_card(ui, &mut cx, &histories.gpu),
@@ -658,15 +692,8 @@ impl SysMonApp {
                 self.settings.save();
             }
         }
-        // Keep the sampler poking these viewports.
-        let mut open = self.shared.open_viewports.lock().unwrap();
-        open.clear();
-        for section in &self.settings.popped_out_sections {
-            open.push(ViewportId::from_hash_of(("popout", section.as_str())));
-        }
-        for pid in &self.details_open {
-            open.push(ViewportId::from_hash_of(("details", *pid)));
-        }
+        // (Viewport poke registration moved to update() — it must run
+        // even when no section is popped out.)
     }
 
     fn apply_actions(&mut self, ctx: &egui::Context, actions_in: Vec<AppAction>) {
@@ -685,6 +712,37 @@ impl SysMonApp {
                     if !self.details_open.contains(&pid) {
                         self.details_open.push(pid);
                     }
+                }
+                AppAction::OpenCombinedDetails(mut pids) => {
+                    pids.dedup();
+                    pids.truncate(cards::MAX_SELECTED);
+                    if pids.len() >= 2 {
+                        self.combined_details_open = Some(pids);
+                    }
+                }
+                AppAction::RevealInProcesses(pid) => {
+                    self.page = Page::Processes;
+                    self.table_state.selected_pids = vec![pid];
+                    self.table_state.reveal_pid = Some(pid);
+                    // A live filter that hides the target would make
+                    // the jump land on nothing — clear it, disclosed.
+                    let filter = self.table_state.filter.to_lowercase();
+                    let hidden = {
+                        let snapshot = self.shared.latest.read().unwrap();
+                        snapshot.processes.as_ref().is_some_and(|records| {
+                            records
+                                .iter()
+                                .find(|r| r.pid == pid)
+                                .is_some_and(|r| !matches_filter(r, &filter))
+                        })
+                    };
+                    if hidden {
+                        self.table_state.filter.clear();
+                        let _ = self.toast_tx.send("Filter cleared to reveal the process".to_string());
+                    }
+                }
+                AppAction::Notify(text) => {
+                    let _ = self.toast_tx.send(text);
                 }
                 AppAction::ConfirmTerminate(pid, name) => {
                     self.pending_confirm = Some(PendingConfirm {
@@ -752,6 +810,11 @@ impl SysMonApp {
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
+        // `P` is a bare letter — never steal it from a focused text
+        // field (the filter box). Same guard for Escape-clears.
+        let typing = ctx.wants_keyboard_input();
+        let mut toggle_pin = false;
+        let mut clear_selection = false;
         ctx.input_mut(|input| {
             use egui::{Key, KeyboardShortcut, Modifiers};
             if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F)) {
@@ -767,7 +830,33 @@ impl SysMonApp {
             if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Q)) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+            // Phosphor's pin shortcut, ported with its button.
+            if !typing && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::P))
+            {
+                toggle_pin = true;
+            }
+            if !typing
+                && !self.table_state.selected_pids.is_empty()
+                && self.pending_confirm.is_none()
+                && input.key_pressed(Key::Escape)
+            {
+                clear_selection = true;
+            }
         });
+        if toggle_pin {
+            self.settings.always_on_top = !self.settings.always_on_top;
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(if self.settings.always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
+            self.settings.save();
+        }
+        // Escape closes an open menu first; only a bare Escape drops
+        // the multi-selection.
+        if clear_selection && !egui::Popup::is_any_open(ctx) {
+            self.table_state.selected_pids.clear();
+        }
     }
 }
 
@@ -1023,12 +1112,22 @@ impl eframe::App for SysMonApp {
                     processes_page(
                         ui,
                         palette,
+                        &self.settings.graph_palette,
                         units,
                         &snapshot,
                         &mut self.table_state,
                         &mut self.icon_cache,
                         &mut frame_actions,
                     );
+                    // Persist a changed sort choice (survives restarts).
+                    let sort_id = self.table_state.sort_column.id();
+                    if self.settings.sort_column != sort_id
+                        || self.settings.sort_descending != self.table_state.sort_descending
+                    {
+                        self.settings.sort_column = sort_id.to_string();
+                        self.settings.sort_descending = self.table_state.sort_descending;
+                        self.settings.save();
+                    }
                 }
             });
 
@@ -1060,6 +1159,42 @@ impl eframe::App for SysMonApp {
         self.shared
             .connections_wanted
             .store(!self.details_open.is_empty(), Ordering::Relaxed);
+
+        // The combined-details window (multi-select → Details).
+        if let Some(pids) = self.combined_details_open.clone() {
+            let keep = details::combined_details_window(
+                ctx,
+                self.palette(),
+                &self.settings.graph_palette,
+                units,
+                &snapshot,
+                &pids,
+                &mut self.icon_cache,
+                &mut frame_actions,
+            );
+            if !keep {
+                self.combined_details_open = None;
+            }
+        }
+
+        // Register every live child viewport for sampler pokes (kept
+        // HERE, not in popout_viewports — that returns early with no
+        // pop-outs, which would strand details/combined windows).
+        {
+            let mut open = self.shared.open_viewports.lock().unwrap();
+            open.clear();
+            for section in &self.settings.popped_out_sections {
+                open.push(ViewportId::from_hash_of(("popout", section.as_str())));
+            }
+            for pid in &self.details_open {
+                open.push(ViewportId::from_hash_of(("details", *pid)));
+            }
+            if let Some(pids) = &self.combined_details_open {
+                let mut sorted = pids.clone();
+                sorted.sort_unstable();
+                open.push(ViewportId::from_hash_of(("combined", sorted)));
+            }
+        }
 
         self.apply_actions(ctx, frame_actions);
         self.confirm_and_toasts(ctx);

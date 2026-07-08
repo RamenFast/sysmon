@@ -124,11 +124,11 @@ fn default_sampler_attributes_curl_and_names_its_source() {
         std::thread::sleep(Duration::from_millis(1000));
         let snapshot = sampler.sample(wants);
         let network = snapshot.network.as_ref().expect("network");
-        if let Some(entry) = network.top_processes.iter().find(|e| e.pid == curl_pid) {
-            if entry.rx_bps > best_rx_bps {
-                best_rx_bps = entry.rx_bps;
-                source_seen = network.process_source;
-            }
+        if let Some(entry) = network.top_processes.iter().find(|e| e.pid == curl_pid)
+            && entry.rx_bps > best_rx_bps
+        {
+            best_rx_bps = entry.rx_bps;
+            source_seen = network.process_source;
         }
     }
     let _ = curl.kill();

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 use sysmon_app::gui::app::{Page, SharedUi, SysMonApp};
 use sysmon_app::gui::settings::Settings;
@@ -43,7 +43,7 @@ fn ui_interactions_end_to_end() {
 
     // ---- switch to the processes page ------------------------------
     harness.get_by_label("Processes").click();
-    harness.run();
+    harness.run_steps(8);
     assert_eq!(harness.state().page, Page::Processes, "page switched");
     assert!(
         harness.query_by_role(Role::TextInput).is_some(),
@@ -52,10 +52,10 @@ fn ui_interactions_end_to_end() {
 
     // ---- filter narrows the census ----------------------------------
     harness.get_by_role(Role::TextInput).click();
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_role(Role::TextInput).type_text("kthreadd");
     for _ in 0..3 {
-        harness.run();
+        harness.run_steps(8);
     }
     assert!(
         harness.query_by_label_contains("1 of").is_some(),
@@ -67,16 +67,124 @@ fn ui_interactions_end_to_end() {
         "typed text landed in the filter"
     );
 
+    // ---- sortable headers: whole-cell click, any column --------------
+    assert!(
+        harness.query_by_label("Sort by CPU % (descending)").is_some(),
+        "default sort is CPU descending and the header says so"
+    );
+    harness.get_by_label("Sort by Memory").click();
+    harness.run_steps(8);
+    assert!(
+        matches!(
+            harness.state().table_state.sort_column,
+            sysmon_app::gui::processes::SortColumn::Memory
+        ),
+        "clicking the Memory header sorts by memory"
+    );
+    assert!(
+        harness.state().table_state.sort_descending,
+        "metric columns default to biggest-first"
+    );
+    harness.get_by_label("Sort by Memory (descending)").click();
+    harness.run_steps(8);
+    assert!(
+        !harness.state().table_state.sort_descending,
+        "second click flips the direction"
+    );
+    assert_eq!(
+        harness.state().settings.sort_column,
+        "memory",
+        "sort choice persisted to settings"
+    );
+    assert!(!harness.state().settings.sort_descending);
+    // VRAM too — the ask named it explicitly. At 430px it lives
+    // beyond the horizontal scroll edge (the scrollbar Ben asked
+    // for), so widen the window to reach it, then restore.
+    harness.set_size(egui::vec2(1400.0, 780.0));
+    harness.run_steps(3);
+    harness.get_by_label("Sort by VRAM").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().settings.sort_column, "vram");
+    harness.set_size(egui::vec2(430.0, 780.0));
+    harness.run_steps(3);
+
+    // ---- multi-select drives the Compare button + combined window ----
+    {
+        let pids: Vec<i32> = {
+            let snapshot = std::process::id() as i32;
+            // Use two pids that certainly exist: ourselves and pid 1.
+            vec![1, snapshot]
+        };
+        harness.state_mut().table_state.selected_pids = pids;
+    }
+    harness.run_steps(2);
+    harness.get_by_label("Compare (2)").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().combined_details().map(<[i32]>::len),
+        Some(2),
+        "Compare opened the combined-details selection"
+    );
+
+    // ---- Escape clears the multi-selection ---------------------------
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(
+        harness.state().table_state.selected_pids.is_empty(),
+        "Escape cleared the selection"
+    );
+
     // ---- back to overview; menu switches the theme ------------------
     harness.get_by_label("Overview").click();
-    harness.run();
+    harness.run_steps(8);
     assert_eq!(harness.state().page, Page::Overview);
 
+    // ---- overview right-click → "Open in process viewer" -------------
+    {
+        let target = harness
+            .query_all_by_role(Role::Button)
+            .find(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.contains("— PID "))
+            })
+            .expect("an overview top-process row");
+        let label = target.accesskit_node().label().unwrap().to_string();
+        let pid: i32 = label.rsplit("PID ").next().unwrap().trim().parse().unwrap();
+        target.click_secondary();
+        harness.run_steps(8);
+        harness.get_by_label("Open in process viewer").click();
+        harness.run_steps(8);
+        assert_eq!(harness.state().page, Page::Processes, "jumped to the table");
+        assert_eq!(
+            harness.state().table_state.selected_pids,
+            vec![pid],
+            "the process arrived selected"
+        );
+    }
+    harness.get_by_label("Overview").click();
+    harness.run_steps(8);
+
+    // ---- the pin toggles from its button and from `P` -----------------
+    assert!(!harness.state().settings.always_on_top);
+    harness.get_by_label("Keep window on top (P)").click();
+    harness.run_steps(8);
+    assert!(
+        harness.state().settings.always_on_top,
+        "pin button pinned the window"
+    );
+    harness.key_press(egui::Key::P);
+    harness.run_steps(8);
+    assert!(
+        !harness.state().settings.always_on_top,
+        "`P` unpinned it (phosphor's shortcut)"
+    );
+
     harness.get_by_label("Display options").click();
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_label("Funky Pink").click();
     for _ in 0..2 {
-        harness.run();
+        harness.run_steps(8);
     }
     assert_eq!(
         harness.state().settings.theme_mode,
@@ -96,9 +204,9 @@ fn ui_interactions_end_to_end() {
 
     // ---- pause toggle through its glyph button ----------------------
     harness.key_press(egui::Key::Escape); // close the menu
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_label("Pause updates").click();
-    harness.run();
+    harness.run_steps(8);
     assert!(
         harness
             .query_by_label("Resume updates")
@@ -106,34 +214,34 @@ fn ui_interactions_end_to_end() {
         "pause became resume"
     );
     harness.get_by_label("Resume updates").click();
-    harness.run();
+    harness.run_steps(8);
 
     // ---- units through the menu -------------------------------------
     harness.get_by_label("Display options").click();
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_label("Binary (GiB)").click();
-    harness.run();
+    harness.run_steps(8);
     assert!(harness.state().settings.use_binary_units, "binary units applied");
     // Menu items close the popup on click — reopen per interaction.
     harness.get_by_label("Display options").click();
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_label("Decimal (GB)").click();
-    harness.run();
+    harness.run_steps(8);
     assert!(!harness.state().settings.use_binary_units, "decimal units restored");
 
     // ---- compact mode through the menu -------------------------------
     harness.get_by_label("Display options").click();
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_label("Compact mode").click();
-    harness.run();
+    harness.run_steps(8);
     assert!(harness.state().settings.compact_mode, "compact on");
     harness.get_by_label("Display options").click();
-    harness.run();
+    harness.run_steps(8);
     harness.get_by_label("Compact mode").click();
-    harness.run();
+    harness.run_steps(8);
     assert!(!harness.state().settings.compact_mode, "compact off");
     harness.key_press(egui::Key::Escape);
-    harness.run();
+    harness.run_steps(8);
 
     // ---- every palette actually applies (plane fill == token) -------
     for palette in sysmon_app::gui::theme::PALETTES.iter() {
