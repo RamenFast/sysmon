@@ -106,7 +106,7 @@ table.
 
 Poll: `sysmon tap network --interval 2` (or keep `sysmon serve`
 running — it costs nothing idle). On click:
-`sysmon probe network --json | jq .result.top_processes` and
+`sysmon probe network --json | jq .result.network.top_processes` and
 `sysmon probe connections` for the drill-down. `sysmon` (the GUI)
 raises itself if launched again — one command for "open the full
 monitor".

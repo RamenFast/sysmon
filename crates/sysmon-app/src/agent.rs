@@ -518,7 +518,7 @@ fn build_schema() -> Value {
         "notes": {
             "rates": "every *_bps/_percent rate spans `interval_seconds`, reported per snapshot; each collector tracks its own window so mixed-section clients never skew each other",
             "first_sample": "a fresh sampler's first snapshot has zero rates (nothing to delta against)",
-            "bar_integration": "poll `sysmon tap network --interval 2`; on click, `sysmon probe network --json | jq .result.top_processes` and `sysmon probe connections`",
+            "bar_integration": "poll `sysmon tap network --interval 2`; on click, `sysmon probe network --json | jq .result.network.top_processes` and `sysmon probe connections`",
         },
     })
 }
