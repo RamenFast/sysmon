@@ -19,7 +19,7 @@ pub fn run_cli() -> i32 {
     let first = arguments.first().map(String::as_str);
     match first {
         Some("--version") | Some("-V") => {
-            println!("sysmon {} (v2)", sysmon_core::VERSION);
+            println!("sysmon {} (v3)", sysmon_core::VERSION);
             0
         }
         Some("--help") | Some("-h") | Some("help") => {

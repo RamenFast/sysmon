@@ -9,11 +9,14 @@ it.
 Every one-shot reply is a single JSON envelope:
 
 ```json
-{"status":"ok","tool":"sysmon","version":"2.0.0","ts":1751900000.0,"result":{…}}
-{"status":"error","tool":"sysmon","version":"2.0.0","ts":…,"error":"…","fix":"…"}
+{"status":"ok","tool":"sysmon","version":"3.0.0","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
+{"status":"error","tool":"sysmon","version":"3.0.0","ts":…,"error":"…","fix":"…","exit":3}
 ```
 
-- errors **always** carry a `fix` — the way out, not just the wall
+- `ts` is ISO-8601 with a UTC offset; `ts_epoch` is the same instant
+  as a number, for arithmetic
+- errors **always** carry a `fix` — the way out, not just the wall —
+  and an `exit` naming the code that failure means
 - exit codes: `0` ok · `2` unavailable (nothing running that could
   answer) · `3` bad arguments · `4` runtime failure
 - output is JSON automatically when stdout is piped; `--json` forces
@@ -39,8 +42,8 @@ connections`.
 
 ## Door 2 — `sysmon tap` (stream)
 
-One snapshot per line, NDJSON, at your cadence — the desktop-bar
-diet:
+One snapshot per line, NDJSON, at your cadence, every line carrying
+`event: "snapshot"` — the desktop-bar diet:
 
 ```bash
 sysmon tap network --interval 2 | jq --unbuffered -c \

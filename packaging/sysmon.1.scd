@@ -68,14 +68,19 @@ networking first — without scraping a UI.
 
 *schema*
 	The machine-readable map of every command, section, field, and
-	the envelope/exit-code contract.
+	the envelope/exit-code contract — strict, generated from the
+	binary, and tested against it. An agent with no prior knowledge
+	of sysmon goes from *schema* to a correct call.
 
 # API CONTRACT
 
 Every one-shot reply is one JSON envelope:
-_{"status","tool","version","ts","result"|"error"+"fix"}_ — errors
-always carry a *fix*. Exit codes: 0 ok, 2 unavailable, 3 bad
-arguments, 4 runtime failure. The control socket lives at
+_{"status","tool","version","ts","result"|"error"+"fix"+"exit"}_ —
+errors always carry a *fix* and the exit code the failure means.
+_ts_ is ISO-8601 with a UTC offset; _ts_epoch_ carries the same
+instant as a number. Exit codes: 0 ok, 2 unavailable, 3 bad
+arguments, 4 runtime failure. Every NDJSON stream line carries
+_event_. The control socket lives at
 _$XDG_RUNTIME_DIR/sysmon/ctl.sock_ (one JSON object per line in, one
 envelope out; *subscribe* upgrades to a raw snapshot stream).
 

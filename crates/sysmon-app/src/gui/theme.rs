@@ -736,6 +736,10 @@ pub fn companion_graph_palette(theme_id: &str) -> Option<&'static str> {
         "amber" => Some("amber"),
         "chromacore" => Some("terminal"),
         "basalt" => Some("mono"),
+        // The a11y floor carries all the way through: a greyscale
+        // room with coloured graphs would be a greyscale room in
+        // name only.
+        "greyscale" => Some("mono"),
         "paper" => Some("sunset"),
         _ => None,
     }
@@ -822,6 +826,25 @@ mod a11y_tests {
         // eased, not linear: the middle moves faster than the ends
         assert!(smoothstep(0.25) < 0.25);
         assert!(smoothstep(0.75) > 0.75);
+    }
+
+    /// The a11y floor is only a floor if it holds everywhere: a
+    /// greyscale room must not paint coloured graphs.
+    #[test]
+    fn greyscale_carries_a_colourless_graph_palette() {
+        let companion = companion_graph_palette("greyscale").expect("greyscale has a companion");
+        let palette = GRAPH_PALETTES
+            .iter()
+            .find(|candidate| candidate.id == companion)
+            .expect("the companion exists");
+        for series in palette.light.iter().chain(palette.dark.iter()) {
+            let [r, g, b, _] = series.to_array();
+            let chroma = r.max(g).max(b) as i32 - r.min(g).min(b) as i32;
+            assert!(
+                chroma <= 24,
+                "greyscale's graph companion `{companion}` carries chroma {chroma}"
+            );
+        }
     }
 
     /// Every palette id is unique and reachable by id — the schema

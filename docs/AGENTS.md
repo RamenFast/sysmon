@@ -2,20 +2,28 @@
 
 One binary, JSON everywhere, errors that tell you the way out, no
 pixels needed. This is the worked guide; the always-current machine
-map is `sysmon schema`. (Developing on the codebase instead?
-`ARCHITECTURE.md` and `dev/EXTENDING.md`.)
+map is `sysmon schema` — strict, generated from the binary, and
+tested against it (`cargo test -p sysmon-app --test contract` runs
+every jq path it prints). (Developing on the codebase instead?
+`ARCHITECTURE.md` and `dev/EXTENDING.md`; before and after any
+change, `scripts/conformance.sh`.)
 
 ## The contract
 
 - Every one-shot emits **one envelope**:
-  `{"status":"ok|error","tool":"sysmon","version":…,"ts":…,"result"|"error"+"fix"}`.
-- Errors **always** carry a `fix` you can act on.
+  `{"status":"ok|error","tool":"sysmon","version":…,"ts":…,"result"|"error"+"fix"+"exit"}`.
+- `ts` is **ISO-8601 with a UTC offset** (`2026-08-01T22:14:07+00:00`);
+  `ts_epoch` carries the same instant as a number, for arithmetic.
+- Errors **always** carry a `fix` you can act on, and an `exit`
+  naming the code that failure means — so a socket client classifies
+  a failure exactly as the CLI does.
 - Exit codes: `0` ok · `2` unavailable (nothing running that could
   answer) · `3` bad arguments · `4` runtime failure.
 - Output auto-switches to JSON when stdout is a pipe; `--json`
   forces it on a TTY.
 - `tap` and `subscribe` are NDJSON: one raw snapshot per line (no
-  envelope around stream lines).
+  envelope around stream lines), **every line carrying
+  `event: "snapshot"`**.
 - Every rate spans its snapshot's `interval_seconds`. A fresh
   sampler's first snapshot has zero rates — that first line is not a
   bug, it's the delta baseline.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the RPM for SysMon v2 with cargo-generate-rpm (asset table in
+# Build the RPM for SysMon with cargo-generate-rpm (asset table in
 # crates/sysmon-app/Cargo.toml under [package.metadata.generate-rpm]).
 #
 #   packaging/build-rpm.sh   ->  packaging/dist/sysmon-<version>-1.<arch>.rpm
