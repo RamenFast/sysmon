@@ -396,6 +396,20 @@ c15() {
   printf 'every external tool named in the docs exists here:%s' "${seen}"
 }
 
+# ── C16 · the agent skill is installed and matches the repo (R8) ─────
+# The skill is how an agent session finds this tool at all. It lives
+# outside version control, so it drifted unnoticed once already.
+c16() {
+  [ -x scripts/install-skill.sh ] || { printf 'scripts/install-skill.sh is missing'; return 1; }
+  local output
+  if output="$(scripts/install-skill.sh --check 2>&1)"; then
+    printf 'skill mirrors match docs/skill/SKILL.md'
+  else
+    printf '%s' "${output//$'\n'/ }"
+    return 1
+  fi
+}
+
 # ── C11 · language law: no Python, no GTK (AGENTS.md §3) ─────────────
 c11() {
   local bad=""
@@ -446,6 +460,7 @@ check C12 "if it compiles, it installs"                           c12
 check C13 "hostile input never panics or leaves 0/2/3/4"          c13
 check C14 "--json is honored on error paths"                      c14
 check C15 "documented commands run on this machine"               c15
+check C16 "the agent skill is installed and matches the repo"     c16
 
 total=$((passed + failed))
 status="ok"; exit_code=0

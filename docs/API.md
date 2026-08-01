@@ -9,8 +9,8 @@ it.
 Every one-shot reply is a single JSON envelope:
 
 ```json
-{"status":"ok","tool":"sysmon","version":"3.0.2","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
-{"status":"error","tool":"sysmon","version":"3.0.2","ts":…,"error":"…","fix":"…","exit":3}
+{"status":"ok","tool":"sysmon","version":"3.0.3","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
+{"status":"error","tool":"sysmon","version":"3.0.3","ts":…,"error":"…","fix":"…","exit":3}
 ```
 
 - `ts` is ISO-8601 with a UTC offset; `ts_epoch` is the same instant

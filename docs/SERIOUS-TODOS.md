@@ -99,9 +99,11 @@ not confident about?" — each answer lands here as a real TODO.*
   reading them. Switched to `nc -U` (base system, verified working).
   C15 now fails if any external tool named in a docs code block is
   missing, and is mutation-proven.
-- **[watch] The skill files are checked by hand, not by the suite.**
-  C15 covers the repo's docs; `~/.claude/skills/sysmon/SKILL.md` and
-  its `~/.agents` mirror live outside the repo and drifted the same way.
-  They were fixed together this round, but nothing would catch it next
-  time. A `skills` verb, or a doctor check that diffs the mirrors, is
-  the honest fix.
+- **[fixed] The skill files are no longer checked by hand.** C15
+  covered the repo's docs, but `~/.claude/skills/sysmon/SKILL.md` and
+  its `~/.agents` mirror live outside the repo and had drifted the same
+  way. The skill is now authored at `docs/skill/SKILL.md` — in version
+  control, reviewed with the code that it documents — and
+  `scripts/install-skill.sh` installs or verifies the mirrors. C16
+  fails the release gate on drift (mutation-proven). The Hermes mirror
+  is deliberately left to Ben's manual ping.
