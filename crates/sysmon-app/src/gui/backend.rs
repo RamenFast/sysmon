@@ -131,9 +131,9 @@ impl Backend for GuiBackend {
 
     fn gui_verb(&self, verb: &str, arguments: &Value) -> Result<Value, VerbError> {
         let Some(ctx) = self.ctx.get() else {
-            return Err((
-                "the GUI is still starting up".to_string(),
-                "retry in a moment".to_string(),
+            return Err(VerbError::unavailable(
+                "the GUI is still starting up",
+                "retry in a moment",
             ));
         };
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -148,9 +148,9 @@ impl Backend for GuiBackend {
             .unwrap()
             .send(command)
             .map_err(|_| {
-                (
-                    "the GUI's command queue is gone (shutting down?)".to_string(),
-                    "relaunch sysmon".to_string(),
+                VerbError::unavailable(
+                    "the GUI's command queue is gone (shutting down?)",
+                    "relaunch sysmon",
                 )
             })?;
         ctx.request_repaint();
@@ -163,9 +163,9 @@ impl Backend for GuiBackend {
         };
         match reply_rx.recv_timeout(timeout) {
             Ok(result) => result,
-            Err(_) => Err((
+            Err(_) => Err(VerbError::runtime(
                 format!("the GUI did not answer `{verb}` in time"),
-                "is the window responding? try `sysmon ctl status`".to_string(),
+                "is the window responding? try `sysmon ctl status`",
             )),
         }
     }

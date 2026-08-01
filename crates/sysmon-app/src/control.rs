@@ -24,8 +24,44 @@ use sysmon_core::snapshot::Wants;
 
 use crate::envelope;
 
-/// (message, fix) — every backend error teaches the caller the way out.
-pub type VerbError = (String, String);
+/// The `event` name on every NDJSON stream line (standard ruling
+/// R3). One constant so the socket stream and the local-sampling
+/// stream can never disagree about what a line calls itself.
+pub const SNAPSHOT_EVENT: &str = "snapshot";
+
+/// Every backend error teaches the caller the way out *and* names
+/// which exit code it means. The socket has no process to exit, so
+/// the code rides on the wire (`exit`) and `sysmon ctl` returns it —
+/// a bad theme name is bad arguments (3) whether you asked over the
+/// socket or over the CLI.
+#[derive(Debug, Clone)]
+pub struct VerbError {
+    pub message: String,
+    pub fix: String,
+    pub exit: i32,
+}
+
+impl VerbError {
+    fn new(message: impl Into<String>, fix: impl Into<String>, exit: i32) -> VerbError {
+        VerbError {
+            message: message.into(),
+            fix: fix.into(),
+            exit,
+        }
+    }
+    /// The caller asked for something that isn't a thing.
+    pub fn bad_args(message: impl Into<String>, fix: impl Into<String>) -> VerbError {
+        VerbError::new(message, fix, envelope::EXIT_BAD_ARGS)
+    }
+    /// The ask is valid; the piece that would answer it isn't here.
+    pub fn unavailable(message: impl Into<String>, fix: impl Into<String>) -> VerbError {
+        VerbError::new(message, fix, envelope::EXIT_UNAVAILABLE)
+    }
+    /// It should have worked and didn't.
+    pub fn runtime(message: impl Into<String>, fix: impl Into<String>) -> VerbError {
+        VerbError::new(message, fix, envelope::EXIT_RUNTIME)
+    }
+}
 
 pub trait Backend: Send + Sync {
     fn mode(&self) -> &'static str;
@@ -37,9 +73,9 @@ pub trait Backend: Send + Sync {
     /// raise / page / theme / palette / popout / popin / shot — GUI only.
     fn gui_verb(&self, verb: &str, arguments: &Value) -> Result<Value, VerbError> {
         let _ = arguments;
-        Err((
+        Err(VerbError::unavailable(
             format!("`{verb}` drives the GUI, and this is `sysmon serve`"),
-            "launch the GUI first: `sysmon` (or `sysmon --background` for headless)".to_string(),
+            "launch the GUI first: `sysmon` (or `sysmon --background` for headless)",
         ))
     }
     fn request_quit(&self);
@@ -206,24 +242,23 @@ fn dispatch(verb: &str, request: &Value, backend: &Arc<dyn Backend>) -> Value {
         "resume" => backend.set_paused(false),
         "interval" => match request["seconds"].as_f64() {
             Some(seconds) if (0.2..=60.0).contains(&seconds) => backend.set_interval(seconds),
-            _ => Err((
-                "interval needs `seconds` between 0.2 and 60".to_string(),
-                "send {\"verb\":\"interval\",\"seconds\":2}".to_string(),
+            _ => Err(VerbError::bad_args(
+                "interval needs `seconds` between 0.2 and 60",
+                "send {\"verb\":\"interval\",\"seconds\":2}",
             )),
         },
         "quit" => Ok(json!({"quitting": true})),
         "raise" | "page" | "theme" | "palette" | "popout" | "popin" | "shot" | "compact"
         | "units" => backend.gui_verb(verb, request),
-        other => Err((
+        other => Err(VerbError::bad_args(
             format!("unknown verb `{other}`"),
             "verbs: status snapshot subscribe pause resume interval quit raise page theme \
-             palette popout popin shot compact units"
-                .to_string(),
+             palette popout popin shot compact units",
         )),
     };
     match result {
         Ok(value) => envelope::ok(value),
-        Err((message, fix)) => envelope::error(message, fix),
+        Err(failure) => envelope::error_coded(failure.message, failure.fix, failure.exit),
     }
 }
 
@@ -238,8 +273,12 @@ fn run_subscription(
 ) {
     let wants = match wants_from_request(request) {
         Ok(wants) => wants,
-        Err((message, fix)) => {
-            let _ = writeln!(writer, "{}", envelope::error(message, fix));
+        Err(failure) => {
+            let _ = writeln!(
+                writer,
+                "{}",
+                envelope::error_coded(failure.message, failure.fix, failure.exit)
+            );
             return;
         }
     };
@@ -253,13 +292,23 @@ fn run_subscription(
             return;
         }
         match backend.snapshot(wants) {
-            Ok(snapshot) => {
+            Ok(mut snapshot) => {
+                // Every stream line self-identifies (standard ruling
+                // R3). Additive: the snapshot's own fields are
+                // untouched, so existing consumers never notice.
+                if let Some(object) = snapshot.as_object_mut() {
+                    object.insert("event".to_string(), json!(SNAPSHOT_EVENT));
+                }
                 if writeln!(writer, "{snapshot}").is_err() {
                     return; // client gone
                 }
             }
-            Err((message, fix)) => {
-                let _ = writeln!(writer, "{}", envelope::error(message, fix));
+            Err(failure) => {
+                let _ = writeln!(
+                    writer,
+                    "{}",
+                    envelope::error_coded(failure.message, failure.fix, failure.exit)
+                );
                 return;
             }
         }
@@ -279,11 +328,10 @@ fn wants_from_request(request: &Value) -> Result<Wants, VerbError> {
                     any = true;
                 }
                 None => {
-                    return Err((
+                    return Err(VerbError::bad_args(
                         format!("unknown section `{name}`"),
                         "sections: all system cpu memory gpu network disks processes sensors \
-                         connections"
-                            .to_string(),
+                         connections",
                     ));
                 }
             }
