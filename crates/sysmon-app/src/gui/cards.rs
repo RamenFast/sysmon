@@ -16,6 +16,7 @@ use sysmon_core::units::{
 
 use super::graphs::{self, GraphConfig, GraphStyle, History};
 use super::icons::{self, IconCache};
+use super::theme;
 use super::theme::{
     GRAPH_SERIES_CPU, GRAPH_SERIES_GPU, GRAPH_SERIES_MEMORY, GRAPH_SERIES_NET_DOWN,
     GRAPH_SERIES_NET_UP, Palette, card_frame, graph_color,
@@ -125,9 +126,9 @@ pub fn glyph_button(
         // and the glyph nudges 1px when pressed. Dimension encodes
         // importance; the shape never changes, the surface does.
         // Pressed or active = sunk in.
-        let active_mix = ui.ctx().animate_bool(response.id, active) * 0.22;
+        let active_mix = theme::eased_bool(ui.ctx(), response.id, active) * 0.22;
         let hover_mix =
-            ui.ctx().animate_bool(response.id.with("hover"), hovered) * 0.10;
+            theme::eased_bool(ui.ctx(), response.id.with("hover"), hovered) * 0.10;
         let face = palette
             .stone
             .lerp_to_gamma(palette.accent, (active_mix + hover_mix).min(0.32));
@@ -272,9 +273,7 @@ fn menu_item(
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let hover_t = ui
-            .ctx()
-            .animate_bool(response.id.with("hover"), response.hovered());
+        let hover_t = theme::eased_bool(ui.ctx(), response.id.with("hover"), response.hovered());
         if hover_t > 0.0 {
             painter.rect_filled(rect, 0.0, palette.ink.gamma_multiply(0.08 * hover_t));
         }

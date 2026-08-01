@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Debian package for SysMon v2 (the compiled Rust binary)
+# Build the Debian package for SysMon (the compiled Rust binary)
 # straight from the working tree.
 #
 #   packaging/build-deb.sh   ->  packaging/dist/sysmon_<version>_<arch>.deb

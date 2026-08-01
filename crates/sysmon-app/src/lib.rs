@@ -19,7 +19,7 @@ pub fn run_cli() -> i32 {
     let first = arguments.first().map(String::as_str);
     match first {
         Some("--version") | Some("-V") => {
-            println!("sysmon {} (v2)", sysmon_core::VERSION);
+            println!("sysmon {} (v3)", sysmon_core::VERSION);
             0
         }
         Some("--help") | Some("-h") | Some("help") => {
@@ -34,9 +34,14 @@ pub fn run_cli() -> i32 {
         None => gui::run(&arguments),
         Some("--background") => run_background(&arguments),
         Some(other) => {
-            eprintln!("sysmon: unknown command `{other}`");
-            eprintln!("fix: run `sysmon --help`");
-            3
+            // Through the envelope, not around it: an agent that
+            // typos a verb gets the same parseable shape as any
+            // other error, on stdout, with a fix.
+            envelope::fail(
+                format!("unknown command `{other}`"),
+                "run `sysmon --help`, or `sysmon schema` for the machine map",
+                envelope::EXIT_BAD_ARGS,
+            )
         }
     }
 }

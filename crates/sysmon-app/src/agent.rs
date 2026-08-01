@@ -158,7 +158,19 @@ pub fn run_tap(arguments: &[String]) -> i32 {
     loop {
         std::thread::sleep(Duration::from_secs_f64(interval));
         let snapshot = sampler.sample(wants);
-        match serde_json::to_string(&snapshot) {
+        // The same line shape either way — a consumer cannot tell
+        // (and must not care) whether a live instance or this
+        // process sampled it. `event` per ruling R3.
+        let line = match serde_json::to_value(&snapshot) {
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("event".to_string(), json!(control::SNAPSHOT_EVENT));
+                }
+                serde_json::to_string(&value)
+            }
+            Err(error) => Err(error),
+        };
+        match line {
             Ok(line) => {
                 if println_checked(&line).is_err() {
                     return EXIT_OK;
@@ -250,7 +262,18 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
         eprintln!("sysmon: {}", reply["error"].as_str().unwrap_or("error"));
         eprintln!("fix: {}", reply["fix"].as_str().unwrap_or("—"));
     }
-    if ok { EXIT_OK } else { EXIT_UNAVAILABLE }
+    if ok {
+        EXIT_OK
+    } else {
+        // The instance classified its own failure (`exit` on the
+        // wire): a bad theme name is bad arguments (3), a GUI-only
+        // verb against `serve` is unavailable (2). Older instances
+        // omit the field; unavailable stays the honest default.
+        reply["exit"]
+            .as_i64()
+            .map(|code| code as i32)
+            .unwrap_or(EXIT_UNAVAILABLE)
+    }
 }
 
 // ----------------------------------------------------------------- schema
@@ -264,18 +287,165 @@ pub fn run_schema(_arguments: &[String]) -> i32 {
     EXIT_OK
 }
 
+/// The machine map. `schema` is a one-shot, so it carries the
+/// envelope like every other one-shot (workspace standard ruling
+/// R5) — the four head fields sit alongside the contract, so a
+/// reader that already parses `.tool` / `.commands` is unaffected
+/// and a reader that checks `.status` / `.ts` is now satisfied too.
 fn build_schema() -> Value {
+    let epoch = envelope::now_ts();
+    // The enums are READ from the code that enforces them, never
+    // retyped here — a schema that can drift from the binary is
+    // worse than no schema, because an agent will believe it.
+    let section_enum: Vec<&str> = SECTION_NAMES.split(' ').collect();
+    let theme_enum: Vec<&str> = std::iter::once("system")
+        .chain(crate::gui::theme::PALETTES.iter().map(|palette| palette.id))
+        .collect();
+    let palette_enum: Vec<&str> = crate::gui::theme::GRAPH_PALETTES
+        .iter()
+        .map(|palette| palette.id)
+        .collect();
+    let popout_enum: Vec<&str> = crate::gui::settings::SECTION_KEYS.to_vec();
     json!({
-        "tool": "sysmon",
+        "status": "ok",
+        "tool": envelope::TOOL,
         "version": sysmon_core::VERSION,
+        "ts": envelope::iso8601(epoch),
+        "ts_epoch": epoch,
         "contract": {
+            "convention": "https://github.com/RamenFast/sysmon — workspace agent-first CLI standard (envelope, fix-bearing errors, exits 0/2/3/4, isatty auto-switch, strict schema)",
             "envelope": {
                 "shape": {"status": "ok|error", "tool": "sysmon", "version": "semver",
-                          "ts": "unix seconds", "result": "on ok", "error": "on error",
-                          "fix": "ALWAYS present on error"},
+                          "ts": "ISO-8601 with UTC offset, e.g. 2026-08-01T22:14:07+00:00",
+                          "ts_epoch": "the same instant as unix seconds (extra, never a replacement)",
+                          "result": "on ok", "error": "on error",
+                          "fix": "ALWAYS present on error",
+                          "exit": "on error: the exit code this failure means"},
+                "json_schema": {
+                    "type": "object",
+                    "required": ["status", "tool", "version", "ts"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "status": {"enum": ["ok", "error"]},
+                        "tool": {"const": "sysmon"},
+                        "version": {"type": "string"},
+                        "ts": {"type": "string", "format": "date-time"},
+                        "ts_epoch": {"type": "number"},
+                        "result": {"type": "object"},
+                        "error": {"type": "string"},
+                        "fix": {"type": "string"},
+                        "exit": {"type": "integer", "enum": [2, 3, 4]},
+                    },
+                },
                 "exit_codes": {"0": "ok", "2": "unavailable (no daemon / feature absent)",
                                 "3": "bad arguments", "4": "runtime failure"},
                 "json_output": "automatic when stdout is piped; --json forces it",
+            },
+            "streams": {
+                "shape": "NDJSON — one raw snapshot object per line, no envelope around stream lines",
+                "event": "every line carries `event`: \"snapshot\"",
+                "json_schema": {
+                    "type": "object",
+                    "required": ["event", "ts", "interval_seconds"],
+                    "additionalProperties": true,
+                    "properties": {
+                        "event": {"const": "snapshot"},
+                        "ts": {"type": "number", "description": "the sample instant, unix seconds"},
+                        "interval_seconds": {"type": "number", "description": "the window every rate in this line spans"},
+                    },
+                },
+                "producers": ["sysmon tap [sections…] [--interval N]",
+                               "{\"verb\":\"subscribe\",\"sections\":[…],\"interval\":N} on the socket"],
+            },
+            "verbs": {
+                "probe": {
+                    "usage": "sysmon probe [sections…] [--json]",
+                    "kind": "one-shot",
+                    "arguments": {
+                        "sections": {"type": "array", "items": {"enum": section_enum},
+                                      "default": ["all"]},
+                        "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "result": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["ts", "interval_seconds", "via"],
+                        "properties": {
+                            "ts": {"type": "number"},
+                            "interval_seconds": {"type": "number"},
+                            "via": {"enum": ["socket", "direct"],
+                                     "description": "socket = a live instance answered (longer, smoother window); direct = sampled in-process, twice, 250 ms apart"},
+                            "system": {"type": ["object", "null"]},
+                            "cpu": {"type": ["object", "null"]},
+                            "memory": {"type": ["object", "null"]},
+                            "gpu": {"type": ["object", "null"]},
+                            "network": {"type": ["object", "null"]},
+                            "disks": {"type": ["array", "null"]},
+                            "processes": {"type": ["array", "null"]},
+                            "sensors": {"type": ["object", "null"]},
+                            "connections": {"type": ["array", "null"]},
+                        },
+                    },
+                    "exits": [0, 3, 4],
+                },
+                "tap": {
+                    "usage": "sysmon tap [sections…] [--interval N]",
+                    "kind": "stream",
+                    "arguments": {
+                        "sections": {"type": "array", "items": {"enum": section_enum},
+                                      "default": ["network"]},
+                        "--interval | -i": {"type": "number", "minimum": 0.2, "maximum": 60.0,
+                                             "default": 1.0, "unit": "seconds"},
+                    },
+                    "output": "NDJSON, see contract.streams",
+                    "exits": [0, 3, 4],
+                },
+                "ctl": {
+                    "usage": "sysmon ctl <verb> [value] [--json]",
+                    "kind": "one-shot",
+                    "needs": "a running instance (GUI or `sysmon serve`) — else exit 2",
+                    "verbs": {
+                        "status":   {"value": null, "needs_gui": false,
+                                      "result": {"type": "object", "additionalProperties": true,
+                                                  "required": ["running", "pid", "version", "mode"],
+                                                  "properties": {
+                                                      "running": {"const": true},
+                                                      "pid": {"type": "integer"},
+                                                      "version": {"type": "string"},
+                                                      "mode": {"enum": ["gui", "serve"]},
+                                                      "renderer": {"type": "string", "description": "GUI only: the adapter the window renders on"},
+                                                      "renderer_hint": {"type": "string", "description": "present only when degraded to a CPU rasterizer — the fix"},
+                                                  }}},
+                        "quit":     {"value": null, "needs_gui": false},
+                        "pause":    {"value": null, "needs_gui": true},
+                        "resume":   {"value": null, "needs_gui": true},
+                        "interval": {"value": {"type": "number", "minimum": 0.2, "maximum": 60.0}, "needs_gui": true},
+                        "raise":    {"value": null, "needs_gui": true},
+                        "page":     {"value": {"enum": ["overview", "processes"]}, "needs_gui": true},
+                        "theme":    {"value": {"enum": theme_enum}, "needs_gui": true},
+                        "palette":  {"value": {"enum": palette_enum}, "needs_gui": true},
+                        "popout":   {"value": {"enum": popout_enum}, "needs_gui": true},
+                        "popin":    {"value": {"enum": popout_enum}, "needs_gui": true},
+                        "shot":     {"value": {"type": "string", "optional": true, "description": "output path; defaults under $XDG_RUNTIME_DIR/sysmon/shots/"},
+                                      "needs_gui": true,
+                                      "note": "BLOCKS until the PNG exists; result.path names it. Captures the main viewport only — pop-outs are separate OS windows"},
+                        "compact":  {"value": {"enum": ["on", "off"]}, "needs_gui": true},
+                        "units":    {"value": {"enum": ["decimal", "binary"]}, "needs_gui": true},
+                    },
+                    "exits": [0, 2, 3, 4],
+                },
+                "serve": {
+                    "usage": "sysmon serve",
+                    "kind": "daemon",
+                    "description": "headless owner of the control socket; samples only when asked — idle cost is zero",
+                    "exits": [0, 2, 4],
+                },
+                "schema": {
+                    "usage": "sysmon schema",
+                    "kind": "one-shot",
+                    "description": "this document — always current, generated from the binary",
+                    "exits": [0],
+                },
             },
             "socket": {
                 "path": control::socket_path(),
@@ -348,7 +518,7 @@ fn build_schema() -> Value {
         "notes": {
             "rates": "every *_bps/_percent rate spans `interval_seconds`, reported per snapshot; each collector tracks its own window so mixed-section clients never skew each other",
             "first_sample": "a fresh sampler's first snapshot has zero rates (nothing to delta against)",
-            "bar_integration": "poll `sysmon tap network --interval 2`; on click, `sysmon probe network --json | jq .result.top_processes` and `sysmon probe connections`",
+            "bar_integration": "poll `sysmon tap network --interval 2`; on click, `sysmon probe network --json | jq .result.network.top_processes` and `sysmon probe connections`",
         },
     })
 }

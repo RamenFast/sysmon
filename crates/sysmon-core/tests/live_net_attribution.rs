@@ -11,12 +11,52 @@ use std::time::Duration;
 use sysmon_core::collect::{Sampler, SamplerOptions};
 use sysmon_core::snapshot::{ProcessNetSource, Wants};
 
-// 20 MB stays under the endpoint's size cap (bigger asks 403); at
-// 2 MB/s the transfer runs ~10 s — longer than the sampling window.
-const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=20000000";
+// A rate-limited download long enough to outlive a sampling window.
+// Two endpoints, because one is not a fact: Cloudflare's speed
+// endpoint answers 429 after a few runs in quick succession, and the
+// old single-URL test read that refusal as "the collector saw 0 B/s"
+// — blaming sysmon for someone else's rate limiter. The suite now
+// picks a source that will actually serve the bytes, and skips
+// honestly when none will.
+const DOWNLOAD_URLS: [&str; 2] = [
+    "https://speed.cloudflare.com/__down?bytes=20000000",
+    "https://ash-speed.hetzner.com/100MB.bin",
+];
 const RATE_LIMIT: &str = "2M";
 
-fn spawn_curl() -> std::process::Child {
+/// The first endpoint that will really serve a multi-megabyte body
+/// right now. `None` means "skip the test", never "the collector is
+/// broken".
+fn download_url() -> Option<&'static str> {
+    for url in DOWNLOAD_URLS {
+        // Ask for a real megabyte, not a token kilobyte: a 1 KB probe
+        // sails through a rate limiter that will refuse the transfer
+        // the test actually depends on.
+        let served = Command::new("curl")
+            .args([
+                "--silent",
+                "--fail",
+                "--output",
+                "/dev/null",
+                "--max-time",
+                "8",
+                "--range",
+                "0-1000000",
+                url,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if served {
+            return Some(url);
+        }
+    }
+    None
+}
+
+fn spawn_curl(url: &str) -> std::process::Child {
     Command::new("curl")
         .args([
             "--silent",
@@ -27,7 +67,7 @@ fn spawn_curl() -> std::process::Child {
             RATE_LIMIT,
             "--max-time",
             "25",
-            DOWNLOAD_URL,
+            url,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -35,31 +75,13 @@ fn spawn_curl() -> std::process::Child {
         .expect("curl exists")
 }
 
-fn online() -> bool {
-    // A real (tiny) GET — HEAD lies about what a GET will do here.
-    Command::new("curl")
-        .args([
-            "--silent",
-            "--fail",
-            "--output",
-            "/dev/null",
-            "--max-time",
-            "4",
-            "https://speed.cloudflare.com/__down?bytes=1000",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 #[test]
 fn tcp_diag_attributes_curl_traffic_without_nethogs() {
-    if !online() {
-        eprintln!("SKIP (offline): tcp_diag attribution needs real WAN traffic");
+    let Some(download_url) = download_url() else {
+        eprintln!("SKIP: no endpoint would serve the test download (offline or rate-limited)");
         return;
-    }
+    };
 
     let mut sampler = Sampler::with_options(SamplerOptions {
         enable_nethogs: false,
@@ -68,7 +90,7 @@ fn tcp_diag_attributes_curl_traffic_without_nethogs() {
     wants.network = true;
     wants.per_process_net = true;
 
-    let mut curl = spawn_curl();
+    let mut curl = spawn_curl(download_url);
     let curl_pid = curl.id() as i32;
     std::thread::sleep(Duration::from_millis(2500)); // let TCP ramp
 
@@ -103,17 +125,17 @@ fn tcp_diag_attributes_curl_traffic_without_nethogs() {
 
 #[test]
 fn default_sampler_attributes_curl_and_names_its_source() {
-    if !online() {
-        eprintln!("SKIP (offline): attribution needs real WAN traffic");
+    let Some(download_url) = download_url() else {
+        eprintln!("SKIP: no endpoint would serve the test download (offline or rate-limited)");
         return;
-    }
+    };
 
     let mut sampler = Sampler::new(); // nethogs allowed if usable
     let mut wants = Wants::none();
     wants.network = true;
     wants.per_process_net = true;
 
-    let mut curl = spawn_curl();
+    let mut curl = spawn_curl(download_url);
     let curl_pid = curl.id() as i32;
     std::thread::sleep(Duration::from_millis(2500));
 
@@ -176,10 +198,10 @@ fn connection_table_lists_own_sockets_with_process_names() {
 /// as the rate source on a machine where nethogs has capture caps.
 #[test]
 fn nethogs_takes_over_given_time() {
-    if !online() {
-        eprintln!("SKIP (offline)");
+    let Some(download_url) = download_url() else {
+        eprintln!("SKIP: no endpoint would serve the test download (offline or rate-limited)");
         return;
-    }
+    };
     // Only meaningful where nethogs is usable (it is on Ben's box).
     let caps = std::process::Command::new("sh")
         .args(["-c", "getcap $(command -v nethogs) 2>/dev/null"])
@@ -196,7 +218,7 @@ fn nethogs_takes_over_given_time() {
     wants.network = true;
     wants.per_process_net = true;
 
-    let mut curl = spawn_curl();
+    let mut curl = spawn_curl(download_url);
     let curl_pid = curl.id() as i32;
     let _prime = sampler.sample(wants);
 

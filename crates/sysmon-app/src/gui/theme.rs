@@ -52,7 +52,7 @@ const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
     Color32::from_rgba_premultiplied(r, g, b, a)
 }
 
-pub const PALETTES: [Palette; 10] = [
+pub const PALETTES: [Palette; 11] = [
     // ── Blossom Dark — warm wine-plum ground, sakura-rose accent.
     //    The wanted default (house tokens verbatim). ──
     Palette {
@@ -271,6 +271,32 @@ pub const PALETTES: [Palette; 10] = [
         stone_hi: rgb(0x1f, 0x33, 0x27),
         stone_lo: rgb(0x06, 0x0c, 0x08),
     },
+    // ── Greyscale — the a11y floor. Not a mood: the room that still
+    //    reads when colour cannot be relied on (forced-colors, low
+    //    vision, a monochrome capture). Every distinction the other
+    //    ten make with hue, this one makes with value alone, at
+    //    ratios well past WCAG AA. Chosen automatically when the
+    //    desktop asks for high contrast. ──
+    Palette {
+        id: "greyscale",
+        label: "Greyscale",
+        dark: true,
+        plane: rgb(0x00, 0x00, 0x00),
+        surface: rgb(0x0d, 0x0d, 0x0d),
+        surface_2: rgb(0x1c, 0x1c, 0x1c),
+        ink: rgb(0xff, 0xff, 0xff),
+        ink_2: rgb(0xd6, 0xd6, 0xd6),
+        muted: rgb(0xa8, 0xa8, 0xa8),
+        line: rgba(255, 255, 255, 90),
+        line_strong: rgba(255, 255, 255, 170),
+        accent: rgb(0xff, 0xff, 0xff),
+        on_accent: rgb(0x00, 0x00, 0x00),
+        title: rgb(0xff, 0xff, 0xff),
+        value: rgb(0xe4, 0xe4, 0xe4),
+        stone: rgb(0x24, 0x24, 0x24),
+        stone_hi: rgb(0x3d, 0x3d, 0x3d),
+        stone_lo: rgb(0x08, 0x08, 0x08),
+    },
 ];
 
 pub fn palette_by_id(id: &str) -> Option<&'static Palette> {
@@ -283,6 +309,11 @@ pub fn palette_by_id(id: &str) -> Option<&'static Palette> {
 pub fn palette_for_system() -> &'static Palette {
     let theme_name = gtk_theme_name().unwrap_or_default().to_lowercase();
     let prefers_dark = color_scheme_prefers_dark();
+    // The a11y floor outranks taste: if the desktop asks for high
+    // contrast, that is not a preference to weigh against a mood.
+    if prefers_high_contrast() {
+        return palette_by_id("greyscale").unwrap_or(&PALETTES[0]);
+    }
     let id = if theme_name.contains("blossom") {
         if prefers_dark.unwrap_or(true) {
             "blossom_dark"
@@ -426,7 +457,63 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     style.spacing.button_padding = egui::vec2(6.0, 2.0);
     style.spacing.menu_margin = egui::Margin::same(8);
 
+    // Motion: short, eased, purposeful (the house rule is 80–200 ms).
+    // phosphor's number, so the two apps feel like one hand. When the
+    // desktop asks for less motion, state changes land immediately —
+    // the information is never withheld, only the travel is dropped.
+    style.animation_time = if prefers_reduced_motion() { 0.0 } else { MOTION_SECONDS };
+
     ctx.set_style(style);
+}
+
+/// The house motion duration — phosphor's 120 ms, inside the stated
+/// 80–200 ms band.
+pub const MOTION_SECONDS: f32 = 0.12;
+
+/// Smoothstep ease (t·t·(3−2t)) — quick to leave, gentle to arrive.
+/// egui's bare `animate_bool` is linear; the carved controls ease
+/// through this so a press feels like a surface settling, not a
+/// value ramping.
+pub fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// An eased 0→1 crossfade for a boolean UI state, honoring the
+/// desktop's reduced-motion preference (where `animation_time` is
+/// already 0, so this collapses to the target value).
+pub fn eased_bool(ctx: &egui::Context, id: egui::Id, value: bool) -> f32 {
+    smoothstep(ctx.animate_bool(id, value))
+}
+
+/// Does the desktop ask for reduced motion?
+/// Cinnamon/GNOME: `org.gnome.desktop.interface enable-animations`.
+/// `SYSMON_REDUCED_MOTION` overrides for testing and for desktops
+/// that have no such setting.
+pub fn prefers_reduced_motion() -> bool {
+    if let Ok(value) = std::env::var("SYSMON_REDUCED_MOTION") {
+        return matches!(value.as_str(), "1" | "true" | "on");
+    }
+    gsettings_get("org.gnome.desktop.interface", "enable-animations")
+        .map(|value| value.trim() == "false")
+        .unwrap_or(false)
+}
+
+/// Does the desktop ask for high contrast? Cinnamon/GNOME express it
+/// as the `HighContrast` GTK theme or the a11y toggle.
+pub fn prefers_high_contrast() -> bool {
+    if let Ok(value) = std::env::var("SYSMON_HIGH_CONTRAST") {
+        return matches!(value.as_str(), "1" | "true" | "on");
+    }
+    if gsettings_get("org.gnome.desktop.a11y.interface", "high-contrast")
+        .map(|value| value.trim() == "true")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    gtk_theme_name()
+        .map(|name| name.to_lowercase().contains("highcontrast"))
+        .unwrap_or(false)
 }
 
 /// The sharp hairline card frame every section lives in.
@@ -649,7 +736,125 @@ pub fn companion_graph_palette(theme_id: &str) -> Option<&'static str> {
         "amber" => Some("amber"),
         "chromacore" => Some("terminal"),
         "basalt" => Some("mono"),
+        // The a11y floor carries all the way through: a greyscale
+        // room with coloured graphs would be a greyscale room in
+        // name only.
+        "greyscale" => Some("mono"),
         "paper" => Some("sunset"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod a11y_tests {
+    use super::*;
+
+    /// Relative luminance per WCAG 2.x.
+    fn luminance(color: Color32) -> f32 {
+        let channel = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let (high, low) = {
+            let (x, y) = (luminance(a), luminance(b));
+            if x > y { (x, y) } else { (y, x) }
+        };
+        (high + 0.05) / (low + 0.05)
+    }
+
+    /// The a11y floor is a floor: primary text must clear WCAG AA
+    /// (4.5:1) against the card it sits on, in *every* room — not
+    /// just the ones that were designed last.
+    #[test]
+    fn every_room_clears_wcag_aa_for_primary_text() {
+        for palette in PALETTES.iter() {
+            let ratio = contrast(palette.ink, palette.surface);
+            assert!(
+                ratio >= 4.5,
+                "{}: ink on surface is {ratio:.2}:1, below WCAG AA",
+                palette.id
+            );
+        }
+    }
+
+    /// Greyscale is the fallback that must still read when colour
+    /// cannot be relied on, so it is held to AAA (7:1) and must be
+    /// literally colourless.
+    #[test]
+    fn greyscale_is_colourless_and_clears_aaa() {
+        let palette = palette_by_id("greyscale").expect("the a11y floor exists");
+        assert!(
+            contrast(palette.ink, palette.surface) >= 7.0,
+            "greyscale must clear WCAG AAA"
+        );
+        for color in [
+            palette.plane,
+            palette.surface,
+            palette.surface_2,
+            palette.ink,
+            palette.ink_2,
+            palette.muted,
+            palette.accent,
+            palette.title,
+            palette.value,
+            palette.stone,
+        ] {
+            assert_eq!(
+                (color.r(), color.g()),
+                (color.g(), color.b()),
+                "greyscale carries a hue: {color:?}"
+            );
+        }
+    }
+
+    /// The house motion band is 80–200 ms; travel is dropped, never
+    /// the state change, when the desktop asks for less motion.
+    #[test]
+    fn motion_sits_inside_the_house_band() {
+        assert!((0.08..=0.20).contains(&MOTION_SECONDS));
+        assert_eq!(smoothstep(0.0), 0.0);
+        assert_eq!(smoothstep(1.0), 1.0);
+        assert!((smoothstep(0.5) - 0.5).abs() < f32::EPSILON);
+        // eased, not linear: the middle moves faster than the ends
+        assert!(smoothstep(0.25) < 0.25);
+        assert!(smoothstep(0.75) > 0.75);
+    }
+
+    /// The a11y floor is only a floor if it holds everywhere: a
+    /// greyscale room must not paint coloured graphs.
+    #[test]
+    fn greyscale_carries_a_colourless_graph_palette() {
+        let companion = companion_graph_palette("greyscale").expect("greyscale has a companion");
+        let palette = GRAPH_PALETTES
+            .iter()
+            .find(|candidate| candidate.id == companion)
+            .expect("the companion exists");
+        for series in palette.light.iter().chain(palette.dark.iter()) {
+            let [r, g, b, _] = series.to_array();
+            let chroma = r.max(g).max(b) as i32 - r.min(g).min(b) as i32;
+            assert!(
+                chroma <= 24,
+                "greyscale's graph companion `{companion}` carries chroma {chroma}"
+            );
+        }
+    }
+
+    /// Every palette id is unique and reachable by id — the schema
+    /// publishes this list, so a duplicate would be a lie on the wire.
+    #[test]
+    fn palette_ids_are_unique_and_resolvable() {
+        let mut seen = std::collections::HashSet::new();
+        for palette in PALETTES.iter() {
+            assert!(seen.insert(palette.id), "duplicate id {}", palette.id);
+            assert!(palette_by_id(palette.id).is_some());
+        }
     }
 }

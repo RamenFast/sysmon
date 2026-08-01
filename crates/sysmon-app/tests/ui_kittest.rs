@@ -14,6 +14,28 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use sysmon_app::gui::app::{Page, SharedUi, SysMonApp};
 use sysmon_app::gui::settings::Settings;
 
+/// Settle the UI until `label` is actually present, instead of
+/// guessing how many frames a popup needs.
+///
+/// The blind `run_steps(8)` this replaces at the context-menu step
+/// was a real flake: the right-click opens a menu that egui builds
+/// over a variable number of frames, and roughly one run in six the
+/// assertion fired before "Open in process viewer" existed. A test
+/// that fails one time in six teaches a maintainer to re-run instead
+/// of to look, which is worse than no test.
+#[track_caller]
+fn settle_until(harness: &mut Harness<'_, SysMonApp>, label: &str) {
+    for _ in 0..40 {
+        if harness.query_by_label(label).is_some() {
+            // present — give it one more frame to finish laying out
+            harness.run_steps(1);
+            return;
+        }
+        harness.run_steps(1);
+    }
+    panic!("`{label}` never appeared after 40 frames");
+}
+
 #[test]
 fn ui_interactions_end_to_end() {
     // Never touch the developer's real settings file.
@@ -25,6 +47,9 @@ fn ui_interactions_end_to_end() {
 
     let settings = Settings::default();
     let shared = Arc::new(SharedUi::new(0.5));
+    // The test keeps its own handle so it can freeze sampling at the
+    // one step that races live data (see the context-menu block).
+    let sampler_control = shared.clone();
     let (command_tx, command_rx) = std::sync::mpsc::channel();
 
     let mut harness = Harness::builder()
@@ -140,6 +165,24 @@ fn ui_interactions_end_to_end() {
     assert_eq!(harness.state().page, Page::Overview);
 
     // ---- overview right-click → "Open in process viewer" -------------
+    //
+    // Freeze the sampler first. The overview's top-process rows are
+    // ranked live, so between the frame that reads a row's label and
+    // the frame that clicks its menu item, a busier process can take
+    // the slot — the click then lands on a different pid than the one
+    // read, and the test fails about one run in six. That flake is
+    // the *test* racing live data, not the app misbehaving, and a
+    // test that fails one time in six teaches a maintainer to re-run
+    // instead of to look. Pausing is the app's own affordance, so the
+    // interaction under test is still the real one.
+    sampler_control
+        .paused
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    // Pausing stops the *next* sample; one may already be in flight.
+    // Outwait a full interval so the row order is genuinely frozen
+    // before anything is read from it.
+    std::thread::sleep(std::time::Duration::from_millis(900));
+    harness.run_steps(3);
     {
         let target = harness
             .query_all_by_role(Role::Button)
@@ -152,7 +195,7 @@ fn ui_interactions_end_to_end() {
         let label = target.accesskit_node().label().unwrap().to_string();
         let pid: i32 = label.rsplit("PID ").next().unwrap().trim().parse().unwrap();
         target.click_secondary();
-        harness.run_steps(8);
+        settle_until(&mut harness, "Open in process viewer");
         harness.get_by_label("Open in process viewer").click();
         harness.run_steps(8);
         assert_eq!(harness.state().page, Page::Processes, "jumped to the table");
@@ -162,6 +205,9 @@ fn ui_interactions_end_to_end() {
             "the process arrived selected"
         );
     }
+    sampler_control
+        .paused
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     harness.get_by_label("Overview").click();
     harness.run_steps(8);
 

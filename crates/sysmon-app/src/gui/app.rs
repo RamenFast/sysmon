@@ -18,6 +18,7 @@ use sysmon_core::units::Units;
 
 use super::actions::{self, ConfirmKind, PendingConfirm};
 use super::backend::GuiCommand;
+use crate::control::VerbError;
 use super::cards::{
     self, AppAction, CardContext, Glyph, glyph_button, menu_check_row, menu_chip, menu_option_row,
 };
@@ -929,9 +930,9 @@ impl SysMonApp {
                         self.page = Page::Processes;
                         Ok(serde_json::json!({"page": "processes"}))
                     }
-                    other => Err((
+                    other => Err(VerbError::bad_args(
                         format!("unknown page `{other}`"),
-                        "pages: overview processes".to_string(),
+                        "pages: overview processes",
                     )),
                 },
                 "theme" => {
@@ -944,11 +945,10 @@ impl SysMonApp {
                         self.settings.save();
                         Ok(serde_json::json!({"theme": wanted}))
                     } else {
-                        Err((
+                        Err(VerbError::bad_args(
                             format!("unknown theme `{wanted}`"),
                             "themes: system blossom_dark blossom amoled light dark funky paper \
-                             basalt amber chromacore"
-                                .to_string(),
+                             basalt amber chromacore",
                         ))
                     }
                 }
@@ -959,10 +959,9 @@ impl SysMonApp {
                         self.settings.save();
                         Ok(serde_json::json!({"palette": wanted}))
                     } else {
-                        Err((
+                        Err(VerbError::bad_args(
                             format!("unknown graph palette `{wanted}`"),
-                            "palettes: mint aqua sunset forest mono blossom funky amber terminal"
-                                .to_string(),
+                            "palettes: mint aqua sunset forest mono blossom funky amber terminal",
                         ))
                     }
                 }
@@ -987,9 +986,9 @@ impl SysMonApp {
                                 "popped_out": verb == "popout",
                             }))
                         }
-                        None => Err((
+                        None => Err(VerbError::bad_args(
                             format!("unknown section `{wanted}`"),
-                            "sections: gpu memory cpu network disks sensors".to_string(),
+                            "sections: gpu memory cpu network disks sensors",
                         )),
                     }
                 }
@@ -1009,9 +1008,9 @@ impl SysMonApp {
                 }
                 "shot" => {
                     if self.pending_screenshot.is_some() {
-                        Err((
-                            "a screenshot is already in flight".to_string(),
-                            "wait for it, then retry".to_string(),
+                        Err(VerbError::unavailable(
+                            "a screenshot is already in flight",
+                            "wait for it, then retry",
                         ))
                     } else {
                         self.pending_screenshot = Some((reply, path));
@@ -1021,9 +1020,9 @@ impl SysMonApp {
                         continue; // deferred reply after the render
                     }
                 }
-                other => Err((
+                other => Err(VerbError::bad_args(
                     format!("the GUI does not know `{other}`"),
-                    "see `sysmon schema`".to_string(),
+                    "see `sysmon schema`",
                 )),
             };
             let _ = reply.send(result);
@@ -1055,9 +1054,9 @@ impl SysMonApp {
         let result = save_color_image_png(&image, &path)
             .map(|()| serde_json::json!({"path": path}))
             .map_err(|error| {
-                (
+                VerbError::runtime(
                     format!("could not write the screenshot: {error}"),
-                    "pass a writable path: `sysmon ctl shot /tmp/shot.png`".to_string(),
+                    "pass a writable path: `sysmon ctl shot /tmp/shot.png`",
                 )
             });
         let _ = reply.send(result);

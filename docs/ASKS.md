@@ -42,3 +42,13 @@ Ben's machine · README stays evergreen.
 
 v2.0.0 (Rust rewrite) and v2.1.0 (ten rooms) predate this ledger —
 their asks live in `docs/dev/PLAN.md` and the release notes.
+
+## 2026-08-01 · v3.0.0 round (the standard)
+
+| # | ask (Ben's words, condensed) | landed |
+|---|---|---|
+| 17 | "Bring sysmon up to our UI/CLI/any other standards, w/o breaking any app functionality" | `scripts/conformance.sh` makes the standard executable (13 checks, 6/13 → 13/13); schema carries the envelope (R5) and a strict contract; `ts` is ISO-8601 (R1); stream lines carry `event` (R3); unknown commands go through the envelope; socket errors classify their own exit code. No regressions: every key and exit code of 2.2.2 survives |
+| 18 | "Treat gtk like python. No gtk or python." | verified rather than assumed: no `.py` files, no v1 leftovers, and no gtk/gdk/glib/gobject/pango/atk crate in the 455-package lock tree or in the deb/rpm/desktop deps. Now a standing check (C11) |
+| 19 | "The orchestrator only may edit, no subagents editing" | three read-only recon agents (CLI, UI, packaging); every finding reproduced by hand before acting; two of their claims were wrong (an egui version misread) and were rejected |
+| 20 | UI law conformance | five of seven stated rules were already clean. Fixed: motion is now 120 ms smoothstep and honors reduced-motion; a Greyscale a11y floor exists, is colourless by assertion, clears WCAG AAA, and `system` mode picks it under high contrast. All eleven rooms now hold to WCAG AA by test |
+| 21 | packaging/release law | `release.sh` now gates on the whole `--version` string, every README install command, `conformance.sh`, `e2e.sh`, and a checksum re-verify — and builds artifacts *before* pushing a tag, so a packaging failure can no longer strand a published tag |

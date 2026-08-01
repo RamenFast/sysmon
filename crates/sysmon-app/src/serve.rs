@@ -38,32 +38,30 @@ impl Backend for ServeBackend {
 
     fn snapshot(&self, wants: Wants) -> Result<Value, VerbError> {
         let mut sampler = self.sampler.lock().map_err(|_| {
-            (
-                "sampler poisoned by an earlier panic".to_string(),
-                "restart the daemon: sysmon ctl quit && sysmon serve".to_string(),
+            VerbError::runtime(
+                "sampler poisoned by an earlier panic",
+                "restart the daemon: sysmon ctl quit && sysmon serve",
             )
         })?;
         serde_json::to_value(sampler.sample(wants)).map_err(|serialize_error| {
-            (
+            VerbError::runtime(
                 format!("snapshot serialization failed: {serialize_error}"),
-                "this is a sysmon bug — please report it".to_string(),
+                "this is a sysmon bug — please report it",
             )
         })
     }
 
     fn set_paused(&self, _paused: bool) -> Result<Value, VerbError> {
-        Err((
-            "serve samples on demand — there is nothing to pause".to_string(),
-            "drive cadence from the client side (`sysmon tap … --interval N`), or pause the GUI"
-                .to_string(),
+        Err(VerbError::unavailable(
+            "serve samples on demand — there is nothing to pause",
+            "drive cadence from the client side (`sysmon tap … --interval N`), or pause the GUI",
         ))
     }
 
     fn set_interval(&self, _seconds: f64) -> Result<Value, VerbError> {
-        Err((
-            "serve has no fixed interval — each subscriber picks its own".to_string(),
-            "pass --interval to `sysmon tap`, or send {\"verb\":\"subscribe\",\"interval\":N}"
-                .to_string(),
+        Err(VerbError::unavailable(
+            "serve has no fixed interval — each subscriber picks its own",
+            "pass --interval to `sysmon tap`, or send {\"verb\":\"subscribe\",\"interval\":N}",
         ))
     }
 

@@ -20,3 +20,11 @@ Rules:
 
 ## Ledger
 
+
+- 2026-08-01 [ask] bring sysmon up to the workspace UI/CLI/any-other standards without breaking app functionality
+- 2026-08-01 [correction] GTK is treated exactly like Python — no GTK, no Python anywhere in the tree, deps, or packaging
+- 2026-08-01 [ask] the orchestrating agent alone may edit; subagents are read-only investigators
+- 2026-08-01 [ask] version this round as 3.0
+- 2026-08-01 [ask] install the finished build on the machine and keep GitHub backed up
+- 2026-08-01 [claim] GPT-5.6 subagents invent problems when they find none — no finding is acted on without a reproducing command
+- 2026-08-01 [ask] leave the ~/Dev/ClaudeWorkspaces symlink surface alone for now

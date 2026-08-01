@@ -1,4 +1,4 @@
-# SysMon v2 workspace — Rust engine + egui shell. The v1 Python/GTK3
+# SysMon v3 workspace — Rust engine + egui shell. The v1 Python/GTK3
 # tree lives at tag v1.0.0; this tree replaces it wholesale.
 
 [workspace]
@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2.2.2"
+version = "3.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/RamenFast/sysmon"

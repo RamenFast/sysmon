@@ -36,3 +36,33 @@ not confident about?" — each answer lands here as a real TODO.*
 - ~~Details/combined viewports not poked when no pop-out open~~ —
   found during 2.2: `popout_viewports` returned early before
   rebuilding `open_viewports`; registration moved to `update()`.
+
+## From the v3.0.0 standard round (2026-08-01)
+
+- **[fixed] `run_steps(8)` after a right-click was a real flake, not
+  debt.** The 2.2.0 entry below called the magic number a style
+  problem; it was failing ~1 run in 6. Two causes, both now closed:
+  the context menu needed a *wait-until-present* (`settle_until`)
+  rather than a fixed frame count, and the overview's live top-process
+  ranking could re-order between reading a row's pid and clicking its
+  menu item. The test now freezes sampling (the app's own pause) and
+  outwaits the in-flight sample. 0 failures in 25 consecutive runs,
+  from ~4 in 25 before.
+- **[fixed] A rate limiter was being reported as a collector bug.**
+  `live_net_attribution` probed the network with a 1 KB GET and then
+  depended on a 20 MB one. When Cloudflare's speed endpoint started
+  answering 429 (after repeated runs), the small probe still passed,
+  so three tests failed claiming "tcp_diag saw only 0 B/s" — blaming
+  sysmon for someone else's refusal. The suite now asks each candidate
+  endpoint for a real megabyte, falls back to a second host, and skips
+  honestly when neither will serve.
+- **[watch] The greyscale room's chroma comes only from app icons.**
+  A sampled scan of the release screenshot shows 0.5% of pixels with
+  chroma > 12 (a normal room is ~88%), and the remainder is
+  desktop-entry icons, which are deliberately left recognizable. If a
+  strict monochrome mode is ever wanted, the icon rasterizer is the
+  one place left to desaturate.
+- **[watch] `scripts/conformance.sh` encodes the standard as it reads
+  today.** If AGENT-CLI-STANDARD.md changes, the harness is the second
+  place to edit, and there is no automation linking them. The doctor
+  checks the envelope; only this harness checks the whole contract.

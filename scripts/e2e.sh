@@ -49,7 +49,7 @@ export XDG_RUNTIME_DIR="$runtime"
 pass "gui owns the socket"
 
 say "screenshot every theme × both pages"
-for theme in blossom_dark blossom amoled light dark funky paper basalt amber chromacore; do
+for theme in blossom_dark blossom amoled light dark funky paper basalt amber chromacore greyscale; do
   "$bin" ctl theme "$theme" >/dev/null
   for page in overview processes; do
     "$bin" ctl page "$page" >/dev/null
@@ -59,7 +59,7 @@ for theme in blossom_dark blossom amoled light dark funky paper basalt amber chr
     cp "$shot" "$out/$theme-$page.png"
   done
 done
-pass "20 theme/page screenshots"
+pass "22 theme/page screenshots"
 
 say "pop-out + drag-dock"
 "$bin" ctl theme blossom_dark >/dev/null
