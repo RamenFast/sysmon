@@ -89,3 +89,19 @@ not confident about?" — each answer lands here as a real TODO.*
   same reading. Left alone deliberately: changing `probe` now would be
   the very regression this round was fixing. Worth unifying behind one
   serializer if the shapes are ever revisited.
+
+## From the v3.0.2 walkthrough (2026-08-01)
+
+- **[fixed] The docs told agents to use a tool this machine does not
+  have.** `docs/AGENTS.md`, `docs/API.md` and the sysmon skill all
+  demonstrated the raw socket with `socat`, which is not installed
+  here — found by running the skill's own examples verbatim instead of
+  reading them. Switched to `nc -U` (base system, verified working).
+  C15 now fails if any external tool named in a docs code block is
+  missing, and is mutation-proven.
+- **[watch] The skill files are checked by hand, not by the suite.**
+  C15 covers the repo's docs; `~/.claude/skills/sysmon/SKILL.md` and
+  its `~/.agents` mirror live outside the repo and drifted the same way.
+  They were fixed together this round, but nothing would catch it next
+  time. A `skills` verb, or a doctor check that diffs the mirrors, is
+  the honest fix.

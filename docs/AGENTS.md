@@ -108,7 +108,8 @@ exits 2 naming the owner.
 Raw socket, no CLI:
 
 ```bash
-echo '{"verb":"snapshot","sections":["network"]}' | socat - UNIX:$XDG_RUNTIME_DIR/sysmon/ctl.sock
+# nc ships with the base system; socat is a fine substitute if you have it
+echo '{"verb":"snapshot","sections":["network"]}' | nc -U $XDG_RUNTIME_DIR/sysmon/ctl.sock
 # {"verb":"subscribe","sections":["network"],"interval":2} upgrades to an NDJSON stream
 ```
 

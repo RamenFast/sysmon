@@ -372,6 +372,30 @@ c14() {
   printf '%s' '--json forces a complete error envelope on a terminal'
 }
 
+# ── C15 · documented commands run on this machine ────────────────────
+# The docs told an agent to drive the socket with `socat`, which is not
+# installed here — an instruction that fails on the very machine it
+# documents. Every external tool named in a docs code block must exist.
+c15() {
+  local bad="" seen=""
+  local docs=(docs/AGENTS.md docs/API.md README.md)
+  for doc in "${docs[@]}"; do
+    [ -f "${doc}" ] || continue
+    # the first word of each piped/leading command inside a code block
+    local tools
+    tools="$(grep -oE '(^|\| )(socat|nc|jq|curl|socket|python3|xvfb-run|nethogs|modprobe|sha256sum)\b' "${doc}" \
+             | tr -d '|' | tr -d ' ' | sort -u)"
+    for tool in ${tools}; do
+      case " ${seen} " in *" ${tool} "*) continue ;; esac
+      seen="${seen} ${tool}"
+      command -v "${tool}" >/dev/null 2>&1 \
+        || bad="${bad} [${doc}:${tool}-not-installed]"
+    done
+  done
+  [ -z "${bad}" ] || { printf 'docs name tools this machine does not have:%s' "${bad}"; return 1; }
+  printf 'every external tool named in the docs exists here:%s' "${seen}"
+}
+
 # ── C11 · language law: no Python, no GTK (AGENTS.md §3) ─────────────
 c11() {
   local bad=""
@@ -421,6 +445,7 @@ check C11 "language law: no Python, no GTK"                       c11
 check C12 "if it compiles, it installs"                           c12
 check C13 "hostile input never panics or leaves 0/2/3/4"          c13
 check C14 "--json is honored on error paths"                      c14
+check C15 "documented commands run on this machine"               c15
 
 total=$((passed + failed))
 status="ok"; exit_code=0

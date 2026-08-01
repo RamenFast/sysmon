@@ -52,3 +52,10 @@ their asks live in `docs/dev/PLAN.md` and the release notes.
 | 19 | "The orchestrator only may edit, no subagents editing" | three read-only recon agents (CLI, UI, packaging); every finding reproduced by hand before acting; two of their claims were wrong (an egui version misread) and were rejected |
 | 20 | UI law conformance | five of seven stated rules were already clean. Fixed: motion is now 120 ms smoothstep and honors reduced-motion; a Greyscale a11y floor exists, is colourless by assertion, clears WCAG AAA, and `system` mode picks it under high contrast. All eleven rooms now hold to WCAG AA by test |
 | 21 | packaging/release law | `release.sh` now gates on the whole `--version` string, every README install command, `conformance.sh`, `e2e.sh`, and a checksum re-verify — and builds artifacts *before* pushing a tag, so a packaging failure can no longer strand a published tag |
+
+## 2026-08-01 · v3.0.1 / v3.0.2 (the adversarial rounds)
+
+| # | ask | landed |
+|---|---|---|
+| 22 | "verification agents are cheap, just takes time" | two read-only verifiers were pointed at the *released* binary and told to prove the conformance claim wrong. Most attacks bounced; three landed and all three were real: `tap -i NaN` panicked (exit 101, outside the standard's set), `--json` was ignored on error paths, and `event` was widening the f32 readings (`0.825` → `0.824999988079071`). Fixed in 3.0.1, with C13/C14 added to the harness |
+| 23 | (self-found, walking the agent's actual path) | the docs and skill told agents to drive the socket with `socat`, which is not installed on this machine — an instruction that fails on the machine it documents. Switched to `nc -U`, and C15 now checks every external tool named in a docs code block actually exists |

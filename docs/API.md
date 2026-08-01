@@ -9,8 +9,8 @@ it.
 Every one-shot reply is a single JSON envelope:
 
 ```json
-{"status":"ok","tool":"sysmon","version":"3.0.1","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
-{"status":"error","tool":"sysmon","version":"3.0.1","ts":…,"error":"…","fix":"…","exit":3}
+{"status":"ok","tool":"sysmon","version":"3.0.2","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
+{"status":"error","tool":"sysmon","version":"3.0.2","ts":…,"error":"…","fix":"…","exit":3}
 ```
 
 - `ts` is ISO-8601 with a UTC offset; `ts_epoch` is the same instant
@@ -86,7 +86,8 @@ modes are disclosed, never silent.
 one envelope per line out:
 
 ```bash
-echo '{"verb":"snapshot","sections":["network"]}' | socat - UNIX:$XDG_RUNTIME_DIR/sysmon/ctl.sock
+# nc ships with the base system; socat is a fine substitute if you have it
+echo '{"verb":"snapshot","sections":["network"]}' | nc -U $XDG_RUNTIME_DIR/sysmon/ctl.sock
 ```
 
 `{"verb":"subscribe","sections":["network"],"interval":2}` upgrades
