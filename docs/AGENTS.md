@@ -69,7 +69,7 @@ samples locally — either way the consumer code is identical.
 sysmon ctl status                  # who owns the socket: mode gui|serve, pid, version
 sysmon ctl page processes          # overview | processes
 sysmon ctl theme blossom_dark      # system blossom_dark blossom amoled light dark
-                                   #   funky paper basalt amber chromacore
+                                   #   funky paper basalt amber chromacore greyscale
 sysmon ctl palette sunset          # graph colors: mint aqua sunset forest mono
                                    #   blossom funky amber terminal
 sysmon ctl popout gpu              # gpu memory cpu network disks sensors

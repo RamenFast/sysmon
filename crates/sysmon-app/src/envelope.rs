@@ -111,9 +111,25 @@ pub fn emit(envelope: &Value) {
 /// Emit an error envelope (stderr gets the human reading when
 /// stdout is a terminal) and hand back the exit code.
 pub fn fail(message: impl Into<String>, fix: impl Into<String>, code: i32) -> i32 {
+    fail_forced(message, fix, code, false)
+}
+
+/// `fail`, honoring an explicit `--json` on the failing call.
+///
+/// The auto-switch alone is not enough on an error path: an agent on
+/// a pty that passes `--json` was still getting prose on stderr and
+/// nothing parseable on stdout, so the one case where a caller most
+/// needs a machine answer — it went wrong — was the case that didn't
+/// give one.
+pub fn fail_forced(
+    message: impl Into<String>,
+    fix: impl Into<String>,
+    code: i32,
+    force_json: bool,
+) -> i32 {
     let message = message.into();
     let fix = fix.into();
-    if json_wanted(false) {
+    if json_wanted(force_json) {
         emit(&error_coded(&message, &fix, code));
     } else {
         eprintln!("sysmon: {message}");

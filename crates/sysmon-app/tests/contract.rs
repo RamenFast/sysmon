@@ -303,3 +303,63 @@ fn every_verb_publishes_its_exit_codes() {
         }
     }
 }
+
+/// A stream line carries `event` **and** the same numbers it always
+/// did.
+///
+/// The first attempt at `event` round-tripped each snapshot through
+/// `serde_json::Value` to insert the field, which re-typed every f32
+/// as f64: a GPU voltage that had always printed `0.825` started
+/// printing `0.824999988079071`. Same value, different bytes, and a
+/// consumer diffing or displaying that text would see it change for
+/// no reason a user could explain. A field added for
+/// self-identification must not rewrite the readings.
+#[test]
+fn stream_lines_self_identify_without_reformatting_the_numbers() {
+    let sandbox = Sandbox::new();
+    let output = Command::new(binary())
+        .args(["tap", "sensors", "--interval", "0.3"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::{BufRead, BufReader};
+            let stdout = child.stdout.take().expect("piped stdout");
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            // give the sampler a couple of windows
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while line.trim().is_empty() && std::time::Instant::now() < deadline {
+                line.clear();
+                let _ = reader.read_line(&mut line);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(line)
+        })
+        .expect("tap produced a line");
+
+    let parsed: Value = serde_json::from_str(output.trim())
+        .unwrap_or_else(|error| panic!("stream line is not JSON ({error}): {output}"));
+    assert_eq!(parsed["event"], "snapshot", "the line must self-identify");
+
+    // The tell: a float that was exact in the typed serializer comes
+    // back with a ~1e-8 tail once it has been through Value. Sensor
+    // readings are f32, so any of them is a probe.
+    let long_tailed = output
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter(|token| {
+            token
+                .split_once('.')
+                .is_some_and(|(_, fraction)| fraction.len() >= 12)
+        })
+        .count();
+    // `ts` legitimately carries many digits; anything beyond a couple
+    // of such numbers means the f32s were widened.
+    assert!(
+        long_tailed <= 3,
+        "stream line shows {long_tailed} over-precise numbers — \
+         the f32 readings were widened by a Value round-trip: {output}"
+    );
+}

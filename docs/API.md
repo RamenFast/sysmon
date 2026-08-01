@@ -9,8 +9,8 @@ it.
 Every one-shot reply is a single JSON envelope:
 
 ```json
-{"status":"ok","tool":"sysmon","version":"3.0.0","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
-{"status":"error","tool":"sysmon","version":"3.0.0","ts":…,"error":"…","fix":"…","exit":3}
+{"status":"ok","tool":"sysmon","version":"3.0.1","ts":"2026-08-01T22:14:07+00:00","ts_epoch":1785622447.0,"result":{…}}
+{"status":"error","tool":"sysmon","version":"3.0.1","ts":…,"error":"…","fix":"…","exit":3}
 ```
 
 - `ts` is ISO-8601 with a UTC offset; `ts_epoch` is the same instant
@@ -65,10 +65,15 @@ sysmon ctl shot /tmp/s.png   # PNG of the window, path in the reply
 sysmon ctl quit
 ```
 
-`raise page theme palette popout popin shot compact units` need the
-GUI; `status snapshot subscribe pause resume interval quit` work on
-either the GUI or `sysmon serve`. With nothing running, ctl exits 2
-and the fix names your options.
+`status snapshot subscribe quit` work against either the GUI or
+`sysmon serve`. Everything else — `raise page theme palette popout
+popin shot compact units`, and also `pause resume interval` — needs
+the GUI: `serve` samples on demand, so it has nothing to pause and no
+fixed interval to set (drive cadence from the client instead, with
+`tap --interval N`). Against `serve` those verbs exit 2 and say so;
+with nothing running at all, ctl exits 2 and the fix names your
+options. `sysmon schema` is the authority here, and it is generated
+from the binary.
 
 A GUI's `status` also names the adapter the window renders on
 (`renderer`); if it had to fall back to a CPU rasterizer (no usable

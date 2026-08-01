@@ -66,3 +66,26 @@ not confident about?" — each answer lands here as a real TODO.*
   today.** If AGENT-CLI-STANDARD.md changes, the harness is the second
   place to edit, and there is no automation linking them. The doctor
   checks the envelope; only this harness checks the whole contract.
+
+## From the v3.0.1 adversarial round (2026-08-01)
+
+- **[fixed] `sysmon tap -i NaN` panicked.** `NaN` and `inf` parse as
+  f64 and then panic inside `Duration::from_secs_f64` — a raw Rust
+  backtrace and exit 101, a code the standard does not define. Found
+  by an adversarial verification pass, not by the suite. Non-finite
+  and out-of-range intervals are now refused as bad arguments (exit 3)
+  rather than clamped silently. New check C13 fuzzes fourteen hostile
+  inputs for panics and out-of-set exits.
+- **[fixed] `--json` was ignored on error paths.** On a pty, an agent
+  passing `--json` got prose on stderr and nothing parseable on
+  stdout — precisely when it most needed a machine answer. New check
+  C14.
+- **[fixed] `event` widened the f32 readings.** Inserting the field
+  via `serde_json::Value` re-typed every f32 as f64, so a GPU voltage
+  that printed `0.825` began printing `0.824999988079071`. Now spliced
+  into the serialized text, and pinned by a contract test.
+- **[watch] `probe` has always widened f32s** (it went through `Value`
+  in v2 as well), so `probe` and `tap` disagree on the text of the
+  same reading. Left alone deliberately: changing `probe` now would be
+  the very regression this round was fixing. Worth unifying behind one
+  serializer if the shapes are ever revisited.

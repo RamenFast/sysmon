@@ -34,6 +34,17 @@ fn parse_section_args(arguments: &[String]) -> Result<(Vec<String>, bool, Option
                     .next()
                     .and_then(|v| v.parse::<f64>().ok())
                     .ok_or_else(|| "--interval needs a number of seconds".to_string())?;
+                // `NaN` and `inf` parse as f64 and then panic inside
+                // Duration::from_secs_f64 — a raw backtrace and exit
+                // 101, which is not in the standard's set. Out-of-range
+                // values used to be silently clamped, which quietly
+                // ignored what the caller asked for. Both are refused
+                // here, as bad arguments, with the range in the fix.
+                if !value.is_finite() || !(0.2..=60.0).contains(&value) {
+                    return Err(format!(
+                        "--interval must be a number of seconds between 0.2 and 60 (got `{value}`)"
+                    ));
+                }
                 interval = Some(value);
             }
             section if !section.starts_with('-') => sections.push(section.to_string()),
@@ -60,13 +71,31 @@ fn wants_for(sections: &[String]) -> Result<(Wants, Vec<String>), String> {
 // ------------------------------------------------------------------ probe
 
 pub fn run_probe(arguments: &[String]) -> i32 {
+    // A parse failure happens before `force_json` is known, so read the
+    // flag straight off the argv: `--json` must be honored on the very
+    // call that got the arguments wrong.
+    let asked_for_json = arguments.iter().any(|argument| argument == "--json");
     let (sections, force_json, _interval) = match parse_section_args(arguments) {
         Ok(parsed) => parsed,
-        Err(message) => return envelope::fail(message, format!("sections: {SECTION_NAMES}"), EXIT_BAD_ARGS),
+        Err(message) => {
+            return envelope::fail_forced(
+                message,
+                format!("sections: {SECTION_NAMES}"),
+                EXIT_BAD_ARGS,
+                asked_for_json,
+            );
+        }
     };
     let (wants, section_names) = match wants_for(&sections) {
         Ok(parsed) => parsed,
-        Err(message) => return envelope::fail(message, format!("sections: {SECTION_NAMES}"), EXIT_BAD_ARGS),
+        Err(message) => {
+            return envelope::fail_forced(
+                message,
+                format!("sections: {SECTION_NAMES}"),
+                EXIT_BAD_ARGS,
+                force_json,
+            );
+        }
     };
 
     // A live instance answers with its own (longer, smoother) window;
@@ -110,10 +139,18 @@ pub fn run_probe(arguments: &[String]) -> i32 {
 // -------------------------------------------------------------------- tap
 
 pub fn run_tap(arguments: &[String]) -> i32 {
-    let (sections, _force_json, interval) = match parse_section_args(arguments) {
+    let (sections, force_json, interval) = match parse_section_args(arguments) {
         Ok(parsed) => parsed,
-        Err(message) => return envelope::fail(message, format!("sections: {SECTION_NAMES}"), EXIT_BAD_ARGS),
+        Err(message) => {
+            return envelope::fail_forced(
+                message,
+                format!("sections: {SECTION_NAMES}; --interval takes 0.2–60 seconds"),
+                EXIT_BAD_ARGS,
+                arguments.iter().any(|a| a == "--json"),
+            );
+        }
     };
+    let _ = force_json; // a stream is always NDJSON; --json is accepted for symmetry
     let default_sections = if sections.is_empty() {
         vec!["network".to_string()]
     } else {
@@ -121,9 +158,16 @@ pub fn run_tap(arguments: &[String]) -> i32 {
     };
     let (wants, section_names) = match wants_for(&default_sections) {
         Ok(parsed) => parsed,
-        Err(message) => return envelope::fail(message, format!("sections: {SECTION_NAMES}"), EXIT_BAD_ARGS),
+        Err(message) => {
+            return envelope::fail_forced(
+                message,
+                format!("sections: {SECTION_NAMES}"),
+                EXIT_BAD_ARGS,
+                arguments.iter().any(|a| a == "--json"),
+            );
+        }
     };
-    let interval = interval.unwrap_or(1.0).clamp(0.2, 60.0);
+    let interval = interval.unwrap_or(1.0).clamp(0.2, 60.0); // validated above
 
     // Prefer the live instance's stream.
     if let Ok(stream) = UnixStream::connect(control::socket_path()) {
@@ -161,15 +205,26 @@ pub fn run_tap(arguments: &[String]) -> i32 {
         // The same line shape either way — a consumer cannot tell
         // (and must not care) whether a live instance or this
         // process sampled it. `event` per ruling R3.
-        let line = match serde_json::to_value(&snapshot) {
-            Ok(mut value) => {
-                if let Some(object) = value.as_object_mut() {
-                    object.insert("event".to_string(), json!(control::SNAPSHOT_EVENT));
-                }
-                serde_json::to_string(&value)
+        //
+        // Spliced into the serialized text rather than round-tripped
+        // through serde_json::Value: going through Value re-types
+        // every f32 as f64, so `0.825` came back out as
+        // `0.824999988079071`. That is the same number, but it is not
+        // the same *bytes*, and this stream's numbers were exact
+        // before. A field added for self-identification has no
+        // business rewriting the readings.
+        let line = serde_json::to_string(&snapshot).map(|serialized| {
+            match serialized.strip_prefix('{') {
+                Some(rest) => format!(
+                    "{{\"event\":\"{}\",{rest}",
+                    control::SNAPSHOT_EVENT
+                ),
+                // A snapshot always serializes as an object; if that
+                // ever stops being true, emit it untouched rather
+                // than corrupt it.
+                None => serialized,
             }
-            Err(error) => Err(error),
-        };
+        });
         match line {
             Ok(line) => {
                 if println_checked(&line).is_err() {
@@ -203,12 +258,13 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
         }
     }
     let Some(verb) = positional.first().map(|s| s.as_str()) else {
-        return envelope::fail(
+        return envelope::fail_forced(
             "ctl needs a verb",
             "verbs: status quit pause resume interval <s> raise page <overview|processes> \
              theme <id> palette <id> popout <section> popin <section> shot [path] \
              compact <on|off> units <decimal|binary>",
             EXIT_BAD_ARGS,
+            force_json,
         );
     };
 
@@ -216,20 +272,22 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
     match verb {
         "interval" => {
             let Some(seconds) = positional.get(1).and_then(|v| v.parse::<f64>().ok()) else {
-                return envelope::fail(
-                    "interval needs seconds",
+                return envelope::fail_forced(
+                    "interval needs seconds between 0.2 and 60",
                     "e.g. `sysmon ctl interval 2`",
                     EXIT_BAD_ARGS,
+                    force_json,
                 );
             };
             request["seconds"] = json!(seconds);
         }
         "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" => {
             let Some(value) = positional.get(1) else {
-                return envelope::fail(
+                return envelope::fail_forced(
                     format!("`{verb}` needs a value"),
                     format!("e.g. `sysmon ctl {verb} <value>`"),
                     EXIT_BAD_ARGS,
+                    force_json,
                 );
             };
             request["value"] = json!(value);
@@ -243,10 +301,11 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
     }
 
     let Some(reply) = control::request(&request) else {
-        return envelope::fail(
+        return envelope::fail_forced(
             "no running instance owns the control socket",
             "start one: `sysmon` (GUI), `sysmon --background` (headless GUI), or `sysmon serve`",
             EXIT_UNAVAILABLE,
+            force_json,
         );
     };
 
@@ -315,6 +374,7 @@ fn build_schema() -> Value {
         "contract": {
             "convention": "https://github.com/RamenFast/sysmon — workspace agent-first CLI standard (envelope, fix-bearing errors, exits 0/2/3/4, isatty auto-switch, strict schema)",
             "envelope": {
+                "applies_to": "every one-shot REPLY (probe, ctl, and the socket's line replies). `schema` is the one-shot that describes the tool rather than answering about it: it carries the same four head fields, then its own documented top-level keys (contract, commands, sections, notes) in place of `result`.",
                 "shape": {"status": "ok|error", "tool": "sysmon", "version": "semver",
                           "ts": "ISO-8601 with UTC offset, e.g. 2026-08-01T22:14:07+00:00",
                           "ts_epoch": "the same instant as unix seconds (extra, never a replacement)",
@@ -322,9 +382,16 @@ fn build_schema() -> Value {
                           "fix": "ALWAYS present on error",
                           "exit": "on error: the exit code this failure means"},
                 "json_schema": {
+                    "$comment": "one reply envelope. `result` is present exactly when status is ok; `error`, `fix` and `exit` exactly when it is error — see allOf.",
                     "type": "object",
                     "required": ["status", "tool", "version", "ts"],
                     "additionalProperties": false,
+                    "allOf": [
+                        {"if": {"properties": {"status": {"const": "ok"}}},
+                          "then": {"required": ["result"]}},
+                        {"if": {"properties": {"status": {"const": "error"}}},
+                          "then": {"required": ["error", "fix", "exit"]}},
+                    ],
                     "properties": {
                         "status": {"enum": ["ok", "error"]},
                         "tool": {"const": "sysmon"},
@@ -345,6 +412,7 @@ fn build_schema() -> Value {
                 "shape": "NDJSON — one raw snapshot object per line, no envelope around stream lines",
                 "event": "every line carries `event`: \"snapshot\"",
                 "json_schema": {
+                    "$comment": "additionalProperties is true on purpose and declared as such: the section keys present on a line are exactly the sections the caller subscribed to, so they cannot be enumerated in advance. The named fields below are on every line.",
                     "type": "object",
                     "required": ["event", "ts", "interval_seconds"],
                     "additionalProperties": true,
@@ -406,7 +474,9 @@ fn build_schema() -> Value {
                     "needs": "a running instance (GUI or `sysmon serve`) — else exit 2",
                     "verbs": {
                         "status":   {"value": null, "needs_gui": false,
-                                      "result": {"type": "object", "additionalProperties": true,
+                                      "result": {"type": "object",
+                                                  "$comment": "additionalProperties is true by declaration: each backend merges its own status fields (a GUI adds renderer, serve adds sampling).",
+                                                  "additionalProperties": true,
                                                   "required": ["running", "pid", "version", "mode"],
                                                   "properties": {
                                                       "running": {"const": true},

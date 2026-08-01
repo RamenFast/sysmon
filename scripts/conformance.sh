@@ -325,6 +325,53 @@ c10() {
   printf 'piped stdout is pure JSON on one-shots and on every stream line'
 }
 
+# ── C13 · no input makes it panic or leave the exit-code set ─────────
+# Found by an adversarial pass: `tap -i NaN` parsed as f64 and then
+# panicked inside Duration::from_secs_f64 — a raw Rust backtrace and
+# exit 101, which is not a code the standard defines.
+c13() {
+  local bad=""
+  local hostile=(
+    "tap cpu -i NaN" "tap cpu -i inf" "tap cpu -i -inf" "tap cpu -i 0"
+    "tap cpu -i -1" "tap cpu -i 999999" "tap cpu -i abc" "tap cpu -i 1e400"
+    "probe --json --json" "probe ''" "probe 🚫" "ctl interval NaN"
+    "ctl interval 999999" "ctl nonsuch --json"
+  )
+  for attack in "${hostile[@]}"; do
+    local code stderr_file
+    stderr_file="${run_root}/attack.err"
+    # Only STDERR is inspected for a panic. Sampling stdout would
+    # false-positive on the machine's own process names — a probe that
+    # happens to list a process called `panicked` is not a panic.
+    timeout 8 ${bin} ${attack} >/dev/null 2>"${stderr_file}"
+    code=$?
+    case "${code}" in
+      0|2|3|4) ;;
+      *) bad="${bad} [${attack}:exit-${code}]" ;;
+    esac
+    grep -qi "panicked at\|RUST_BACKTRACE\|stack backtrace" "${stderr_file}" \
+      && bad="${bad} [${attack}:PANIC]"
+  done
+  [ -z "${bad}" ] || { printf 'hostile input escaped the contract:%s' "${bad}"; return 1; }
+  printf 'all %d hostile inputs stayed inside exits 0/2/3/4 with no panic' "${#hostile[@]}"
+}
+
+# ── C14 · --json is honored on the error paths too ───────────────────
+# The auto-switch alone left an agent on a pty with prose on stderr and
+# nothing parseable on stdout — exactly when it most needed a machine
+# answer.
+c14() {
+  local bad=""
+  for attack in "ctl status --json" "probe nonsuchsection --json" "ctl --json" "tap cpu -i NaN --json"; do
+    local output
+    output="$(on_tty "${bin} ${attack}")"
+    jq -e 'has("status") and has("error") and has("fix") and has("exit")' >/dev/null 2>&1 <<<"${output}" \
+      || bad="${bad} [${attack}]"
+  done
+  [ -z "${bad}" ] || { printf '%s%s' '--json ignored on these error paths:' "${bad}"; return 1; }
+  printf '%s' '--json forces a complete error envelope on a terminal'
+}
+
 # ── C11 · language law: no Python, no GTK (AGENTS.md §3) ─────────────
 c11() {
   local bad=""
@@ -372,6 +419,8 @@ check C9  "NDJSON stream lines carry event (R3)"                  c9
 check C10 "piped stdout is pure JSON, diagnostics on stderr"      c10
 check C11 "language law: no Python, no GTK"                       c11
 check C12 "if it compiles, it installs"                           c12
+check C13 "hostile input never panics or leaves 0/2/3/4"          c13
+check C14 "--json is honored on error paths"                      c14
 
 total=$((passed + failed))
 status="ok"; exit_code=0
