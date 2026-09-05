@@ -1,9 +1,8 @@
 # Architecture
 
-The developer map. File references use `path :: symbol` (symbols
-survive refactors better than line numbers; `grep -n "fn symbol"`
-finds the line). Assume zero context: everything you need to hold in
-your head is written here.
+The developer map. References use `path :: symbol` (symbols survive
+refactors better than line numbers; `grep -n "fn symbol"` finds the line).
+Written for zero context: everything you need to hold in your head is here.
 
 ## The one-sentence version
 
@@ -89,8 +88,7 @@ physical-interfaces-only headline) but stay in `connections`.
 
 - **Every rate-producing collector owns a `SelfInterval`**
   (`collect/read.rs`): its denominators span *its own* previous
-  collection. Two socket clients sampling different sections
-  therefore can't corrupt each other's rates. Never pass a shared
+  collection. Thus two socket clients sampling different sections can't corrupt each other's rates. Never pass a shared
   interval into a collector.
 - Collectors never panic on unreadable files — absence is a normal
   procfs Tuesday; fields go `None`/default and the section survives.
@@ -165,8 +163,7 @@ nethogs-reader         parses `nethogs -t` output into the latest rate map
 pkexec runners         one-shot threads for privileged fallbacks
 ```
 
-Rules: socket threads never touch UI state directly — UI verbs go
-through the `GuiCommand` mpsc + one-shot reply channel, drained by
+Rules: socket threads never touch UI state directly. UI verbs use the `GuiCommand` mpsc + one-shot reply channel, drained by
 `process_commands` on the main thread. Reads (`status`, `snapshot`,
 `subscribe`) answer straight from `SharedUi` and never wake the
 window. Pop-outs render as **immediate viewports** but keep updating
@@ -216,6 +213,5 @@ behavior.
 `packaging/build-deb.sh` (staged tree, stripped binary, scdoc
 manpage, minimal Depends) and `build-rpm.sh` (cargo-generate-rpm;
 asset table + `name = "sysmon"` override in
-`crates/sysmon-app/Cargo.toml`). Both read the version from the
-built binary so filenames can't drift. Output: `packaging/dist/`
+`crates/sysmon-app/Cargo.toml`). Both read the built binary's version so filenames can't drift. Output: `packaging/dist/`
 (gitignored — assets belong on the GitHub release).

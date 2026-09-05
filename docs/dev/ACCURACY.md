@@ -1,9 +1,8 @@
 # Accuracy — what each number means and who vouches for it
 
-Every figure SysMon v2 reports is cross-checked live by
-`crates/sysmon-core/tests/accuracy.rs` against an independent
-authority. The suite runs in `cargo test` on the machine that ships
-the build. **A failure is a collector bug; tolerances are the
+Every SysMon v2 figure gets a live cross-check in
+`crates/sysmon-core/tests/accuracy.rs` against an independent authority.
+The suite runs in `cargo test` on the build's shipping machine. **A failure is a collector bug; tolerances are the
 contract and never get widened to make a red test green.**
 
 | Reading | SysMon's definition | Authority | Tolerance (why) |
@@ -29,8 +28,7 @@ contract and never get widened to make a red test green.**
 - **used memory**: `total − available` answers "how much RAM is
   spoken for" and matches v1, psutil, and GNOME System Monitor.
   htop's figure is smaller (it excludes reclaimable cache from used);
-  both are correct answers to different questions. Ours is stated in
-  the schema description.
+  both correctly answer different questions. The schema description states ours.
 - **network headline**: physical interfaces only. Container/VPN
   virtual interfaces are listed individually but do not inflate the
   WAN figure by double-counting.

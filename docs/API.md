@@ -16,7 +16,7 @@ Every one-shot reply is a single JSON envelope:
 - `ts` is ISO-8601 with a UTC offset; `ts_epoch` is the same instant
   as a number, for arithmetic
 - errors **always** carry a `fix` — the way out, not just the wall —
-  and an `exit` naming the code that failure means
+  and an `exit` naming its failure code
 - exit codes: `0` ok · `2` unavailable (nothing running that could
   answer) · `3` bad arguments · `4` runtime failure
 - output is JSON automatically when stdout is piped; `--json` forces
@@ -72,10 +72,9 @@ the GUI: `serve` samples on demand, so it has nothing to pause and no
 fixed interval to set (drive cadence from the client instead, with
 `tap --interval N`). Against `serve` those verbs exit 2 and say so;
 with nothing running at all, ctl exits 2 and the fix names your
-options. `sysmon schema` is the authority here, and it is generated
-from the binary.
+options. `sysmon schema` is authoritative and generated from the binary.
 
-A GUI's `status` also names the adapter the window renders on
+A GUI's `status` also names its render adapter
 (`renderer`); if it had to fall back to a CPU rasterizer (no usable
 Vulkan driver), `renderer_hint` appears and names the fix — degraded
 modes are disclosed, never silent.

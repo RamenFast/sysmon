@@ -1,9 +1,8 @@
 # Extending SysMon — worked recipes
 
-Checklists for the common changes, written for a zero-context
-executor: every touch point named, nothing left to inference. Find
-symbols with `grep -rn "<symbol>" crates/` — symbol anchors are used
-instead of line numbers because lines rot.
+Common-change checklists for a zero-context executor:
+every touch point named, nothing left to inference. Find
+symbols with `grep -rn "<symbol>" crates/` — symbol anchors replace line numbers because lines rot.
 
 Legend (stable): ▸ one step · 📁 exact file · ✅ runnable verify +
 expected result · ⚠ verified gotcha.
@@ -31,8 +30,7 @@ Example shape: add `iowait_percent` to the CPU section.
   with a fixture string.
 - ▸ 📁 `crates/sysmon-core/tests/accuracy.rs` — if an independent
   authority exists (a /proc re-read, a coreutils tool), add a
-  cross-check with a justified tolerance. A field nobody can verify
-  should make you suspicious of the field.
+  cross-check with a justified tolerance. Be suspicious of a field nobody can verify.
 - ▸ 📁 `crates/sysmon-app/src/gui/cards.rs` — render it (stat_grid
   entry or a row) using `sysmon_core::units` formatters.
 - ▸ Update the three mirrors (⚠ Global above).
@@ -44,8 +42,8 @@ Example shape: add `iowait_percent` to the CPU section.
 
 ## Recipe 2 — add a whole new section + card
 
-The longest checklist. Every step is real; skipping one produces a
-section that exists on the wire but not in the UI (or vice versa).
+The longest checklist. Every step matters: skipping one creates a
+section on the wire but not in the UI (or vice versa).
 
 **core:**
 - ▸ 📁 `crates/sysmon-core/src/collect/<name>.rs` — new collector.
@@ -66,7 +64,7 @@ section that exists on the wire but not in the UI (or vice versa).
   `SECTION_KEYS` (drives visibility toggles + pop-out validation).
 - ▸ 📁 `crates/sysmon-app/src/gui/cards.rs` — `pub fn <name>_card(
   ui, cx: &mut CardContext, …)` using `card_frame` + `card_header`
-  (gives you the title/headline/pop-out chrome for free). Honest
+  (gives title/headline/pop-out chrome for free). Honest
   empty state in the gentle voice when the data can be absent.
 - ▸ 📁 `crates/sysmon-app/src/gui/app.rs` — three places:
   `overview()` (render arm, respecting `section_visible` +
@@ -102,9 +100,9 @@ section that exists on the wire but not in the UI (or vice versa).
   `gui/backend.rs::GuiBackend` — an honest error in whichever mode
   can't do it). Update the unknown-verb fix text.
 - ▸ GUI verbs: 📁 `crates/sysmon-app/src/gui/app.rs ::
-  process_commands` — the match arm that actually does it (main
+  process_commands` — the implementing match arm (main
   thread; persist via `self.settings.save()` when it changes
-  settings). Reply through `Ok(json!({…}))` / `Err((msg, fix))`.
+  settings). Reply via `Ok(json!({…}))` / `Err((msg, fix))`.
   ⚠ Deferred replies (like `shot`): stash the reply sender, `continue`
   instead of replying, answer later — see `pending_screenshot`.
 - ▸ Mirrors: schema verbs list (agent.rs), CTL VERBS in
@@ -148,7 +146,7 @@ section that exists on the wire but not in the UI (or vice versa).
   `[…; N]` length) · a compare arm in `sort_records` (default sort
   direction lives in `SortColumn::defaults_descending`) · the row
   cell in body order (cells MUST stay in column-array order —
-  there's no keying, order is the contract).
+  no keying, order is the contract).
 - ▸ Numeric cells: right-aligned mono via `mono_cell`; blank noise
   below a threshold with `blank_under`; `None` renders "—" (means
   unreadable) vs "" (means zero/noise) — keep that distinction.
