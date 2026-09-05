@@ -1,8 +1,8 @@
 # Driving SysMon as an agent
 
-One binary, JSON everywhere, errors that tell you the way out, no
-pixels needed. This is the worked guide; the always-current machine
-map is `sysmon schema` — strict, generated from the binary, and
+One binary, JSON everywhere, errors with a way out, no
+pixels needed. This worked guide complements the always-current machine
+map, `sysmon schema` — strict, generated from the binary, and
 tested against it (`cargo test -p sysmon-app --test contract` runs
 every jq path it prints). (Developing on the codebase instead?
 `ARCHITECTURE.md` and `dev/EXTENDING.md`; before and after any
@@ -14,9 +14,8 @@ change, `scripts/conformance.sh`.)
   `{"status":"ok|error","tool":"sysmon","version":…,"ts":…,"result"|"error"+"fix"+"exit"}`.
 - `ts` is **ISO-8601 with a UTC offset** (`2026-08-01T22:14:07+00:00`);
   `ts_epoch` carries the same instant as a number, for arithmetic.
-- Errors **always** carry a `fix` you can act on, and an `exit`
-  naming the code that failure means — so a socket client classifies
-  a failure exactly as the CLI does.
+- Errors **always** carry an actionable `fix` and an `exit`
+  naming the failure code, so socket clients classify failures exactly like the CLI.
 - Exit codes: `0` ok · `2` unavailable (nothing running that could
   answer) · `3` bad arguments · `4` runtime failure.
 - Output auto-switches to JSON when stdout is a pipe; `--json`
@@ -25,8 +24,7 @@ change, `scripts/conformance.sh`.)
   envelope around stream lines), **every line carrying
   `event: "snapshot"`**.
 - Every rate spans its snapshot's `interval_seconds`. A fresh
-  sampler's first snapshot has zero rates — that first line is not a
-  bug, it's the delta baseline.
+  sampler's first snapshot has zero rates: the delta baseline, not a bug.
 
 ## Read state
 
@@ -47,8 +45,7 @@ The field to trust for per-process network is
 **`network.process_source`**: `nethogs` (packet truth, all
 protocols, all users) · `tcp_diag` (kernel TCP counters, own-UID
 sockets, zero setup) · `none` (and `process_source_hint` says how to
-upgrade). Don't compare rates across sources in one breath — they
-measure at different layers.
+upgrade). Don't compare rates across sources: they measure different layers.
 
 ## Stream
 
@@ -58,8 +55,8 @@ sysmon tap network --interval 2 | jq --unbuffered -c \
 sysmon tap cpu -i 1                # any section set works
 ```
 
-The intended desktop-bar diet. Each subscriber picks its own
-cadence; rates are correct per line (per-collector windows). The
+The intended desktop-bar diet. Each subscriber picks its
+cadence. Per-collector windows keep rates correct per line. The
 stream rides the live instance's socket when one exists, else
 samples locally — either way the consumer code is identical.
 
@@ -83,8 +80,8 @@ sysmon ctl shot [/path.png]        # BLOCKS until the PNG exists; path in result
 sysmon ctl quit
 ```
 
-`shot` uses a deferred reply — the file exists by the time you can
-read `result.path` (default lands under
+`shot` defers its reply until the file exists at
+`result.path` (default lands under
 `$XDG_RUNTIME_DIR/sysmon/shots/`). It captures the **main viewport
 only**; pop-out windows are separate OS windows (screenshot the X
 root if you need the composition).
@@ -97,9 +94,8 @@ sysmon --background &              # full GUI on a private Xvfb — no window on
                                    # user's screen, socket + ctl verbs + shot all live
 ```
 
-Single-owner socket at `$XDG_RUNTIME_DIR/sysmon/ctl.sock`: a plain
-`sysmon` launch while a **same-version** GUI runs raises it and
-exits 0; if the running GUI is **older** (upgrade day: deb installed
+Single-owner socket at `$XDG_RUNTIME_DIR/sysmon/ctl.sock`: plain
+`sysmon` raises a **same-version** running GUI and exits 0; if the running GUI is **older** (upgrade day: deb installed
 while the old window was up) the new binary asks it to quit and
 takes over, so a relaunch always shows the installed version; a
 launching GUI asks a running `serve` to hand over; a second `serve`
@@ -116,8 +112,7 @@ echo '{"verb":"snapshot","sections":["network"]}' | nc -U $XDG_RUNTIME_DIR/sysmo
 ## Gotchas (paid for, so you don't have to)
 
 - **Isolate test instances**: set both `XDG_RUNTIME_DIR` (socket)
-  and `XDG_CONFIG_HOME` (settings) or you'll drive — and *rewrite
-  the saved settings of* — the user's real instance. `ctl theme` in
+  and `XDG_CONFIG_HOME` (settings) or you'll drive and *rewrite the saved settings of* the user's real instance. `ctl theme` in
   a test once silently repainted the user's config.
 - `ctl` against nothing running exits 2 (the fix names your
   options); `probe`/`tap` never need a daemon.

@@ -1,8 +1,8 @@
 # CLAUDE.md — working on SysMon
 
 SysMon is one Rust binary: an egui system monitor (default command)
-plus an agent API (`probe`/`tap`/`ctl`/`schema`/`serve`) over a
-control socket. Two crates: `sysmon-core` (the engine — collectors,
+and agent API (`probe`/`tap`/`ctl`/`schema`/`serve`) over a
+control socket. Two crates: `sysmon-core` (engine: collectors,
 snapshot model, icon index) and `sysmon-app` (GUI + CLI + socket;
 lib + thin bin).
 
@@ -32,22 +32,22 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
 - **Version law**: workspace version == `sysmon --version` == package
   filenames == git tag. One source: `[workspace.package]` in
   `Cargo.toml`.
-- **Release law**: every commit landing on main IS a release — bump
-  the version on the branch, merge `--no-ff`, run
+- **Release law**: every commit landing on main IS a release. Bump
+  the branch version, merge `--no-ff`, run
   `scripts/release.sh <notes-file>` (tags, builds deb+rpm+tarball+
   SHA256SUMS, publishes on GitHub). main never carries an unreleased
   version.
-- **Accuracy law**: a failing `tests/accuracy.rs` check means fix the
-  collector — never widen the tolerance. Identities are documented in
+- **Accuracy law**: if `tests/accuracy.rs` fails, fix the
+  collector, never widen the tolerance. Identities are documented in
   `docs/dev/ACCURACY.md`; changing one is a breaking API change.
 - **Envelope law**: every CLI/socket error carries a `fix`. Exit
-  codes 0/2/3/4. No silent fallbacks — degraded modes are disclosed
+  codes 0/2/3/4. No silent fallbacks. Disclose degraded modes
   (see `process_source` / `process_source_hint`).
 - **Design law**: sharp corners (`CornerRadius::ZERO`), 1px hairline
   frames, monospace for data, depth only on the few stone-carved
   controls. Palettes are token blocks in `gui/theme.rs`; components
   read tokens, never hardcode colors.
-- **Testing law**: anything that launches the GUI in a test uses a
+- **Testing law**: every GUI test launch uses a
   scratch `XDG_CONFIG_HOME` *and* scratch `XDG_RUNTIME_DIR` — never
   the real settings file, never the real control socket. Never map a
   window on the user's real display; use Xvfb (`scripts/e2e.sh`
@@ -79,8 +79,7 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
 - Edition 2024, toolchain pinned in `rust-toolchain.toml`. Zero
   clippy warnings is the resting state.
 - Every rate-producing collector owns a `SelfInterval` window —
-  never share one interval across collectors (multi-client rates
-  would corrupt).
+  never share intervals across collectors (corrupts multi-client rates).
 - Comments explain constraints ("why"), not narration; SPDX header
   on every source file.
 - Commit messages are receipts-bearing narrative: root cause, what
