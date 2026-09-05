@@ -28,3 +28,4 @@ Rules:
 - 2026-08-01 [ask] install the finished build on the machine and keep GitHub backed up
 - 2026-08-01 [claim] GPT-5.6 subagents invent problems when they find none — no finding is acted on without a reproducing command
 - 2026-08-01 [ask] leave the ~/Dev/ClaudeWorkspaces symlink surface alone for now
+- 2026-09-05 [ask] Compress this project's agent context without information loss. Exclude Nexus's home and exclusive files.
