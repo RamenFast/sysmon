@@ -1,6 +1,6 @@
 ---
 name: sysmon
-description: "Drive SysMon (Ben's Rust + egui system monitor, a station node) without pixels — one-shot machine state for CPU/GPU/memory/network/disks/sensors/processes/connections (probe), NDJSON streams for a desktop bar (tap), drive the running window (ctl: page/theme/palette/popout/shot/interval), run it headless (serve) or on a private Xvfb (--background). Use whenever a task needs live system numbers on this machine, per-process network attribution, a screenshot of the monitor, or control of the running instance. Carries the isolation law that has bitten before (XDG_RUNTIME_DIR *and* XDG_CONFIG_HOME) and the honest limits of each per-process data source."
+description: "Drive SysMon (Ben's Rust + egui system monitor, a station node) without pixels: one-shot CPU/GPU/memory/network/disks/sensors/processes/connections state (probe), desktop-bar NDJSON streams (tap), running-window control (ctl: page/theme/palette/popout/shot/interval), headless (serve) or private Xvfb (--background). Use for live system numbers on this machine, per-process network attribution, monitor screenshots, or running-instance control. Carries the prior-failure isolation law (XDG_RUNTIME_DIR *and* XDG_CONFIG_HOME) and honest limits of each per-process data source."
 ---
 
 > **Submits to [[ben-context-standards]].** That skill is the authority on Ben's coding
@@ -10,9 +10,9 @@ description: "Drive SysMon (Ben's Rust + egui system monitor, a station node) wi
 # Driving SysMon
 
 SysMon ≥ 3.0 (`/usr/bin/sysmon`) is fully agent-drivable: one binary,
-JSON everywhere, errors that carry the way out, no pixels needed. The
-authoritative machine map is **`sysmon schema`** — always generated
-from the binary, never hand-maintained. The worked repo guide is
+JSON everywhere, errors with a way out, no pixels needed. Authoritative
+machine map **`sysmon schema`** is always binary-generated, never
+hand-maintained. Worked repo guide:
 `docs/AGENTS.md` in `~/Dev/ClaudeWorkspace/sysmon`.
 
 ## ⛔ The isolation law (this one has already bitten)
