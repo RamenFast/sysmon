@@ -207,10 +207,13 @@ fn card_header(
                 egui::vec2(subtitle_width, 16.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
+                    // Truncated at narrow widths ("4 × 32 GB D…"): the
+                    // whole line is one hover away.
                     ui.add(
                         egui::Label::new(RichText::new(subtitle).color(cx.palette.muted).size(11.0))
                             .truncate(),
-                    );
+                    )
+                    .on_hover_text(subtitle);
                 },
             );
         }

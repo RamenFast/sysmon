@@ -25,6 +25,12 @@ fail() { printf '\033[31m✗ %s\033[0m\n' "$*"; exit 1; }
 
 cleanup() {
   XDG_RUNTIME_DIR="$runtime" "$bin" ctl quit >/dev/null 2>&1 || true
+  # A run that failed mid-way may leave the GUI deaf to the socket;
+  # never leave it behind on the private display.
+  if [ -n "${gui_pid:-}" ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$gui_pid" 2>/dev/null || break; sleep 0.3; done
+    kill "$gui_pid" 2>/dev/null || true
+  fi
   [ -n "${wm_pid:-}" ] && kill "$wm_pid" 2>/dev/null || true
   [ -n "${xvfb_pid:-}" ] && kill "$xvfb_pid" 2>/dev/null || true
   rm -rf "$config" "$runtime"
@@ -40,13 +46,29 @@ wm_pid=$!
 sleep 1
 
 say "launch (scratch config, scratch socket)"
-DISPLAY=$display XDG_CONFIG_HOME="$config" XDG_RUNTIME_DIR="$runtime" \
+# WAYLAND_DISPLAY unset: this GUI belongs on the private X display.
+# LD_LIBRARY_PATH unset: a custom compositor's (swayfx ships its own
+# libxkbcommon) mixed with the system libxkbcommon-x11 segfaults the
+# X11 path on quit — measured: exit 139 with it, 0 without.
+env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u LD_LIBRARY_PATH DISPLAY=$display XDG_SESSION_TYPE=x11 \
+  XDG_CONFIG_HOME="$config" XDG_RUNTIME_DIR="$runtime" \
   "$bin" >"$out/gui.log" 2>&1 &
+gui_pid=$!
 sleep 7
 export XDG_RUNTIME_DIR="$runtime"
 
 "$bin" ctl status | jq -e '.result.mode == "gui"' >/dev/null || fail "ctl status"
 pass "gui owns the socket"
+
+say "temperature scale round-trips (°F + °C for the screenshots)"
+for scale in fahrenheit celsius both; do
+  "$bin" ctl temperature "$scale" | jq -e --arg s "$scale" '.result.temperature == $s' >/dev/null \
+    || fail "ctl temperature $scale"
+done
+code=0; "$bin" ctl temperature kelvin >/dev/null 2>&1 || code=$?
+[ "$code" = 3 ] || fail "bad scale must exit 3 (got $code)"
+jq -e '.temperature_scale == "both"' "$config/sysmon/settings.json" >/dev/null || fail "scale persisted"
+pass "temperature: celsius/fahrenheit/both apply + persist, junk exits 3"
 
 say "screenshot every theme × both pages"
 for theme in blossom_dark blossom amoled light dark funky paper basalt amber chromacore greyscale; do
@@ -95,9 +117,51 @@ pass "probe/tap/exit-codes"
 
 say "quit"
 "$bin" ctl quit >/dev/null
-sleep 1
+gui_exit=0; wait "$gui_pid" || gui_exit=$?
+[ "$gui_exit" = 0 ] || fail "GUI exited ${gui_exit} on quit (139 = segfault)"
 [ ! -S "$runtime/sysmon/ctl.sock" ] || fail "socket removed on quit"
-pass "clean shutdown"
+pass "clean shutdown (exit 0, socket unlinked)"
+
+# ── native Wayland: the path Ben actually runs ───────────────────────
+# A private headless Sway (never the desktop's): its own runtime dir,
+# no input devices, software renderer for the compositor only.
+sway_bin="$(command -v /opt/swayfx-ux/bin/sway || command -v sway || true)"
+if [ -n "$sway_bin" ]; then
+  say "native Wayland on a private headless sway ($sway_bin)"
+  wl_runtime="/run/user/$(id -u)/sysmon-e2e-wl.$$"
+  mkdir -p "$wl_runtime" && chmod 700 "$wl_runtime"
+  printf 'output HEADLESS-1 mode 1280x900\nxwayland disable\nseat seat0 fallback true\n' >"$wl_runtime/sway.conf"
+  sway_libs=""
+  case "$sway_bin" in /opt/swayfx-ux/*) sway_libs="/opt/swayfx-ux/lib/x86_64-linux-gnu:/opt/swayfx-ux/lib" ;; esac
+  setsid env -i HOME="$HOME" PATH="$PATH" XDG_RUNTIME_DIR="$wl_runtime" \
+    WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+    LD_LIBRARY_PATH="$sway_libs" "$sway_bin" -c "$wl_runtime/sway.conf" >"$out/sway.log" 2>&1 &
+  sway_pid=$!
+  for _ in $(seq 40); do [ -S "$wl_runtime/wayland-1" ] && break; sleep 0.25; done
+  [ -S "$wl_runtime/wayland-1" ] || fail "private sway never offered wayland-1"
+  wl_app_runtime="$(mktemp -d /tmp/sysmon-e2e-wlrt.XXXX)"
+  # The compositor's library path IS inherited here, as on the desktop.
+  env -u DISPLAY LD_LIBRARY_PATH="$sway_libs" WAYLAND_DISPLAY="$wl_runtime/wayland-1" \
+    XDG_SESSION_TYPE=wayland XDG_CONFIG_HOME="$config" XDG_RUNTIME_DIR="$wl_app_runtime" \
+    "$bin" >"$out/gui-wayland.log" 2>&1 &
+  wl_gui=$!
+  for _ in $(seq 40); do [ -S "$wl_app_runtime/sysmon/ctl.sock" ] && break; sleep 0.25; done
+  XDG_RUNTIME_DIR="$wl_app_runtime" "$bin" ctl status | jq -e '.result.mode == "gui"' >/dev/null \
+    || fail "GUI on Wayland didn't come up"
+  XDG_RUNTIME_DIR="$wl_app_runtime" "$bin" ctl page processes >/dev/null
+  sleep 1.5
+  shot=$(XDG_RUNTIME_DIR="$wl_app_runtime" "$bin" ctl shot | jq -r .result.path)
+  [ -s "$shot" ] && cp "$shot" "$out/wayland-processes.png"
+  XDG_RUNTIME_DIR="$wl_app_runtime" "$bin" ctl quit >/dev/null
+  wl_exit=0; wait "$wl_gui" || wl_exit=$?
+  kill "$sway_pid" 2>/dev/null || true
+  wait "$sway_pid" 2>/dev/null || true
+  rm -rf "$wl_runtime" "$wl_app_runtime"
+  [ "$wl_exit" = 0 ] || fail "Wayland GUI exited ${wl_exit} on quit"
+  pass "Wayland: up, rendered, quit exit 0"
+else
+  say "no sway binary: native Wayland stage skipped (install sway to run it)"
+fi
 
 echo
 pass "e2e complete — receipts in $out/"
