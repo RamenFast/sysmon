@@ -78,6 +78,56 @@ pub struct Histories {
     pub commit_peak_bytes: u64,
 }
 
+impl Histories {
+    /// Push one sample of every graphed value. The sampler calls this
+    /// under the histories write lock; `ui_performance` calls it
+    /// directly so the test walks the real push path (reviewer R16).
+    pub fn record(&mut self, snapshot: &SystemSnapshot) {
+        if let Some(gpu) = &snapshot.gpu
+            && gpu.available
+        {
+            self.gpu.push(gpu.busy_percent as f64);
+            if gpu.vram_total_bytes > 0 {
+                self.vram.push(gpu.vram_used_bytes as f64 / gpu.vram_total_bytes as f64 * 100.0);
+            }
+            if let Some(t) = gpu.temperature_edge_celsius {
+                self.gpu_temperature.push(t as f64);
+            }
+        }
+        if let Some(memory) = &snapshot.memory {
+            self.memory.push(memory.used_percent as f64);
+            if memory.total_bytes > 0 {
+                self.memory_cache.push(memory.cached_bytes as f64 / memory.total_bytes as f64 * 100.0);
+            }
+            self.commit_peak_bytes = self.commit_peak_bytes.max(memory.committed_bytes);
+        }
+        if let Some(cpu) = &snapshot.cpu {
+            self.cpu.push(cpu.overall_percent as f64);
+            self.cpu_kernel.push(cpu.kernel_percent as f64);
+            if self.per_core.len() != cpu.per_core_percent.len() {
+                self.per_core = vec![History::default(); cpu.per_core_percent.len()];
+            }
+            for (history, percent) in self.per_core.iter_mut().zip(&cpu.per_core_percent) {
+                history.push(*percent as f64);
+            }
+            if let Some(t) = cpu.temperature_celsius {
+                self.cpu_temperature.push(t as f64);
+            }
+            if let Some(clock) = cpu.frequency_busy_mhz.or(cpu.frequency_mhz) {
+                self.busy_clock.push(clock);
+            }
+        }
+        if let Some(network) = &snapshot.network {
+            self.net_down.push(network.download_bps);
+            self.net_up.push(network.upload_bps);
+        }
+        if let Some(disks) = &snapshot.disks {
+            self.disk_read.push(disks.iter().map(|d| d.read_bps).sum());
+            self.disk_write.push(disks.iter().map(|d| d.write_bps).sum());
+        }
+    }
+}
+
 /// Everything the render paths (main window, pop-outs, socket
 /// backend) share with the sampler.
 pub struct SharedUi {
@@ -137,54 +187,15 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
                     wants.connections = shared.connections_wanted.load(Ordering::Relaxed);
                     let snapshot = Arc::new(sampler.sample(wants));
 
+                    // Histories and `latest` are published under ONE
+                    // guard: a frame that reads histories first and then
+                    // latest (performance()) sees the same sample in both
+                    // (reviewer R4, FM V1). Readers take histories first.
                     {
                         let mut histories = shared.histories.write().unwrap();
-                        if let Some(gpu) = &snapshot.gpu
-                            && gpu.available
-                        {
-                            histories.gpu.push(gpu.busy_percent as f64);
-                            if gpu.vram_total_bytes > 0 {
-                                histories.vram.push(gpu.vram_used_bytes as f64 / gpu.vram_total_bytes as f64 * 100.0);
-                            }
-                            if let Some(t) = gpu.temperature_edge_celsius {
-                                histories.gpu_temperature.push(t as f64);
-                            }
-                        }
-                        if let Some(memory) = &snapshot.memory {
-                            histories.memory.push(memory.used_percent as f64);
-                            if memory.total_bytes > 0 {
-                                histories.memory_cache.push(
-                                    memory.cached_bytes as f64 / memory.total_bytes as f64 * 100.0,
-                                );
-                            }
-                            histories.commit_peak_bytes = histories.commit_peak_bytes.max(memory.committed_bytes);
-                        }
-                        if let Some(cpu) = &snapshot.cpu {
-                            histories.cpu.push(cpu.overall_percent as f64);
-                            histories.cpu_kernel.push(cpu.kernel_percent as f64);
-                            if histories.per_core.len() != cpu.per_core_percent.len() {
-                                histories.per_core = vec![History::default(); cpu.per_core_percent.len()];
-                            }
-                            for (history, percent) in histories.per_core.iter_mut().zip(&cpu.per_core_percent) {
-                                history.push(*percent as f64);
-                            }
-                            if let Some(t) = cpu.temperature_celsius {
-                                histories.cpu_temperature.push(t as f64);
-                            }
-                            if let Some(clock) = cpu.frequency_busy_mhz.or(cpu.frequency_mhz) {
-                                histories.busy_clock.push(clock);
-                            }
-                        }
-                        if let Some(network) = &snapshot.network {
-                            histories.net_down.push(network.download_bps);
-                            histories.net_up.push(network.upload_bps);
-                        }
-                        if let Some(disks) = &snapshot.disks {
-                            histories.disk_read.push(disks.iter().map(|d| d.read_bps).sum());
-                            histories.disk_write.push(disks.iter().map(|d| d.write_bps).sum());
-                        }
+                        histories.record(&snapshot);
+                        *shared.latest.write().unwrap() = snapshot;
                     }
-                    *shared.latest.write().unwrap() = snapshot;
 
                     ctx.request_repaint();
                     for viewport in shared.open_viewports.lock().unwrap().iter() {
@@ -612,8 +623,10 @@ impl SysMonApp {
 
     fn performance(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
         let palette = self.palette();
-        let snapshot = self.shared.latest.read().unwrap().clone();
+        // Histories first, then latest: the sampler writes both under
+        // the histories guard, so this order sees one sample (V1).
         let histories = self.shared.histories.read().unwrap();
+        let snapshot = self.shared.latest.read().unwrap().clone();
         let mut cx = PerformanceContext {
             palette,
             settings: &self.settings,

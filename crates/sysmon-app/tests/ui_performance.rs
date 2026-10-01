@@ -30,7 +30,8 @@ use sysmon_app::gui::processes::SortColumn;
 use sysmon_app::gui::settings::Settings;
 use sysmon_core::snapshot::{CpuSnapshot, GpuSnapshot, MemorySnapshot, ProcessRecord, SystemSnapshot};
 
-const CORES: usize = 8;
+/// Ben's machine: 32 threads, °F + °C.
+const CORES: usize = 32;
 
 fn snapshot() -> SystemSnapshot {
     SystemSnapshot {
@@ -53,7 +54,7 @@ fn snapshot() -> SystemSnapshot {
             overall_percent: 37.0,
             kernel_percent: 9.0,
             // Distinct per thread so order is checkable (V3).
-            per_core_percent: (0..CORES).map(|i| 10.0 + i as f32 * 10.0).collect(),
+            per_core_percent: (0..CORES).map(|i| 3.0 + i as f32 * 3.0).collect(),
             core_count: CORES,
             temperature_celsius: Some(71.0),
             frequency_busy_mhz: Some(4130.0),
@@ -76,29 +77,20 @@ fn snapshot() -> SystemSnapshot {
     }
 }
 
-/// Feed the histories the way the sampler would, from the snapshot.
+/// Feed the histories through the SAME function the sampler uses
+/// (reviewer R16: a hand-rolled push here would let a wrong sampler
+/// push pass), under the same guard order the sampler publishes in.
 fn push_histories(shared: &SharedUi, snapshot: &SystemSnapshot) {
-    let mut h = shared.histories.write().unwrap();
-    let cpu = snapshot.cpu.as_ref().unwrap();
-    h.cpu.push(cpu.overall_percent as f64);
-    h.cpu_kernel.push(cpu.kernel_percent as f64);
-    if h.per_core.len() != CORES {
-        h.per_core = vec![Default::default(); CORES];
-    }
-    for (history, percent) in h.per_core.iter_mut().zip(&cpu.per_core_percent) {
-        history.push(*percent as f64);
-    }
-    let memory = snapshot.memory.as_ref().unwrap();
-    h.memory.push(memory.used_percent as f64);
-    h.memory_cache.push(25.0);
-    let gpu = snapshot.gpu.as_ref().unwrap();
-    h.gpu.push(gpu.busy_percent as f64);
-    h.cpu_temperature.push(71.0);
-    h.gpu_temperature.push(39.0);
+    let mut histories = shared.histories.write().unwrap();
+    histories.record(snapshot);
+    *shared.latest.write().unwrap() = Arc::new(snapshot.clone());
 }
 
+/// A node's text: Buttons carry it as the label, Labels as the value.
 fn label_of(node: &egui_kittest::Node<'_>) -> String {
-    node.accesskit_node().label().unwrap_or_default().to_string()
+    let node = node.accesskit_node();
+    let label = node.label().unwrap_or_default().to_string();
+    if label.is_empty() { node.value().unwrap_or_default().to_string() } else { label }
 }
 
 fn find_label(harness: &Harness<'_, SysMonApp>, prefix: &str) -> Option<String> {
@@ -120,7 +112,6 @@ fn build(width: f32, settings: Settings) -> (Harness<'static, SysMonApp>, Arc<Sh
     std::thread::sleep(std::time::Duration::from_millis(900));
     let snap = snapshot();
     push_histories(&control, &snap);
-    *control.latest.write().unwrap() = Arc::new(snap);
     (harness, control)
 }
 
@@ -138,7 +129,8 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
     let mut receipt = serde_json::Map::new();
 
     // ---- startup lands on Performance (fresh settings).
-    let (mut harness, _shared) = build(430.0, Settings::default());
+    let settings = Settings { temperature_scale: "both".to_string(), ..Settings::default() };
+    let (mut harness, _shared) = build(430.0, settings.clone());
     harness.run_steps(6);
     assert_eq!(harness.state().page, Page::Performance, "fresh settings open on Performance");
 
@@ -149,22 +141,29 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
     assert_eq!(cpu_graph, "CPU history: busy 37%  kernel 9%");
     assert_eq!(find_label(&harness, "Memory meter:").unwrap(), "Memory meter: 13%");
     assert_eq!(find_label(&harness, "GPU meter:").unwrap(), "GPU meter: 3%");
-    assert_eq!(find_label(&harness, "Thermals meter:").unwrap(), "Thermals meter: 71°C");
+    assert_eq!(find_label(&harness, "Thermals meter:").unwrap(), "Thermals meter: 160°F · 71°C");
     receipt.insert("v1_cpu_meter".into(), cpu_meter.into());
 
     // ---- status bar is the snapshot.
     let status = find_label(&harness, "status: ").expect("status bar");
-    let expected = status_text(&snapshot(), Settings::default().display(), false);
+    let expected = status_text(&snapshot(), settings.display(), false);
     assert_eq!(status, format!("status: {expected}"));
-    assert!(expected.contains("2 proc") && expected.contains("CPU 37%") && expected.contains("71°C"), "{expected}");
+    assert!(expected.contains("2 proc") && expected.contains("CPU 37%") && expected.contains("160°F · 71°C"), "{expected}");
     receipt.insert("status".into(), expected.into());
 
-    // ---- V7: nothing drawn outside the 430 px window.
+    // ---- V7: nothing drawn outside the 430 px window, including the
+    // group-box values (labels, not buttons).
     let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(430.0, 780.0));
-    for node in harness.query_all_by_role(Role::Button) {
+    let mut box_values_seen = 0;
+    for node in harness.query_all_by_role(Role::Button).chain(harness.query_all_by_role(Role::Label)) {
         let rect = node.rect();
         let label = label_of(&node);
-        if label.starts_with("status: ") || label.contains("meter:") || label.contains("history:") {
+        let is_box_value =
+            ["30.1 GB", "67.5 GB", "1.2 GB", "210.4 MB", "48.6 MB", "64.0 GB", "16.0 GB"].contains(&label.as_str());
+        if is_box_value {
+            box_values_seen += 1;
+        }
+        if label.starts_with("status: ") || label.contains("meter:") || label.contains("history:") || is_box_value {
             assert!(
                 rect.min.x >= -0.5 && rect.max.x <= window.max.x + 0.5,
                 "V7: `{label}` spans x {}..{} in a 430 px window",
@@ -173,6 +172,7 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
             );
         }
     }
+    assert!(box_values_seen >= 5, "V7 must actually see the box values (saw {box_values_seen})");
 
     // ---- the toggle: click "per thread" (right half of the switch).
     let switch = harness
@@ -209,7 +209,7 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
         .collect();
     assert_eq!(threads.len(), CORES, "one mini graph per thread");
     for (index, (label, rect)) in threads.iter().enumerate() {
-        assert_eq!(*label, format!("CPU thread {index}: {}%", 10 + index * 10), "V3 order + value");
+        assert_eq!(*label, format!("CPU thread {index}: {}%", 3 + index * 3), "V3 order + value");
         assert!(rect.height() >= MINI_GRAPH_MIN_HEIGHT - 0.5, "V9: thread {index} is {} px tall", rect.height());
         assert!(rect.max.x <= 430.5 && rect.min.x >= -0.5, "V9: thread {index} outside the window: {rect:?}");
     }
