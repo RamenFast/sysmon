@@ -58,7 +58,8 @@ every line's rates are correct for its own window.
 
 ```bash
 sysmon ctl status            # who's serving, which mode
-sysmon ctl page processes    # switch pages
+sysmon ctl page processes    # switch pages: performance | overview | processes
+sysmon ctl cpugraph combined # Performance page CPU graph: auto | combined | per_thread
 sysmon ctl theme blossom_dark
 sysmon ctl popout gpu        # pop the GPU card into its own window
 sysmon ctl shot /tmp/s.png   # PNG of the window, path in the reply

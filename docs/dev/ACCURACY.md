@@ -4,7 +4,7 @@ Two layers keep every figure honest, and both run on real hardware:
 
 - **`crates/sysmon-core/tests/accuracy.rs`** (14 tests, in `cargo test`):
   each reading cross-checked live against an independent authority.
-- **`scripts/accuracy-audit.sh`** (56 checks): every number the app
+- **`scripts/accuracy-audit.sh`** (64 checks): every number the app
   shows next to the tool a skeptical human would open beside it
   (`free`, `turbostat`, `mpstat`, `sensors -j`, `lspci`, `df`, `findmnt`,
   `ps`, `iostat`, `pidstat`, udev DMI, `/sys/firmware/memmap`), idle,
@@ -66,9 +66,14 @@ here match ids there.
 Ryzen 9 5950X · Radeon AI PRO R9700 (Navi 48) · 4 × 32 GB DDR4 ·
 ASRock X570 Phantom Gaming 4 (nct6798) · Mint 22.3.
 
-`scripts/accuracy-audit.sh`: **56 pass, 0 fail** (idle, `stress-ng`
+`scripts/accuracy-audit.sh`: **64 pass, 0 fail** (idle, `stress-ng`
 load with row L1 proving the load was still running, and a 64 MB/s
-`fio` direct-I/O writer). Selected rows:
+`fio` direct-I/O writer). 3.2 added C7/C7b (kernel time vs `mpstat`
+%sys + %irq + %soft, and kernel ≤ busy), M7/M7b (Committed_AS,
+CommitLimit) and M8 (Slab, KernelStack, PageTables) for the
+Performance page; its first run also caught P2 live (a `python3 -I -c
+"from multiprocessing.resource_tracker import …"` shown as a bare
+`python3`, now named by the module). Selected rows:
 
 | id | reading | SysMon | authority |
 |---|---|---|---|

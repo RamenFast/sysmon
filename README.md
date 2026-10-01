@@ -7,9 +7,9 @@ engine, the CLI, the socket.
 Every number it shows is checked against the tool a skeptic would open
 beside it (`free`, `turbostat`, `mpstat`, `sensors`, `iostat`, `pidstat`,
 `df`, firmware tables) on real hardware, idle, under load and under a
-known disk writer: **56 of 56 agree.**
+known disk writer: **64 of 64 agree.**
 
-![processes with the inspector open](docs/screenshot-inspector.png)
+![the Performance page, wide, per-thread CPU graphs](docs/screenshot-performance-wide.png)
 
 Every number the window shows is one command away:
 
@@ -29,7 +29,7 @@ new engine.
 | per-process network | nethogs only (or nothing) | native TCP attribution with zero setup; nethogs upgrades it to UDP/QUIC + all users |
 | programmatic access | none | `probe` / `tap` / `ctl` / `schema` + control socket, JSON envelopes, a strict machine contract, and a conformance harness that re-runs the whole standard |
 | idle CPU (same display, 60 s, software rendering) | 13.0% of a core | **6.0%** — and `serve` idles at **0.00% / 5.6 MB** |
-| accuracy | trusted psutil | a 56-check live audit against free/turbostat/mpstat/sensors/iostat/pidstat/df/DMI, plus cross-checks in `cargo test` |
+| accuracy | trusted psutil | a 64-check live audit against free/turbostat/mpstat/sensors/iostat/pidstat/df/DMI, plus cross-checks in `cargo test` |
 | theming | adopts the GTK theme | eleven built-in palettes (including a greyscale a11y floor) + a System mode that maps your GTK theme to the nearest family, and honors high-contrast and reduced-motion |
 | process icons | icon theme lookup, gaps common | desktop-entry index over the real icon-theme inherit chain, letter-tile fallback |
 
@@ -53,6 +53,40 @@ detail that v1's "Blossom" *was* the AMOLED look, so that's what it
 becomes.
 
 ## What it shows
+
+### Performance (the front page)
+
+The Windows XP Task Manager's Performance tab, in SysMon's own hand:
+an LED meter beside a scrolling scope graph for each resource, etched
+boxes of totals underneath, a status bar along the bottom. Everything
+on one screen, no scrolling to find a number, and the window opens
+here.
+
+![performance, narrow](docs/screenshot-performance.png)
+
+| Row | Meter | Graph |
+|---|---|---|
+| **CPU** | busy % | busy % with **kernel time** (system + irq + softirq) as a second trace, or **one small graph per thread** in `/proc/stat` order. A carved two-way switch picks; *auto* chooses by width |
+| **Memory** | used % | used, with cache beneath it |
+| **GPU** | busy % | busy, with VRAM as a second trace |
+| **Disk** | busiest drive's util % | read and write, autoscaled with the ceiling written in the corner (a spike never hides what follows) |
+| **Network** | share of the fastest link | down and up, same |
+| **Thermals** | CPU °F · °C | CPU and GPU temperature over time, the busy clock beside it. No warnings: the heat is shown next to the clock it costs, and the data speaks |
+
+Under the rows: **Totals** (processes, threads, ctx/s, uptime),
+**Physical memory** (installed, usable, available, cache), **Commit
+charge** (`Committed_AS`, `CommitLimit`, and SysMon's own peak since
+launch, labelled as such) and **Kernel memory** (slab, page tables,
+stacks). Every graph sits on a dark instrument field, tinted to the
+theme, with a graticule that moves one step per sample. Clicking a
+meter opens that card on the Overview; clicking a graph opens
+Processes sorted by that resource.
+
+The three new numbers (kernel time, commit charge, kernel memory) are
+audited like everything else: C7 against `mpstat`, M7/M8 against
+`/proc/meminfo`.
+
+### Overview
 
 ![overview](docs/screenshot-overview-wide.png)
 
@@ -97,6 +131,9 @@ Ctrl+click selects up to five processes for a **combined details**
 view — summed usage with color-coded share bars.
 
 ![processes](docs/screenshot-processes.png)
+
+Shortcuts: `Ctrl+1` Performance, `Ctrl+2` Overview, `Ctrl+3`
+Processes, `Ctrl+F` the filter, `P` pin.
 
 ## The API
 
