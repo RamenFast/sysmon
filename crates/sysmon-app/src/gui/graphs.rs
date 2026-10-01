@@ -95,6 +95,10 @@ pub struct GraphConfig<'a> {
 pub const GRATICULE_PITCH: usize = 15;
 
 pub struct ScopeConfig<'a> {
+    /// What this graph is, for screen readers and the test harness
+    /// ("CPU history"). The accessible label is this plus the newest
+    /// readout, so a test can check the drawn value (V1, V3).
+    pub name: &'a str,
     pub height: f32,
     /// Some(100) for percentages; None autoscales (and writes the
     /// ceiling in the corner, V4).
@@ -141,6 +145,18 @@ pub fn scope_ceiling(series: &[&History], fixed_maximum: Option<f64>, minimum_au
 pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: &ScopeConfig) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, config.height), Sense::click());
+    {
+        let latest: Vec<f64> = series.iter().filter_map(|h| h.latest()).collect();
+        let readout = if latest.len() == series.len() && !latest.is_empty() {
+            (config.hover_formatter)(&latest)
+        } else {
+            String::from("no samples yet")
+        };
+        let name = config.name;
+        response.widget_info(move || {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{name}: {readout}"))
+        });
+    }
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -257,7 +273,7 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
 pub const LED_SEGMENTS: usize = 20;
 pub const LED_WIDTH: f32 = 18.0;
 
-pub fn led_meter(ui: &mut Ui, palette: &Palette, fraction: f32, color: Color32, label: &str, height: f32) -> egui::Response {
+pub fn led_meter(ui: &mut Ui, palette: &Palette, name: &str, fraction: f32, color: Color32, label: &str, height: f32) -> egui::Response {
     let label_height = 14.0;
     let label_width = ui.fonts_mut(|fonts| {
         fonts
@@ -267,7 +283,7 @@ pub fn led_meter(ui: &mut Ui, palette: &Palette, fraction: f32, color: Color32, 
     });
     let width = label_width.max(LED_WIDTH + 8.0);
     let (rect, response) = ui.allocate_exact_size(vec2(width, height + label_height), Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{name} meter: {label}")));
     if !ui.is_rect_visible(rect) {
         return response;
     }

@@ -73,6 +73,8 @@ pub enum AppAction {
     SetPriority(i32, String, i32),
     CopyPid(i32),
     ToggleSensorGroup(String),
+    /// Performance page CPU graph: "auto" | "combined" | "per_thread".
+    SetCpuGraphMode(&'static str),
     /// Surface a short toast (selection full, etc.).
     Notify(String),
 }

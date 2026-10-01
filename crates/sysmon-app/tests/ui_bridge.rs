@@ -121,7 +121,11 @@ fn overview_and_processes_flow_both_ways() {
     // Wide enough that the Inspector docks beside the table.
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
-        .build_eframe(|cc| SysMonApp::new(cc, Settings::default(), shared, command_rx, None));
+        .build_eframe(|cc| {
+            // This walks the Overview ↔ Processes bridge; start there.
+            let settings = Settings { start_page: "overview".to_string(), ..Settings::default() };
+            SysMonApp::new(cc, settings, shared, command_rx, None)
+        });
     control.paused.store(true, Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(900));
     *control.latest.write().unwrap() = Arc::new(snapshot(ROOT, 1.0));

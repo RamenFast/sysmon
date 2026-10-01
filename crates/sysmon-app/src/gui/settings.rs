@@ -45,6 +45,13 @@ pub struct Settings {
     pub show_inspector: bool,
     /// Sensors card groups the user folded shut ("board", "drives"…).
     pub folded_sensor_groups: Vec<String>,
+    /// The page the window opens on: "performance" | "overview" |
+    /// "processes". New in 3.2 (older files open on Performance too:
+    /// it is the new front page).
+    pub start_page: String,
+    /// Performance page CPU graph: "auto" (by width) | "combined" |
+    /// "per_thread". New in 3.2.
+    pub cpu_graph_mode: String,
 }
 
 impl Default for Settings {
@@ -68,6 +75,8 @@ impl Default for Settings {
             group_by_app: false,
             show_inspector: true,
             folded_sensor_groups: Vec::new(),
+            start_page: "performance".to_string(),
+            cpu_graph_mode: "auto".to_string(),
         }
     }
 }
@@ -143,6 +152,12 @@ impl Settings {
         }
         if TemperatureScale::from_id(&settings.temperature_scale).is_none() {
             settings.temperature_scale = Settings::default().temperature_scale;
+        }
+        if !matches!(settings.start_page.as_str(), "performance" | "overview" | "processes") {
+            settings.start_page = Settings::default().start_page;
+        }
+        if !matches!(settings.cpu_graph_mode.as_str(), "auto" | "combined" | "per_thread") {
+            settings.cpu_graph_mode = Settings::default().cpu_graph_mode;
         }
         Some(settings)
     }

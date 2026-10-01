@@ -15,6 +15,7 @@ pub mod glyphs;
 pub mod graphs;
 pub mod icons;
 pub mod inspector;
+pub mod performance;
 pub mod processes;
 pub mod sensors_view;
 pub mod settings;

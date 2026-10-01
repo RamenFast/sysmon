@@ -23,6 +23,7 @@ use super::cards::{self, AppAction, CardContext};
 use super::details;
 use super::graphs::History;
 use super::icons::IconCache;
+use super::performance::{self, PerformanceContext};
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
 use super::settings::{SECTION_KEYS, Settings};
 use super::theme::{self, Palette};
@@ -30,8 +31,28 @@ use super::widgets::{ButtonGlyph, glyph_button, menu_check_row, menu_chip, menu_
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
+    Performance,
     Overview,
     Processes,
+}
+
+impl Page {
+    pub fn id(self) -> &'static str {
+        match self {
+            Page::Performance => "performance",
+            Page::Overview => "overview",
+            Page::Processes => "processes",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Page> {
+        match id {
+            "performance" => Some(Page::Performance),
+            "overview" => Some(Page::Overview),
+            "processes" => Some(Page::Processes),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -41,6 +62,20 @@ pub struct Histories {
     pub cpu: History,
     pub net_down: History,
     pub net_up: History,
+    // ── Performance page (PERFORMANCE-VIEW.md) ──
+    /// One per thread, /proc/stat order.
+    pub per_core: Vec<History>,
+    pub cpu_kernel: History,
+    /// Cache as a % of total, stacked under `memory`.
+    pub memory_cache: History,
+    pub vram: History,
+    pub disk_read: History,
+    pub disk_write: History,
+    pub cpu_temperature: History,
+    pub gpu_temperature: History,
+    pub busy_clock: History,
+    /// Highest Committed_AS seen since launch (SysMon's own mark).
+    pub commit_peak_bytes: u64,
 }
 
 /// Everything the render paths (main window, pop-outs, socket
@@ -108,16 +143,45 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
                             && gpu.available
                         {
                             histories.gpu.push(gpu.busy_percent as f64);
+                            if gpu.vram_total_bytes > 0 {
+                                histories.vram.push(gpu.vram_used_bytes as f64 / gpu.vram_total_bytes as f64 * 100.0);
+                            }
+                            if let Some(t) = gpu.temperature_edge_celsius {
+                                histories.gpu_temperature.push(t as f64);
+                            }
                         }
                         if let Some(memory) = &snapshot.memory {
                             histories.memory.push(memory.used_percent as f64);
+                            if memory.total_bytes > 0 {
+                                histories.memory_cache.push(
+                                    memory.cached_bytes as f64 / memory.total_bytes as f64 * 100.0,
+                                );
+                            }
+                            histories.commit_peak_bytes = histories.commit_peak_bytes.max(memory.committed_bytes);
                         }
                         if let Some(cpu) = &snapshot.cpu {
                             histories.cpu.push(cpu.overall_percent as f64);
+                            histories.cpu_kernel.push(cpu.kernel_percent as f64);
+                            if histories.per_core.len() != cpu.per_core_percent.len() {
+                                histories.per_core = vec![History::default(); cpu.per_core_percent.len()];
+                            }
+                            for (history, percent) in histories.per_core.iter_mut().zip(&cpu.per_core_percent) {
+                                history.push(*percent as f64);
+                            }
+                            if let Some(t) = cpu.temperature_celsius {
+                                histories.cpu_temperature.push(t as f64);
+                            }
+                            if let Some(clock) = cpu.frequency_busy_mhz.or(cpu.frequency_mhz) {
+                                histories.busy_clock.push(clock);
+                            }
                         }
                         if let Some(network) = &snapshot.network {
                             histories.net_down.push(network.download_bps);
                             histories.net_up.push(network.upload_bps);
+                        }
+                        if let Some(disks) = &snapshot.disks {
+                            histories.disk_read.push(disks.iter().map(|d| d.read_bps).sum());
+                            histories.disk_write.push(disks.iter().map(|d| d.write_bps).sum());
                         }
                     }
                     *shared.latest.write().unwrap() = snapshot;
@@ -235,7 +299,7 @@ impl SysMonApp {
         SysMonApp {
             shared,
             icon_cache: IconCache::new(),
-            page: Page::Overview,
+            page: Page::from_id(&settings.start_page).unwrap_or(Page::Performance),
             table_state,
             details_open: Vec::new(),
             combined_details_open: None,
@@ -332,10 +396,12 @@ impl SysMonApp {
                         self.settings_menu(ui, &menu_response);
 
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.add_space((ui.available_width() / 2.0 - 90.0).max(0.0));
-                            for (label, page) in
-                                [("Overview", Page::Overview), ("Processes", Page::Processes)]
-                            {
+                            ui.add_space((ui.available_width() / 2.0 - 130.0).max(0.0));
+                            for (label, page) in [
+                                ("Performance", Page::Performance),
+                                ("Overview", Page::Overview),
+                                ("Processes", Page::Processes),
+                            ] {
                                 let selected = self.page == page;
                                 let text = RichText::new(label).size(12.5).color(if selected {
                                     palette.ink
@@ -345,6 +411,8 @@ impl SysMonApp {
                                 let response = ui.selectable_label(selected, text);
                                 if response.clicked() {
                                     self.page = page;
+                                    self.settings.start_page = page.id().to_string();
+                                    self.settings.save();
                                 }
                             }
                         });
@@ -472,6 +540,22 @@ impl SysMonApp {
 
                 ui.separator();
                 heading(ui, "Window");
+                if menu_check_row(
+                    ui,
+                    palette,
+                    self.settings.cpu_graph_mode == "auto",
+                    "CPU graph: decide by width",
+                )
+                .on_hover_text("Performance page: per-thread graphs when the window is wide, one trace when narrow")
+                .clicked()
+                {
+                    self.settings.cpu_graph_mode = if self.settings.cpu_graph_mode == "auto" {
+                        "combined".to_string()
+                    } else {
+                        "auto".to_string()
+                    };
+                    settings_changed = true;
+                }
                 if menu_check_row(ui, palette, self.settings.always_on_top, "Always on top")
                     .clicked()
                 {
@@ -524,6 +608,21 @@ impl SysMonApp {
         if settings_changed {
             self.settings.save();
         }
+    }
+
+    fn performance(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
+        let palette = self.palette();
+        let snapshot = self.shared.latest.read().unwrap().clone();
+        let histories = self.shared.histories.read().unwrap();
+        let mut cx = PerformanceContext {
+            palette,
+            settings: &self.settings,
+            display: self.settings.display(),
+            snapshot: &snapshot,
+            histories: &histories,
+            actions: actions_out,
+        };
+        performance::performance_page(ui, &mut cx);
     }
 
     fn overview(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
@@ -790,6 +889,10 @@ impl SysMonApp {
                     self.settings.toggle_sensor_group(&key);
                     self.settings.save();
                 }
+                AppAction::SetCpuGraphMode(mode) => {
+                    self.settings.cpu_graph_mode = mode.to_string();
+                    self.settings.save();
+                }
                 AppAction::Notify(text) => {
                     let _ = self.toast_tx.send(text);
                 }
@@ -884,9 +987,12 @@ impl SysMonApp {
                 self.table_state.focus_filter = true;
             }
             if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)) {
-                self.page = Page::Overview;
+                self.page = Page::Performance;
             }
             if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2)) {
+                self.page = Page::Overview;
+            }
+            if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3)) {
                 self.page = Page::Processes;
             }
             if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Q)) {
@@ -941,18 +1047,25 @@ impl SysMonApp {
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
                     Ok(serde_json::json!({"raised": true}))
                 }
-                "page" => match value_or(&value).as_str() {
-                    "overview" => {
-                        self.page = Page::Overview;
-                        Ok(serde_json::json!({"page": "overview"}))
+                "page" => match Page::from_id(&value_or(&value)) {
+                    Some(page) => {
+                        self.page = page;
+                        Ok(serde_json::json!({"page": page.id()}))
                     }
-                    "processes" => {
-                        self.page = Page::Processes;
-                        Ok(serde_json::json!({"page": "processes"}))
+                    None => Err(VerbError::bad_args(
+                        format!("unknown page `{}`", value_or(&value)),
+                        "pages: performance overview processes",
+                    )),
+                },
+                "cpugraph" => match value_or(&value).as_str() {
+                    wanted @ ("auto" | "combined" | "per_thread") => {
+                        self.settings.cpu_graph_mode = wanted.to_string();
+                        self.settings.save();
+                        Ok(serde_json::json!({"cpugraph": wanted}))
                     }
                     other => Err(VerbError::bad_args(
-                        format!("unknown page `{other}`"),
-                        "pages: overview processes",
+                        format!("unknown CPU graph mode `{other}`"),
+                        "cpugraph: auto combined per_thread",
                     )),
                 },
                 "theme" => {
@@ -1174,6 +1287,13 @@ impl eframe::App for SysMonApp {
         self.top_bar(ctx);
 
         let palette = self.palette();
+        if self.page == Page::Performance {
+            let text = {
+                let snapshot = self.shared.latest.read().unwrap();
+                performance::status_text(&snapshot, self.settings.display())
+            };
+            performance::status_bar(ctx, palette, &text);
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -1181,6 +1301,7 @@ impl eframe::App for SysMonApp {
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ctx, |ui| match self.page {
+                Page::Performance => self.performance(ui, &mut frame_actions),
                 Page::Overview => self.overview(ui, &mut frame_actions),
                 Page::Processes => {
                     let snapshot = self.shared.latest.read().unwrap().clone();
