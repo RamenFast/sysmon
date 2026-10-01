@@ -500,3 +500,32 @@ fn a_one_shot_probe_discloses_its_network_coverage() {
         assert!(hint.contains("serve"), "tcp_diag-only probe must point at `sysmon serve`, got {hint:?}");
     }
 }
+
+/// A freshly started `serve` answered its first snapshot with a 0 s
+/// window, so every rate in it (CPU %, network, disk) was a false
+/// zero. The first answer must carry a real window, like a direct
+/// probe's.
+#[test]
+fn a_fresh_serve_never_answers_with_an_empty_window() {
+    let sandbox = Sandbox::new();
+    let mut daemon = Command::new(binary())
+        .arg("serve")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("serve starts");
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (reply, code) = sandbox.run(&["probe", "cpu", "--json"]);
+    let _ = sandbox.run(&["ctl", "quit", "--json"]);
+    let _ = daemon.wait();
+    assert_eq!(code, 0);
+    assert_eq!(reply["result"]["via"], "socket", "rode the fresh serve");
+    let window = reply["result"]["interval_seconds"].as_f64().unwrap_or(0.0);
+    assert!(window >= 0.2, "first answer from serve spans {window} s — its rates are all zero");
+}

@@ -527,3 +527,80 @@ fn cpu_iowait_is_reported_apart_from_busy() {
         cpu.iowait_percent
     );
 }
+
+/// F15 / G8: the GPU clock is the mean across the sample window, not
+/// one instantaneous read. The authority is an independent 100 Hz poll
+/// of the same `gpu_metrics` field over the same windows, run here.
+///
+/// The statistic: over six 1 s windows, the root-mean-square of
+/// (ours − independent mean) ÷ σ. A true window mean differs from the
+/// independent one by about σ·√(1/n₁+1/n₂) ≈ 0.25σ; a single read
+/// differs by about σ (the signal's own spread). The bar is 0.6σ:
+/// ≈ 2.4× the honest estimator's expected RMS, ≈ 0.6× the cheat's.
+/// Idle-gated windows (σ = 0, nothing to estimate) are skipped.
+#[test]
+fn gpu_clock_is_the_window_mean_not_one_read() {
+    let Some(card) = std::fs::read_dir("/sys/class/drm").ok().and_then(|entries| {
+        entries.flatten().map(|e| e.path().join("device")).find(|d| {
+            std::fs::read_to_string(d.join("vendor")).is_ok_and(|v| v.trim() == "0x1002")
+                && d.join("gpu_metrics").exists()
+        })
+    }) else {
+        eprintln!("no amdgpu gpu_metrics here — skipping");
+        return;
+    };
+    let read_gfx = |card: &std::path::Path| -> Option<f64> {
+        let blob = std::fs::read(card.join("gpu_metrics")).ok()?;
+        let layout = blob.get(2..4)?;
+        (layout[0] == 1 && (1..=3).contains(&layout[1]))
+            .then(|| u16::from_le_bytes([blob[0x28], blob[0x29]]))
+            .filter(|v| *v != u16::MAX)
+            .map(f64::from)
+    };
+    if read_gfx(&card).is_none() {
+        eprintln!("gpu_metrics layout not v1.1–v1.3 — skipping");
+        return;
+    }
+
+    let mut wants = Wants::none();
+    wants.gpu = true;
+    let mut sampler = Sampler::new();
+    let _prime = sampler.sample(wants);
+    let mut z_squares = Vec::new();
+    let mut report = Vec::new();
+    for _ in 0..6 {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poll = {
+            let (stop, card) = (stop.clone(), card.clone());
+            std::thread::spawn(move || {
+                let mut reads = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    reads.extend(read_gfx(&card));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                reads
+            })
+        };
+        std::thread::sleep(Duration::from_millis(1000));
+        let ours = sampler.sample(wants).gpu.expect("gpu section");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let reads = poll.join().unwrap();
+
+        let source = ours.clock_source.clone().unwrap_or_default();
+        assert!(source.starts_with("mean of "), "clock_source should be a window mean, got {source:?}");
+        let n = reads.len() as f64;
+        let mean = reads.iter().sum::<f64>() / n;
+        let sigma = (reads.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+        let core = ours.core_clock_mhz.expect("core clock");
+        report.push(format!("{core:.0} vs {mean:.0}±σ{sigma:.0}"));
+        if sigma >= 5.0 {
+            z_squares.push(((core - mean) / sigma).powi(2));
+        }
+    }
+    if z_squares.len() < 3 {
+        eprintln!("GPU clock-gated (σ≈0) in most windows, nothing to estimate — skipping: {report:?}");
+        return;
+    }
+    let rms = (z_squares.iter().sum::<f64>() / z_squares.len() as f64).sqrt();
+    assert!(rms <= 0.6, "RMS error {rms:.2}σ — that's a single read, not a window mean: {report:?}");
+}

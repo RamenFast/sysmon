@@ -43,7 +43,17 @@ impl Backend for ServeBackend {
                 "restart the daemon: sysmon ctl quit && sysmon serve",
             )
         })?;
-        sampler.sample(wants).to_json_value().map_err(|serialize_error| {
+        // On-demand sampling means the first ask (or the first after
+        // a long quiet, for a section nobody asked for yet) has no
+        // previous sample to diff, so every rate would be a false 0.
+        // Take the same short window a direct probe takes instead.
+        let mut snapshot = sampler.sample(wants);
+        if snapshot.interval_seconds < 0.2 {
+            let window = if wants.processes { 1000 } else { 250 };
+            std::thread::sleep(Duration::from_millis(window));
+            snapshot = sampler.sample(wants);
+        }
+        snapshot.to_json_value().map_err(|serialize_error| {
             VerbError::runtime(
                 format!("snapshot serialization failed: {serialize_error}"),
                 "this is a sysmon bug — please report it",

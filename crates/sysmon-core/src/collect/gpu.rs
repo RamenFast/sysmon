@@ -95,6 +95,133 @@ pub fn drm_usage_from_fdinfo(
     Some((engine_ns, vram_kib * 1024))
 }
 
+/// What `gpu_metrics` adds over hwmon: the firmware's own *averaged*
+/// clocks (hwmon's freq1_input is one instantaneous read that swings
+/// 0..1558 MHz between reads — 3.1 audit F15) and the VRM temperatures
+/// hwmon doesn't expose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuMetrics {
+    pub average_gfxclk_mhz: Option<u16>,
+    pub average_uclk_mhz: Option<u16>,
+    pub temperature_vrgfx_celsius: Option<u16>,
+    pub temperature_vrsoc_celsius: Option<u16>,
+    pub temperature_vrmem_celsius: Option<u16>,
+}
+
+/// Parse a discrete-GPU `gpu_metrics` table, format 1 content 1–3
+/// (`struct gpu_metrics_v1_1..v1_3`, kgd_pp_interface.h). They share
+/// the prefix this reads: header (4), six u16 temperatures at 0x04,
+/// four u16 activity/power, u64 energy, u64 clock counter, then the
+/// u16 average clocks at 0x28. v1.0 orders that prefix differently,
+/// and format 2/3 are APU tables; every unknown layout is refused
+/// rather than guessed. 0xFFFF is the firmware's "not supported".
+pub fn parse_gpu_metrics(blob: &[u8]) -> Option<GpuMetrics> {
+    let u16_at = |offset: usize| -> Option<u16> {
+        let bytes = blob.get(offset..offset + 2)?;
+        let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+        (value != u16::MAX).then_some(value)
+    };
+    let structure_size = u16::from_le_bytes([*blob.first()?, *blob.get(1)?]) as usize;
+    let (format, content) = (*blob.get(2)?, *blob.get(3)?);
+    if format != 1 || !(1..=3).contains(&content) || structure_size > blob.len() {
+        return None;
+    }
+    // Everything read below ends at 0x2e; a table shorter than that is
+    // not one of these layouts.
+    if blob.len() < 0x2e {
+        return None;
+    }
+    Some(GpuMetrics {
+        temperature_vrgfx_celsius: u16_at(0x0a),
+        temperature_vrsoc_celsius: u16_at(0x0c),
+        temperature_vrmem_celsius: u16_at(0x0e),
+        average_gfxclk_mhz: u16_at(0x28),
+        average_uclk_mhz: u16_at(0x2c),
+    })
+}
+
+/// Averages the GPU clocks across each sample window (G8).
+///
+/// RDNA4's `gpu_metrics` "average" clock is the current clock, and it
+/// moves every few milliseconds between 0 (gated) and boost, so any
+/// single read, hwmon's included, is a coin toss. A thread reads the
+/// table 20×/s (≈24 µs each, ≈0.05% of a core) and keeps running sums;
+/// `take` hands back the window's mean and how many reads made it (a
+/// 0.25 s probe gets 5, a 2 s GUI tick 40). The thread only runs
+/// while someone samples: no `take` for 5 s and it parks until the
+/// next one, so an idle `sysmon serve` still costs nothing.
+struct ClockPoller {
+    shared: std::sync::Arc<(std::sync::Mutex<ClockSums>, std::sync::Condvar)>,
+}
+
+#[derive(Default)]
+struct ClockSums {
+    gfx_sum: f64,
+    uclk_sum: f64,
+    gfx_reads: u32,
+    uclk_reads: u32,
+    last_take: Option<std::time::Instant>,
+}
+
+impl ClockPoller {
+    const PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
+    const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn spawn(metrics_path: PathBuf) -> Option<ClockPoller> {
+        let shared = std::sync::Arc::new((std::sync::Mutex::new(ClockSums::default()), std::sync::Condvar::new()));
+        let worker = std::sync::Arc::downgrade(&shared);
+        std::thread::Builder::new()
+            .name("sysmon-gpu-clock".to_string())
+            .spawn(move || {
+                // Ends when the collector (the only strong owner) drops.
+                while let Some(shared) = worker.upgrade() {
+                    let (lock, wake) = &*shared;
+                    {
+                        let mut sums = lock.lock().unwrap_or_else(|p| p.into_inner());
+                        let idle = sums.last_take.is_none_or(|at| at.elapsed() > Self::IDLE_AFTER);
+                        if idle {
+                            // Park; `take` wakes us. The timeout lets a
+                            // dropped collector end the thread.
+                            let _ = wake.wait_timeout(sums, std::time::Duration::from_secs(2));
+                            continue;
+                        }
+                        if let Some(metrics) = fs::read(&metrics_path).ok().as_deref().and_then(parse_gpu_metrics) {
+                            if let Some(mhz) = metrics.average_gfxclk_mhz {
+                                sums.gfx_sum += f64::from(mhz);
+                                sums.gfx_reads += 1;
+                            }
+                            if let Some(mhz) = metrics.average_uclk_mhz {
+                                sums.uclk_sum += f64::from(mhz);
+                                sums.uclk_reads += 1;
+                            }
+                        }
+                    }
+                    drop(shared);
+                    std::thread::sleep(Self::PERIOD);
+                }
+            })
+            .ok()?;
+        Some(ClockPoller { shared })
+    }
+
+    /// The window's mean clocks and read count; resets the window.
+    fn take(&self) -> (Option<f64>, Option<f64>, u32) {
+        let (lock, wake) = &*self.shared;
+        let mut sums = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let was_idle = sums.last_take.is_none_or(|at| at.elapsed() > Self::IDLE_AFTER);
+        let mean = |sum: f64, reads: u32| (reads > 0).then(|| (sum / f64::from(reads)).round());
+        let result = (mean(sums.gfx_sum, sums.gfx_reads), mean(sums.uclk_sum, sums.uclk_reads), sums.gfx_reads);
+        *sums = ClockSums {
+            last_take: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        if was_idle {
+            wake.notify_one();
+        }
+        result
+    }
+}
+
 pub struct GpuCollector {
     window: SelfInterval,
     device_path: Option<PathBuf>,
@@ -103,6 +230,7 @@ pub struct GpuCollector {
     device_name: String,
     previous_engine_ns: HashMap<i32, u64>,
     pids_without_drm: HashMap<i32, u8>,
+    clocks: Option<ClockPoller>,
 }
 
 impl Default for GpuCollector {
@@ -121,8 +249,17 @@ impl GpuCollector {
             device_name: "GPU".to_string(),
             previous_engine_ns: HashMap::new(),
             pids_without_drm: HashMap::new(),
+            clocks: None,
         };
         collector.discover();
+        // Only for a table we can parse; otherwise hwmon's instant
+        // read stays, and clock_source says so.
+        collector.clocks = collector
+            .device_path
+            .as_ref()
+            .map(|device| device.join("gpu_metrics"))
+            .filter(|path| fs::read(path).ok().as_deref().and_then(parse_gpu_metrics).is_some())
+            .and_then(ClockPoller::spawn);
         collector
     }
 
@@ -209,6 +346,27 @@ impl GpuCollector {
                 read_u64(hwmon.join("freq2_input")).map(|hz| hz as f64 / 1e6);
             snapshot.fan_rpm = read_u64(hwmon.join("fan1_input")).map(|v| v as u32);
             snapshot.fan_max_rpm = read_u64(hwmon.join("fan1_max")).map(|v| v as u32);
+        }
+
+        // Clocks: the window's mean from the poller (G8). The first
+        // sample of a window has no reads yet and keeps hwmon's
+        // instant value, labelled as such.
+        if let Some((core, memory, reads)) = self.clocks.as_ref().map(ClockPoller::take)
+            && reads > 0
+        {
+            snapshot.core_clock_mhz = core.or(snapshot.core_clock_mhz);
+            snapshot.memory_clock_mhz = memory.or(snapshot.memory_clock_mhz);
+            snapshot.clock_source = Some(format!("mean of {reads} reads"));
+        } else if snapshot.core_clock_mhz.is_some() {
+            snapshot.clock_source = Some("instant read".to_string());
+        }
+        // The VRM temperatures move slowly; one read is honest (G12).
+        if self.clocks.is_some()
+            && let Some(metrics) = fs::read(device.join("gpu_metrics")).ok().as_deref().and_then(parse_gpu_metrics)
+        {
+            snapshot.temperature_vrm_gfx_celsius = metrics.temperature_vrgfx_celsius.map(f32::from);
+            snapshot.temperature_vrm_soc_celsius = metrics.temperature_vrsoc_celsius.map(f32::from);
+            snapshot.temperature_vrm_mem_celsius = metrics.temperature_vrmem_celsius.map(f32::from);
         }
 
         snapshot.processes = self.per_process_usage(interval_seconds);
@@ -417,6 +575,60 @@ pub fn amdgpu_ids_name(ids: &str, device_id: &str, revision: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `gpu_metrics` blob from this machine's Radeon AI PRO
+    /// R9700 (Navi 48, format 1 content 3, 120 bytes). Expected values
+    /// decoded by hand against `struct gpu_metrics_v1_3`
+    /// (kgd_pp_interface.h): temps at 0x04.., averages at 0x28..
+    const NAVI48_V1_3: &[u8] = include_bytes!("fixtures/gpu_metrics_v1_3_navi48.bin");
+
+    #[test]
+    fn gpu_metrics_v1_3_reads_the_firmware_averages() {
+        let metrics = parse_gpu_metrics(NAVI48_V1_3).expect("v1.3 parses");
+        assert_eq!(metrics.average_gfxclk_mhz, Some(725));
+        assert_eq!(metrics.average_uclk_mhz, Some(239));
+        assert_eq!(metrics.temperature_vrgfx_celsius, Some(40));
+        assert_eq!(metrics.temperature_vrsoc_celsius, Some(40));
+        assert_eq!(metrics.temperature_vrmem_celsius, Some(40));
+    }
+
+    #[test]
+    fn gpu_metrics_unsupported_fields_are_none_not_65535() {
+        // G10: socclk is 0xFFFF in the fixture ("not supported").
+        let mut blob = NAVI48_V1_3.to_vec();
+        blob[0x28..0x2a].copy_from_slice(&0xffffu16.to_le_bytes());
+        blob[0x0a..0x0c].copy_from_slice(&0xffffu16.to_le_bytes());
+        let metrics = parse_gpu_metrics(&blob).expect("still parses");
+        assert_eq!(metrics.average_gfxclk_mhz, None);
+        assert_eq!(metrics.temperature_vrgfx_celsius, None);
+    }
+
+    #[test]
+    fn gpu_metrics_unknown_or_short_layouts_are_refused() {
+        // G9: v1.0 puts system_clock_counter first — never guess.
+        let mut v1_0 = NAVI48_V1_3.to_vec();
+        v1_0[3] = 0;
+        assert!(parse_gpu_metrics(&v1_0).is_none(), "v1.0 layout differs");
+        let mut v2 = NAVI48_V1_3.to_vec();
+        v2[2] = 2;
+        assert!(parse_gpu_metrics(&v2).is_none(), "format 2 is the APU table");
+        // G11: truncated blobs.
+        assert!(parse_gpu_metrics(&NAVI48_V1_3[..0x2c]).is_none());
+        assert!(parse_gpu_metrics(&[]).is_none());
+        // A header that claims more than was read.
+        let mut lying = NAVI48_V1_3.to_vec();
+        lying[0..2].copy_from_slice(&200u16.to_le_bytes());
+        assert!(parse_gpu_metrics(&lying).is_none());
+    }
+
+    #[test]
+    fn gpu_metrics_v1_1_and_v1_2_share_the_prefix() {
+        for content in [1u8, 2] {
+            let mut blob = NAVI48_V1_3.to_vec();
+            blob[3] = content;
+            assert_eq!(parse_gpu_metrics(&blob).and_then(|m| m.average_gfxclk_mhz), Some(725));
+        }
+    }
 
     const FDINFO_FIXTURE: &str = "\
 pos:	0

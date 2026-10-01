@@ -39,6 +39,14 @@ and `tests/accuracy.rs` are the checks.*
 | G5 | power average vs input confusion (RDNA4 exposes only `power1_average` or `_input`) | audit vs `sensors -j` |
 | G6 | per-process busy % > 100 or double-counting dup'd fds | existing client-id dedupe + audit vs amdgpu_top |
 | G7 | core clock reported while GPU is idle-gated (freq file stale) | audit vs amdgpu_top |
+| G8 | clock from one instantaneous read: jumps 0..1760 MHz between reads, can print "0 MHz" (audit F15). Measured 2026-10-01: on Navi 48 gpu_metrics' `average_gfxclk` equals `current_gfxclk` and changes every few ms, and hwmon `freq1_input` is the driver's decode of the same field, so switching source fixes nothing | the clock is the **mean of ~10 reads/s across the sample window** (a 10 Hz poller that only runs while the GPU is being sampled); accuracy test compares it to an independent 100 Hz poll of the same window, tolerance from the two estimators' standard error |
+| G9 | `gpu_metrics` parsed with the wrong layout (format/content revision differs per ASIC; v1.0 puts `system_clock_counter` first) | parser keyed on (format, content) revision, unknown revisions → None, never a guess; fixture tests per layout |
+| G10 | unsupported fields read as 65535 MHz / 655 °C (the firmware's 0xFFFF "not supported") | 0xFFFF → None; fixture test |
+| G11 | short read / truncated blob taken as zeros | length checked against `structure_size` and the field's offset |
+| G12 | VR temps (vrgfx/vrsoc/vrmem) exist but are never shown — hot VRMs invisible | surfaced as GPU sensor readings when supported |
+| G13 | a faster DRM-client scan misses GPU users: stat-free detection by fd *link text* (`/dev/dri/renderD128`, `/dev/dri/card1`) misses a client whose node was opened via a different path (a bind-mounted /dev in a container/flatpak) or a dup'd fd | detection keeps the char-major check (226) as the authority for anything the link text can't decide; live test opens `/dev/dri/renderD*` from a child and asserts it is listed |
+| G14 | the negative cache hides a process that *starts* using the GPU (Ollama loading a model) for up to N samples | cache window bounded (5 samples = 10 s at the default 2 s); live test opens the render node mid-run and asserts it appears within the window |
+| G15 | the fd walk is skipped for a pid recycled from a non-GPU process | negative cache keyed by (pid, starttime) not pid alone |
 
 ## Sensors
 

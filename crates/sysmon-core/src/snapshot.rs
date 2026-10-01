@@ -174,6 +174,19 @@ pub struct GpuSnapshot {
     pub core_clock_mhz: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_clock_mhz: Option<f64>,
+    /// How the clocks were measured: "mean of N reads" (sampled across
+    /// the window — the honest figure for a clock that moves every few
+    /// ms) or "instant read" (one read; the window's first sample).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_source: Option<String>,
+    /// Voltage-regulator temperatures (graphics, SoC, memory rails),
+    /// from gpu_metrics; hwmon doesn't expose them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_vrm_gfx_celsius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_vrm_soc_celsius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_vrm_mem_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fan_rpm: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
