@@ -210,6 +210,27 @@ impl Settings {
 mod tests {
     use super::*;
 
+    /// A 3.1.0 file has neither key: it opens on the new front page
+    /// with the CPU graph decided by width. Edited junk falls back
+    /// the same way instead of leaving the app on no page.
+    #[test]
+    fn a_3_1_file_opens_on_performance_and_junk_falls_back() {
+        let from_3_1 = r#"{"settings_version":2,"theme_mode":"amoled","temperature_scale":"both"}"#;
+        let settings = Settings::from_json(from_3_1).unwrap();
+        assert_eq!(settings.start_page, "performance");
+        assert_eq!(settings.cpu_graph_mode, "auto");
+        assert_eq!(settings.theme_mode, "amoled");
+        assert_eq!(settings.temperature_scale, "both");
+        let junk = r#"{"settings_version":2,"start_page":"kitchen","cpu_graph_mode":"sideways"}"#;
+        let settings = Settings::from_json(junk).unwrap();
+        assert_eq!(settings.start_page, "performance");
+        assert_eq!(settings.cpu_graph_mode, "auto");
+        let kept = r#"{"settings_version":2,"start_page":"processes","cpu_graph_mode":"per_thread"}"#;
+        let settings = Settings::from_json(kept).unwrap();
+        assert_eq!(settings.start_page, "processes");
+        assert_eq!(settings.cpu_graph_mode, "per_thread");
+    }
+
     #[test]
     fn v1_blossom_migrates_to_amoled() {
         let v1_json = r#"{
