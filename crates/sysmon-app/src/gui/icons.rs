@@ -86,6 +86,38 @@ impl IconCache {
         self.by_path.insert(path_key, texture.clone());
         texture
     }
+
+    /// The process's icon in `rect`, or its letter tile — the one
+    /// drawing every list (overview rows, table, inspector, compare)
+    /// shares.
+    pub fn paint(&mut self, ui: &egui::Ui, rect: egui::Rect, record: &ProcessRecord, muted: Color32) {
+        match self.texture_for(ui.ctx(), record) {
+            Some(texture) => {
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            None => draw_letter_tile(
+                ui.painter(),
+                rect,
+                display_name(record),
+                record.is_kernel_thread,
+                muted,
+            ),
+        }
+    }
+}
+
+/// What a row calls a process: the resolved display name, else comm.
+pub fn display_name(record: &ProcessRecord) -> &str {
+    if record.display_name.is_empty() {
+        &record.name
+    } else {
+        &record.display_name
+    }
 }
 
 fn rasterize(path: &Path) -> Option<ColorImage> {

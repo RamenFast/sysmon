@@ -90,7 +90,7 @@ pub fn parse_io(content: &str) -> (u64, u64) {
 #[derive(Clone, Copy)]
 struct PreviousProcess {
     starttime_ticks: u64,
-    cpu_ticks: u64,
+    cpu_ns: u64,
     io_read_bytes: u64,
     io_write_bytes: u64,
 }
@@ -343,6 +343,13 @@ impl ProcessCollector {
                 .and_then(|statm| statm.split_ascii_whitespace().nth(1)?.parse::<u64>().ok())
                 .unwrap_or(stat.rss_pages.max(0) as u64);
 
+            // CPU time: utime+stime in clock ticks (10 ms). The kernel
+            // sums every thread's runtime for these, so they cover the
+            // whole process; the cost is resolution — one tick over a
+            // window of W seconds is a 1/(100·W) step, which is why
+            // `probe processes` samples over a full second.
+            let cpu_ns = (stat.cpu_ticks as f64 / self.clk_tck * 1e9) as u64;
+
             // Deltas — only valid when this is the same process
             // instance we saw last tick.
             let mut cpu_percent = 0.0f32;
@@ -352,8 +359,8 @@ impl ProcessCollector {
                 && let Some(previous) = self.previous.get(&pid)
                 && previous.starttime_ticks == stat.starttime_ticks
             {
-                let tick_delta = stat.cpu_ticks.saturating_sub(previous.cpu_ticks) as f64;
-                cpu_percent = ((tick_delta / self.clk_tck) / interval_seconds * 100.0) as f32;
+                let busy_seconds = cpu_ns.saturating_sub(previous.cpu_ns) as f64 / 1e9;
+                cpu_percent = (busy_seconds / interval_seconds * 100.0) as f32;
                 cpu_percent = cpu_percent.clamp(0.0, core_count * 100.0);
                 if let Some((read_bytes, write_bytes)) = io {
                     disk_read_bps = Some(
@@ -374,7 +381,7 @@ impl ProcessCollector {
                 pid,
                 PreviousProcess {
                     starttime_ticks: stat.starttime_ticks,
-                    cpu_ticks: stat.cpu_ticks,
+                    cpu_ns,
                     io_read_bytes: io.map(|(r, _)| r).unwrap_or(0),
                     io_write_bytes: io.map(|(_, w)| w).unwrap_or(0),
                 },

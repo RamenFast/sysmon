@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use sysmon_core::units::{TemperatureScale, Units};
+
 pub const SECTION_KEYS: [&str; 6] = ["gpu", "memory", "cpu", "network", "disks", "sensors"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,6 +27,9 @@ pub struct Settings {
     pub show_pin_button: bool,
     pub graph_palette: String,
     pub use_binary_units: bool,
+    /// "celsius" | "fahrenheit" | "both" (TemperatureScale ids); new
+    /// in 3.1 — older files keep their Celsius.
+    pub temperature_scale: String,
     pub visible_sections: HashMap<String, bool>,
     pub popped_out_sections: Vec<String>,
     pub window_width: i32,
@@ -33,6 +38,13 @@ pub struct Settings {
     /// `SortColumn::id`); new in 2.2 — absent in older files.
     pub sort_column: String,
     pub sort_descending: bool,
+    /// Process table: one row per application (thorium ×12) instead
+    /// of one per process. New in 3.1.
+    pub group_by_app: bool,
+    /// Process table: the Inspector pane beside the table. New in 3.1.
+    pub show_inspector: bool,
+    /// Sensors card groups the user folded shut ("board", "drives"…).
+    pub folded_sensor_groups: Vec<String>,
 }
 
 impl Default for Settings {
@@ -46,12 +58,33 @@ impl Default for Settings {
             show_pin_button: true,
             graph_palette: "blossom".to_string(),
             use_binary_units: false,
+            temperature_scale: TemperatureScale::Celsius.id().to_string(),
             visible_sections: SECTION_KEYS.iter().map(|k| (k.to_string(), true)).collect(),
             popped_out_sections: Vec::new(),
             window_width: 430,
             window_height: 780,
             sort_column: "cpu".to_string(),
             sort_descending: true,
+            group_by_app: false,
+            show_inspector: true,
+            folded_sensor_groups: Vec::new(),
+        }
+    }
+}
+
+/// The presentation choices every renderer needs, resolved once per
+/// frame (instead of re-deriving `Units` from a bool in five places).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Display {
+    pub units: Units,
+    pub temperature: TemperatureScale,
+}
+
+impl Default for Display {
+    fn default() -> Self {
+        Display {
+            units: Units::Decimal,
+            temperature: TemperatureScale::Celsius,
         }
     }
 }
@@ -108,7 +141,38 @@ impl Settings {
         if super::processes::SortColumn::from_id(&settings.sort_column).is_none() {
             settings.sort_column = Settings::default().sort_column;
         }
+        if TemperatureScale::from_id(&settings.temperature_scale).is_none() {
+            settings.temperature_scale = Settings::default().temperature_scale;
+        }
         Some(settings)
+    }
+
+    /// Units + temperature scale, as the renderers want them.
+    pub fn display(&self) -> Display {
+        Display {
+            units: if self.use_binary_units {
+                Units::Binary
+            } else {
+                Units::Decimal
+            },
+            temperature: TemperatureScale::from_id(&self.temperature_scale).unwrap_or_default(),
+        }
+    }
+
+    pub fn set_temperature_scale(&mut self, scale: TemperatureScale) {
+        self.temperature_scale = scale.id().to_string();
+    }
+
+    pub fn sensor_group_folded(&self, group: &str) -> bool {
+        self.folded_sensor_groups.iter().any(|g| g == group)
+    }
+
+    pub fn toggle_sensor_group(&mut self, group: &str) {
+        if self.sensor_group_folded(group) {
+            self.folded_sensor_groups.retain(|g| g != group);
+        } else {
+            self.folded_sensor_groups.push(group.to_string());
+        }
     }
 
     pub fn save(&self) {
@@ -183,5 +247,24 @@ mod tests {
         let settings = Settings::default();
         assert!(settings.section_visible("sensors"));
         assert!(settings.section_visible("gpu"));
+    }
+
+    /// A 3.0 file (Ben's own) has no temperature_scale: it loads as
+    /// Celsius, keeps everything else, and a bad id falls back.
+    #[test]
+    fn temperature_scale_is_additive_and_validated() {
+        let v3_0 = r#"{"settings_version": 2, "theme_mode": "amoled", "use_binary_units": false}"#;
+        let settings = Settings::from_json(v3_0).expect("3.0 file parses");
+        assert_eq!(settings.display().temperature, TemperatureScale::Celsius);
+        assert_eq!(settings.theme_mode, "amoled");
+        assert!(settings.show_inspector, "new panes default on");
+
+        let both = r#"{"settings_version": 2, "temperature_scale": "both"}"#;
+        assert_eq!(
+            Settings::from_json(both).unwrap().display().temperature,
+            TemperatureScale::Both
+        );
+        let junk = r#"{"settings_version": 2, "temperature_scale": "rankine"}"#;
+        assert_eq!(Settings::from_json(junk).unwrap().temperature_scale, "celsius");
     }
 }

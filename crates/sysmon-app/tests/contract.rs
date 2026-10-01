@@ -323,7 +323,7 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
+        .map(|mut child| {
             use std::io::{BufRead, BufReader};
             let stdout = child.stdout.take().expect("piped stdout");
             let mut reader = BufReader::new(stdout);
@@ -336,7 +336,7 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
             }
             let _ = child.kill();
             let _ = child.wait();
-            Ok(line)
+            line
         })
         .expect("tap produced a line");
 

@@ -14,20 +14,19 @@ use egui::{Align, Layout, RichText, ViewportBuilder, ViewportCommand, ViewportId
 
 use sysmon_core::collect::Sampler;
 use sysmon_core::snapshot::{SystemSnapshot, Wants};
-use sysmon_core::units::Units;
+use sysmon_core::units::TemperatureScale;
 
 use super::actions::{self, ConfirmKind, PendingConfirm};
 use super::backend::GuiCommand;
 use crate::control::VerbError;
-use super::cards::{
-    self, AppAction, CardContext, Glyph, glyph_button, menu_check_row, menu_chip, menu_option_row,
-};
+use super::cards::{self, AppAction, CardContext};
 use super::details;
 use super::graphs::History;
 use super::icons::IconCache;
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
 use super::settings::{SECTION_KEYS, Settings};
 use super::theme::{self, Palette};
+use super::widgets::{ButtonGlyph, glyph_button, menu_check_row, menu_chip, menu_option_row};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
@@ -159,6 +158,9 @@ pub struct SysMonApp {
     pending_screenshot: Option<PendingScreenshot>,
     /// Drag state per popped-out section (drag-anywhere → dock).
     popout_drags: HashMap<&'static str, PopoutDrag>,
+    /// One-shot: scroll the Overview to this card (the Processes
+    /// summary strip's way back).
+    overview_scroll_to: Option<&'static str>,
     /// Keeps the socket alive exactly as long as the app; Drop
     /// unlinks it.
     _control_server: Option<crate::control::ControlServer>,
@@ -224,6 +226,7 @@ impl SysMonApp {
             table_state.sort_column = column;
             table_state.sort_descending = settings.sort_descending;
         }
+        table_state.group_by_app = settings.group_by_app;
 
         SysMonApp {
             shared,
@@ -243,6 +246,7 @@ impl SysMonApp {
             command_rx,
             pending_screenshot: None,
             popout_drags: HashMap::new(),
+            overview_scroll_to: None,
             _control_server: control_server,
             settings,
         }
@@ -286,7 +290,7 @@ impl SysMonApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let paused = self.shared.paused.load(Ordering::Relaxed);
-                    let pause_glyph = if paused { Glyph::Play } else { Glyph::Pause };
+                    let pause_glyph = if paused { ButtonGlyph::Play } else { ButtonGlyph::Pause };
                     let pause_tooltip = if paused { "Resume updates" } else { "Pause updates" };
                     if glyph_button(ui, palette, pause_glyph, paused, pause_tooltip).clicked() {
                         self.shared.paused.store(!paused, Ordering::Relaxed);
@@ -295,7 +299,7 @@ impl SysMonApp {
                         && glyph_button(
                             ui,
                             palette,
-                            Glyph::Pin,
+                            ButtonGlyph::Pin,
                             self.settings.always_on_top,
                             "Keep window on top (P)",
                         )
@@ -317,7 +321,7 @@ impl SysMonApp {
                         let menu_response = glyph_button(
                             ui,
                             palette,
-                            Glyph::Menu,
+                            ButtonGlyph::Menu,
                             false,
                             "Display options",
                         );
@@ -413,21 +417,37 @@ impl SysMonApp {
                 });
 
                 ui.separator();
-                heading(ui, "Units");
+                heading(ui, "Sizes");
                 ui.horizontal(|ui| {
-                    if menu_chip(ui, palette, !self.settings.use_binary_units, "Decimal (GB)")
-                        .on_hover_text("what drive stickers and ISPs quote")
+                    if menu_chip(ui, palette, !self.settings.use_binary_units, "GB (decimal)")
+                        .on_hover_text("1 GB = 1,000,000,000 bytes — what drive boxes and ISPs quote")
                         .clicked()
                     {
                         self.settings.use_binary_units = false;
                         settings_changed = true;
                     }
-                    if menu_chip(ui, palette, self.settings.use_binary_units, "Binary (GiB)")
-                        .on_hover_text("what htop and GNOME System Monitor show")
+                    if menu_chip(ui, palette, self.settings.use_binary_units, "GiB (binary)")
+                        .on_hover_text("1 GiB = 1,073,741,824 bytes — what htop and the kernel count in")
                         .clicked()
                     {
                         self.settings.use_binary_units = true;
                         settings_changed = true;
+                    }
+                });
+
+                ui.separator();
+                heading(ui, "Temperature");
+                ui.horizontal(|ui| {
+                    let current = self.settings.display().temperature;
+                    for (scale, label, hover) in [
+                        (TemperatureScale::Celsius, "°C", "Celsius"),
+                        (TemperatureScale::Fahrenheit, "°F", "Fahrenheit"),
+                        (TemperatureScale::Both, "°F + °C", "both at once — 131°F · 55°C"),
+                    ] {
+                        if menu_chip(ui, palette, current == scale, label).on_hover_text(hover).clicked() {
+                            self.settings.set_temperature_scale(scale);
+                            settings_changed = true;
+                        }
                     }
                 });
 
@@ -506,52 +526,30 @@ impl SysMonApp {
         let palette = self.palette();
         let snapshot = self.shared.latest.read().unwrap().clone();
         let histories = self.shared.histories.read().unwrap();
-        let units = if self.settings.use_binary_units {
-            Units::Binary
-        } else {
-            Units::Decimal
-        };
+        let scroll_to = self.overview_scroll_to.take();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                let mut cx = CardContext {
+                let mut cx = CardContext::new(
                     palette,
-                    graph_palette_id: &self.settings.graph_palette,
-                    units,
-                    compact: self.settings.compact_mode,
-                    snapshot: &snapshot,
-                    icon_cache: &mut self.icon_cache,
-                    actions: actions_out,
-                    popped_out: &self.settings.popped_out_sections,
-                    selected: &mut self.table_state.selected_pids,
-                };
-                let popped = |cx: &CardContext, key: &str| {
-                    cx.popped_out.iter().any(|s| s == key)
-                };
-                if self.settings.section_visible("gpu") && !popped(&cx, "gpu") {
-                    cards::gpu_card(ui, &mut cx, &histories.gpu);
-                    ui.add_space(6.0);
-                }
-                if self.settings.section_visible("memory") && !popped(&cx, "memory") {
-                    cards::memory_card(ui, &mut cx, &histories.memory);
-                    ui.add_space(6.0);
-                }
-                if self.settings.section_visible("cpu") && !popped(&cx, "cpu") {
-                    cards::cpu_card(ui, &mut cx, &histories.cpu);
-                    ui.add_space(6.0);
-                }
-                if self.settings.section_visible("network") && !popped(&cx, "network") {
-                    cards::network_card(ui, &mut cx, &histories.net_down, &histories.net_up);
-                    ui.add_space(6.0);
-                }
-                if self.settings.section_visible("disks") && !popped(&cx, "disks") {
-                    cards::disks_card(ui, &mut cx);
-                    ui.add_space(6.0);
-                }
-                if self.settings.section_visible("sensors") && !popped(&cx, "sensors") {
-                    cards::sensors_card(ui, &mut cx);
+                    &self.settings,
+                    &snapshot,
+                    &mut self.icon_cache,
+                    actions_out,
+                    &mut self.table_state.selected_pids,
+                    self.settings.compact_mode,
+                );
+                for section in SECTION_KEYS {
+                    if !self.settings.section_visible(section) || cx.popped_out.iter().any(|s| s == section) {
+                        continue;
+                    }
+                    let top = ui.cursor().min;
+                    cards::draw_card(ui, &mut cx, cards::card_for(section, &histories));
+                    if scroll_to == Some(section) {
+                        ui.scroll_to_rect(egui::Rect::from_min_max(top, ui.cursor().min), Some(Align::TOP));
+                    }
                     ui.add_space(6.0);
                 }
             });
@@ -569,11 +567,6 @@ impl SysMonApp {
             return;
         }
         let snapshot = self.shared.latest.read().unwrap().clone();
-        let units = if self.settings.use_binary_units {
-            Units::Binary
-        } else {
-            Units::Decimal
-        };
 
         for section in popped {
             let viewport_id = ViewportId::from_hash_of(("popout", section));
@@ -624,7 +617,7 @@ impl SysMonApp {
                             let pin_response = glyph_button(
                                 ui,
                                 palette,
-                                Glyph::Pin,
+                                ButtonGlyph::Pin,
                                 pinned,
                                 "Keep above other windows",
                             );
@@ -649,33 +642,16 @@ impl SysMonApp {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                let mut cx = CardContext {
+                                let mut cx = CardContext::new(
                                     palette,
-                                    graph_palette_id: &self.settings.graph_palette,
-                                    units,
-                                    compact: false,
-                                    snapshot: &snapshot,
-                                    icon_cache: &mut self.icon_cache,
-                                    actions: actions_out,
-                                    popped_out: &self.settings.popped_out_sections,
-                                    selected: &mut self.table_state.selected_pids,
-                                };
-                                match section {
-                                    "gpu" => cards::gpu_card(ui, &mut cx, &histories.gpu),
-                                    "memory" => {
-                                        cards::memory_card(ui, &mut cx, &histories.memory)
-                                    }
-                                    "cpu" => cards::cpu_card(ui, &mut cx, &histories.cpu),
-                                    "network" => cards::network_card(
-                                        ui,
-                                        &mut cx,
-                                        &histories.net_down,
-                                        &histories.net_up,
-                                    ),
-                                    "disks" => cards::disks_card(ui, &mut cx),
-                                    "sensors" => cards::sensors_card(ui, &mut cx),
-                                    _ => {}
-                                }
+                                    &self.settings,
+                                    &snapshot,
+                                    &mut self.icon_cache,
+                                    actions_out,
+                                    &mut self.table_state.selected_pids,
+                                    false,
+                                );
+                                cards::draw_card(ui, &mut cx, cards::card_for(section, &histories));
                             });
                     });
                 if ctx.input(|input| input.viewport().close_requested()) {
@@ -766,22 +742,49 @@ impl SysMonApp {
                     self.page = Page::Processes;
                     self.table_state.selected_pids = vec![pid];
                     self.table_state.reveal_pid = Some(pid);
-                    // A live filter that hides the target would make
-                    // the jump land on nothing — clear it, disclosed.
-                    let filter = self.table_state.filter.to_lowercase();
-                    let hidden = {
-                        let snapshot = self.shared.latest.read().unwrap();
-                        snapshot.processes.as_ref().is_some_and(|records| {
-                            records
-                                .iter()
-                                .find(|r| r.pid == pid)
-                                .is_some_and(|r| !matches_filter(r, &filter))
-                        })
-                    };
-                    if hidden {
-                        self.table_state.filter.clear();
-                        let _ = self.toast_tx.send("Filter cleared to reveal the process".to_string());
+                    self.table_state.inspector.inspect(pid);
+                    self.clear_filter_hiding(pid);
+                }
+                AppAction::Inspect(pid) => {
+                    // Inspecting from the Overview opens the Processes
+                    // page with the row revealed; from the table it
+                    // just retargets the Inspector.
+                    if self.page != Page::Processes {
+                        self.page = Page::Processes;
+                        self.table_state.selected_pids = vec![pid];
+                        self.table_state.reveal_pid = Some(pid);
+                        self.clear_filter_hiding(pid);
                     }
+                    self.table_state.inspector.inspect(pid);
+                    if !self.settings.show_inspector {
+                        // A narrow or inspector-less layout: the
+                        // details window is the deep view.
+                        if !self.details_open.contains(&pid) {
+                            self.details_open.push(pid);
+                        }
+                    }
+                }
+                AppAction::ShowProcessesBy(column) => {
+                    self.page = Page::Processes;
+                    self.table_state.sort_column = column;
+                    self.table_state.sort_descending = column.defaults_descending();
+                }
+                AppAction::ShowOverview(section) => {
+                    self.page = Page::Overview;
+                    self.overview_scroll_to = Some(section);
+                }
+                AppAction::SetGroupByApp(on) => {
+                    self.table_state.group_by_app = on;
+                    self.settings.group_by_app = on;
+                    self.settings.save();
+                }
+                AppAction::SetInspector(on) => {
+                    self.settings.show_inspector = on;
+                    self.settings.save();
+                }
+                AppAction::ToggleSensorGroup(key) => {
+                    self.settings.toggle_sensor_group(&key);
+                    self.settings.save();
                 }
                 AppAction::Notify(text) => {
                     let _ = self.toast_tx.send(text);
@@ -807,6 +810,19 @@ impl SysMonApp {
                     ctx.copy_text(pid.to_string());
                 }
             }
+        }
+    }
+
+    /// A live filter that hides the target would make a jump land on
+    /// nothing — clear it, disclosed.
+    fn clear_filter_hiding(&mut self, pid: i32) {
+        let filter = self.table_state.filter.to_lowercase();
+        let hidden = self.shared.latest.read().unwrap().processes.as_ref().is_some_and(|records| {
+            records.iter().find(|r| r.pid == pid).is_some_and(|r| !matches_filter(r, &filter))
+        });
+        if hidden {
+            self.table_state.filter.clear();
+            let _ = self.toast_tx.send("Filter cleared to reveal the process".to_string());
         }
     }
 
@@ -998,14 +1014,31 @@ impl SysMonApp {
                     self.settings.save();
                     Ok(serde_json::json!({"compact": on}))
                 }
-                "units" => {
-                    let binary = matches!(value_or(&value).as_str(), "binary" | "gib");
-                    self.settings.use_binary_units = binary;
-                    self.settings.save();
-                    Ok(serde_json::json!({
-                        "units": if binary { "binary" } else { "decimal" },
-                    }))
-                }
+                "units" => match value_or(&value).as_str() {
+                    wanted @ ("binary" | "gib" | "decimal" | "gb") => {
+                        let binary = matches!(wanted, "binary" | "gib");
+                        self.settings.use_binary_units = binary;
+                        self.settings.save();
+                        Ok(serde_json::json!({
+                            "units": if binary { "binary" } else { "decimal" },
+                        }))
+                    }
+                    other => Err(VerbError::bad_args(
+                        format!("unknown units `{other}`"),
+                        "units: decimal binary",
+                    )),
+                },
+                "temperature" => match TemperatureScale::from_id(&value_or(&value)) {
+                    Some(scale) => {
+                        self.settings.set_temperature_scale(scale);
+                        self.settings.save();
+                        Ok(serde_json::json!({"temperature": scale.id()}))
+                    }
+                    None => Err(VerbError::bad_args(
+                        format!("unknown temperature scale `{}`", value_or(&value)),
+                        "temperature: celsius fahrenheit both",
+                    )),
+                },
                 "shot" => {
                     if self.pending_screenshot.is_some() {
                         Err(VerbError::unavailable(
@@ -1144,20 +1177,16 @@ impl eframe::App for SysMonApp {
                 Page::Overview => self.overview(ui, &mut frame_actions),
                 Page::Processes => {
                     let snapshot = self.shared.latest.read().unwrap().clone();
-                    let units = if self.settings.use_binary_units {
-                        Units::Binary
-                    } else {
-                        Units::Decimal
-                    };
                     processes_page(
                         ui,
                         palette,
                         &self.settings.graph_palette,
-                        units,
+                        self.settings.display(),
                         &snapshot,
                         &mut self.table_state,
                         &mut self.icon_cache,
                         &mut frame_actions,
+                        self.settings.show_inspector,
                     );
                     // Persist a changed sort choice (survives restarts).
                     let sort_id = self.table_state.sort_column.id();
@@ -1176,11 +1205,7 @@ impl eframe::App for SysMonApp {
         // Detail windows (and whether the sampler should pay for the
         // connection table).
         let snapshot = self.shared.latest.read().unwrap().clone();
-        let units = if self.settings.use_binary_units {
-            Units::Binary
-        } else {
-            Units::Decimal
-        };
+        let units = self.settings.display().units;
         let mut closed: Vec<i32> = Vec::new();
         for pid in self.details_open.clone() {
             let keep = details::details_window(
@@ -1196,9 +1221,14 @@ impl eframe::App for SysMonApp {
             }
         }
         self.details_open.retain(|pid| !closed.contains(pid));
+        // The socket table is only paid for while something shows it:
+        // a details window, or the Inspector on the Processes page.
+        let inspecting = self.page == Page::Processes
+            && self.settings.show_inspector
+            && self.table_state.inspector.pid.is_some();
         self.shared
             .connections_wanted
-            .store(!self.details_open.is_empty(), Ordering::Relaxed);
+            .store(!self.details_open.is_empty() || inspecting, Ordering::Relaxed);
 
         // The combined-details window (multi-select → Details).
         if let Some(pids) = self.combined_details_open.clone() {

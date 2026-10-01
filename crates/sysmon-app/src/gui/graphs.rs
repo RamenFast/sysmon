@@ -258,12 +258,12 @@ pub fn level_bar(ui: &mut Ui, palette: &Palette, fraction: f32, color: Color32) 
 /// summed values, in its own color — how the combined-details window
 /// shows who owns how much of each metric. Zero-sum renders the empty
 /// rail (honest: nothing to apportion).
-pub fn share_bar(ui: &mut Ui, palette: &Palette, segments: &[(Color32, f64)]) {
+pub fn share_bar(ui: &mut Ui, palette: &Palette, segments: &[(Color32, f64)]) -> egui::Response {
     let height = 6.0;
     let width = ui.available_width();
-    let (rect, _response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     if !ui.is_rect_visible(rect) {
-        return;
+        return response;
     }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, palette.ink.gamma_multiply(0.08));
@@ -281,5 +281,38 @@ pub fn share_bar(ui: &mut Ui, palette: &Palette, segments: &[(Color32, f64)]) {
             x += segment_width;
         }
     }
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
+    response
+}
+
+/// A small single-series line for the Inspector (no grid, no hover).
+pub fn sparkline(ui: &mut Ui, palette: &Palette, values: &[f64], height: f32, color: Color32, maximum: Option<f64>) {
+    let width = ui.available_width();
+    let (rect, _response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    if !ui.is_rect_visible(rect) || values.is_empty() {
+        return;
+    }
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, palette.surface_2.gamma_multiply(0.6));
+    let top = maximum.unwrap_or_else(|| values.iter().copied().fold(0.0, f64::max) * 1.15).max(1e-9);
+    let step = rect.width() / (HISTORY_LENGTH.saturating_sub(1)) as f32;
+    let count = values.len();
+    let points: Vec<Pos2> = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let x = rect.right() - (count - 1 - index) as f32 * step;
+            let y = rect.bottom() - ((value / top).min(1.0) as f32) * (rect.height() - 2.0) - 1.0;
+            pos2(x, y)
+        })
+        .collect();
+    for pair in points.windows(2) {
+        painter.add(egui::Shape::convex_polygon(
+            vec![pos2(pair[0].x, rect.bottom()), pair[0], pair[1], pos2(pair[1].x, rect.bottom())],
+            color.gamma_multiply(0.18),
+            Stroke::NONE,
+        ));
+    }
+    painter.add(egui::Shape::line(points, Stroke::new(1.3, color)));
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
 }

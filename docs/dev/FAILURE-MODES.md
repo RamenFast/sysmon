@@ -67,6 +67,14 @@ and `tests/accuracy.rs` are the checks.*
 | P2 | thread name (comm "MainThread") hides the program (node) | name resolution: comm → exe basename when comm is a generic thread name |
 | P3 | CPU % of a process that exits between samples | existing starttime keying |
 | P4 | right-click acts on a different pid than the one clicked (live re-rank) | kittest that re-ranks between open and click |
+| P5 | Overview row click opens the Inspector on the *slot's* pid after a re-rank, not the clicked one | `ui_bridge`: re-ranks between frames, asserts the Inspector pid |
+| P6 | "all by memory" link lands on Processes sorted by something else (or ascending) | `ui_bridge`: asserts sort column + biggest-first after the link |
+| P7 | summary-strip chip lands on the Overview but not on the card it named | `ui_bridge`: asserts page + one-shot scroll target consumed |
+| P8 | group-by-app sums a different set than the filter shows (×N count wrong) | unit test on `group_by_app` + `ui_bridge` grouped row label |
+| P9 | Inspector keeps a dead pid's history when the pid is recycled | unit test `a_recycled_pid_starts_a_fresh_history` (starttime keyed) |
+| P10 | Inspector breadcrumb loops forever on a reparenting race | unit test `ancestry_survives_a_reparenting_loop` |
+| P11 | the Inspector pane eats the table's click targets at narrow widths | `ui_kittest` header clicks at 430 px (the pane only docks ≥ 760 px) |
+| P12 | group-by / inspector toggles don't survive a restart | `ui_bridge`: settings file read back after toggles |
 
 ## Network
 

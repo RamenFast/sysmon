@@ -6,6 +6,7 @@
 //! a process scan).
 
 pub mod cpu;
+pub mod detail;
 pub mod disk;
 pub mod gpu;
 pub mod memory;

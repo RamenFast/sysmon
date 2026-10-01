@@ -63,8 +63,58 @@ pub fn format_frequency_mhz(megahertz: f64) -> String {
     }
 }
 
+/// How temperatures read. The wire always carries °C (`*_celsius`);
+/// this is presentation only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TemperatureScale {
+    #[default]
+    Celsius,
+    Fahrenheit,
+    /// "131°F · 55°C" — both, Fahrenheit first.
+    Both,
+}
+
+impl TemperatureScale {
+    pub const ALL: [TemperatureScale; 3] =
+        [TemperatureScale::Celsius, TemperatureScale::Fahrenheit, TemperatureScale::Both];
+
+    /// Stable id for settings files and `ctl temperature`.
+    pub fn id(self) -> &'static str {
+        match self {
+            TemperatureScale::Celsius => "celsius",
+            TemperatureScale::Fahrenheit => "fahrenheit",
+            TemperatureScale::Both => "both",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<TemperatureScale> {
+        match id.to_ascii_lowercase().as_str() {
+            "celsius" | "c" => Some(TemperatureScale::Celsius),
+            "fahrenheit" | "f" => Some(TemperatureScale::Fahrenheit),
+            "both" | "cf" | "fc" => Some(TemperatureScale::Both),
+            _ => None,
+        }
+    }
+}
+
+pub fn celsius_to_fahrenheit(celsius: f32) -> f32 {
+    celsius * 9.0 / 5.0 + 32.0
+}
+
+/// "55°C", "131°F", or "131°F · 55°C". Each scale rounds on its own
+/// (converting an already-rounded °C would drift up to 0.9 °F).
+pub fn format_temperature_in(celsius: f32, scale: TemperatureScale) -> String {
+    let c = format!("{celsius:.0}°C");
+    let f = format!("{:.0}°F", celsius_to_fahrenheit(celsius));
+    match scale {
+        TemperatureScale::Celsius => c,
+        TemperatureScale::Fahrenheit => f,
+        TemperatureScale::Both => format!("{f} · {c}"),
+    }
+}
+
 pub fn format_temperature(celsius: f32) -> String {
-    format!("{celsius:.0}°C")
+    format_temperature_in(celsius, TemperatureScale::Celsius)
 }
 
 pub fn format_power(watts: f32) -> String {
@@ -108,5 +158,30 @@ mod tests {
     fn frequencies_switch_units_at_a_gigahertz() {
         assert_eq!(format_frequency_mhz(503.0), "503 MHz");
         assert_eq!(format_frequency_mhz(3690.0), "3.69 GHz");
+    }
+
+    #[test]
+    fn temperatures_convert_exactly_and_round_per_scale() {
+        // The fixed points of the conversion.
+        assert_eq!(celsius_to_fahrenheit(0.0), 32.0);
+        assert_eq!(celsius_to_fahrenheit(100.0), 212.0);
+        assert_eq!(celsius_to_fahrenheit(-40.0), -40.0);
+        assert_eq!(celsius_to_fahrenheit(37.0), 98.6);
+        assert_eq!(format_temperature_in(54.875, TemperatureScale::Celsius), "55°C");
+        // 54.875 °C = 130.775 °F → 131, not 55 °C → 131.0 by luck.
+        assert_eq!(format_temperature_in(54.875, TemperatureScale::Fahrenheit), "131°F");
+        assert_eq!(format_temperature_in(90.0, TemperatureScale::Both), "194°F · 90°C");
+        // Rounding each scale on its own: 21.4 °C is 70.52 °F → 71°F,
+        // while converting the rounded 21 °C would say 70°F.
+        assert_eq!(format_temperature_in(21.4, TemperatureScale::Fahrenheit), "71°F");
+    }
+
+    #[test]
+    fn temperature_scale_ids_round_trip() {
+        for scale in TemperatureScale::ALL {
+            assert_eq!(TemperatureScale::from_id(scale.id()), Some(scale));
+        }
+        assert_eq!(TemperatureScale::from_id("F"), Some(TemperatureScale::Fahrenheit));
+        assert_eq!(TemperatureScale::from_id("kelvin"), None);
     }
 }

@@ -11,11 +11,15 @@ pub mod app;
 pub mod backend;
 pub mod cards;
 pub mod details;
+pub mod glyphs;
 pub mod graphs;
 pub mod icons;
+pub mod inspector;
 pub mod processes;
+pub mod sensors_view;
 pub mod settings;
 pub mod theme;
+pub mod widgets;
 
 use std::sync::Arc;
 
