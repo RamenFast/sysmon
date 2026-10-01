@@ -644,33 +644,49 @@ fn cpu_busy_clock_is_what_the_busy_cores_delivered() {
             .collect()
     };
 
-    // Load half the cores so the weighting has something to weigh.
+    // The load changes between consecutive windows (C1c): half the
+    // cores, then one, then half, then one. A clock that answers with
+    // the previous window's delivery is caught on every switch; under
+    // constant load it would look right. Each window's truth is read
+    // at the same edges the sampler uses (right after each sample).
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let spinners: Vec<_> = (0..cores / 2)
-        .map(|_| {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::hint::black_box(1u64.wrapping_mul(3));
-                }
+    let spin = |count: usize| {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let threads: Vec<_> = (0..count)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::hint::black_box(1u64.wrapping_mul(3));
+                    }
+                })
             })
-        })
-        .collect();
-    std::thread::sleep(Duration::from_millis(300));
+            .collect();
+        move || {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        }
+    };
 
     let mut wants = Wants::none();
     wants.cpu = true;
     let mut sampler = Sampler::new();
     let mut results = Vec::new();
-    for _ in 0..3 {
-        let _prime = sampler.sample(wants);
-        let ticks_0 = busy_ticks();
-        let cppc_0: Vec<_> = (0..cores).map(cppc).collect();
+    let mut stop = spin(cores / 2);
+    std::thread::sleep(Duration::from_millis(300));
+    let _prime = sampler.sample(wants);
+    let mut ticks_0 = busy_ticks();
+    let mut cppc_0: Vec<_> = (0..cores).map(cppc).collect();
+    for window in 0..4 {
         std::thread::sleep(Duration::from_millis(1500));
+        let ours = sampler.sample(wants).cpu.expect("cpu");
         let ticks_1 = busy_ticks();
         let cppc_1: Vec<_> = (0..cores).map(cppc).collect();
-        let ours = sampler.sample(wants).cpu.expect("cpu");
+        // Switch the load for the next window.
+        stop();
+        stop = spin(if window % 2 == 0 { 1 } else { cores / 2 });
 
         let (mut weight, mut sum) = (0.0, 0.0);
         for core in 0..cores {
@@ -687,16 +703,14 @@ fn cpu_busy_clock_is_what_the_busy_cores_delivered() {
         }
         let truth = sum / weight;
         let busy_clock = ours.frequency_busy_mhz.expect("frequency_busy_mhz");
-        results.push((busy_clock, truth, ours.frequency_busy_source.clone()));
+        results.push((window, busy_clock, truth, ours.frequency_busy_source.clone()));
+        (ticks_0, cppc_0) = (busy_ticks(), (0..cores).map(cppc).collect());
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    for spinner in spinners {
-        spinner.join().unwrap();
-    }
-    for (ours, truth, source) in &results {
+    stop();
+    for (window, ours, truth, source) in &results {
         assert!(
             (ours - truth).abs() <= 150.0,
-            "busy clock {ours:.0} MHz ({source:?}) vs CPPC delivered {truth:.0} MHz over the same window: {results:?}"
+            "window {window}: busy clock {ours:.0} MHz ({source:?}) vs CPPC delivered {truth:.0} MHz over the same window: {results:?}"
         );
     }
 }

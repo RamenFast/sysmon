@@ -153,17 +153,14 @@ pub struct CpuCollector {
 /// counted only while the core runs (C1a).
 ///
 /// Each `feedback_ctrs` read is a firmware mailbox round-trip
-/// (≈0.6 ms; 32 cores ≈ 20 ms), so the reads never happen on the
-/// sampling path: `collect` asks a background thread for a fresh
-/// snapshot of every core's counters and uses the one it finished for
-/// the previous ask. Each window is therefore "ask to ask", measured
-/// by the same clock on both edges, offset by one read-sweep (~20 ms)
-/// from the /proc/stat window. Over a 1–2 s window that offset is
-/// 1–2%.
+/// (≈0.7 ms wall, ≈0.3 ms CPU; 32 cores ≈ 21 ms wall, 10 ms CPU). The
+/// sweep happens in the sample that uses it, right after /proc/stat,
+/// so both edges of the window are this sample's edges (C1c: an
+/// earlier background-thread version answered with the previous
+/// window). The wait lands on the sampler's own thread, never a UI one.
 struct CppcReader {
     nominal_mhz: f64,
-    request: std::sync::mpsc::Sender<()>,
-    latest: std::sync::Arc<std::sync::Mutex<Option<CppcSweep>>>,
+    paths: Vec<String>,
     previous: Option<CppcSweep>,
 }
 
@@ -171,70 +168,45 @@ struct CppcReader {
 type CppcSweep = Vec<Option<(u64, u64)>>;
 
 impl CppcReader {
-    fn spawn(cores: &[String]) -> Option<CppcReader> {
+    fn new(cores: &[String]) -> Option<CppcReader> {
         let nominal_mhz = read_u64(format!("/sys/devices/system/cpu/{}/acpi_cppc/nominal_freq", cores.first()?))? as f64;
         let paths: Vec<String> =
             cores.iter().map(|core| format!("/sys/devices/system/cpu/{core}/acpi_cppc/feedback_ctrs")).collect();
         parse_feedback_ctrs(&fs::read_to_string(&paths[0]).ok()?)?;
-        let (request, asks) = std::sync::mpsc::channel::<()>();
-        let latest = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let publish = std::sync::Arc::downgrade(&latest);
-        std::thread::Builder::new()
-            .name("sysmon-cpu-cppc".to_string())
-            .spawn(move || {
-                // Ends when the collector drops its sender.
-                while asks.recv().is_ok() {
-                    while asks.try_recv().is_ok() {} // coalesce a backlog
-                    let sweep: CppcSweep = paths
-                        .iter()
-                        .map(|path| fs::read_to_string(path).ok().as_deref().and_then(parse_feedback_ctrs))
-                        .collect();
-                    let Some(latest) = publish.upgrade() else { return };
-                    *latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(sweep);
-                }
-            })
-            .ok()?;
         Some(CppcReader {
             nominal_mhz,
-            request,
-            latest,
+            paths,
             previous: None,
         })
     }
 
-    /// Per-core delivered MHz over the last window (None per core when
-    /// unreadable or wrapped), and asks for the next window's edge.
-    ///
-    /// The first call reads its edge synchronously (one ~20 ms sweep,
-    /// once per collector) so the first real window already has two
-    /// edges; otherwise a sampler's second snapshot — a probe's only
-    /// answer — would fall back to the instant read.
+    /// Per-core delivered MHz since the last call (None per core when
+    /// unreadable or wrapped); None on the first call, which only sets
+    /// the window's opening edge.
     fn take(&mut self) -> Option<Vec<Option<f64>>> {
-        if self.previous.is_none() && self.latest.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
-            let _ = self.request.send(());
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-            while self.latest.lock().unwrap_or_else(|p| p.into_inner()).is_none() && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-        }
-        let current = self.latest.lock().unwrap_or_else(|p| p.into_inner()).take();
-        let _ = self.request.send(());
-        let current = current?;
-        let window = self.previous.as_ref().map(|previous| {
-            previous
-                .iter()
-                .zip(&current)
-                .map(|(before, after)| {
-                    let ((r0, d0), (r1, d1)) = ((*before)?, (*after)?);
-                    // A wrap or reset shows as going backwards: skip the core.
-                    let (reference, delivered) = (r1.checked_sub(r0)?, d1.checked_sub(d0)?);
-                    (reference > 0).then(|| self.nominal_mhz * delivered as f64 / reference as f64)
-                })
-                .collect()
-        });
+        let current: CppcSweep = self
+            .paths
+            .iter()
+            .map(|path| fs::read_to_string(path).ok().as_deref().and_then(parse_feedback_ctrs))
+            .collect();
+        let window = self.previous.as_ref().map(|previous| delivered_mhz(self.nominal_mhz, previous, &current));
         self.previous = Some(current);
         window
     }
+}
+
+/// Per-core delivered MHz between two sweeps. A wrap or reset shows as
+/// a counter going backwards: that core drops out of the window.
+fn delivered_mhz(nominal_mhz: f64, before: &CppcSweep, after: &CppcSweep) -> Vec<Option<f64>> {
+    before
+        .iter()
+        .zip(after)
+        .map(|(before, after)| {
+            let ((r0, d0), (r1, d1)) = ((*before)?, (*after)?);
+            let (reference, delivered) = (r1.checked_sub(r0)?, d1.checked_sub(d0)?);
+            (reference > 0).then(|| nominal_mhz * delivered as f64 / reference as f64)
+        })
+        .collect()
 }
 
 /// "cpuN" names in the same order as `cpufreq_paths` (which is the
@@ -286,7 +258,7 @@ impl CpuCollector {
                 frequency_range_mhz = (mhz("cpuinfo_min_freq"), mhz("cpuinfo_max_freq"));
             }
         }
-        let cppc = cores_for_cppc(&cpufreq_paths).and_then(|cores| CppcReader::spawn(&cores));
+        let cppc = cores_for_cppc(&cpufreq_paths).and_then(|cores| CppcReader::new(&cores));
         CpuCollector {
             window: SelfInterval::default(),
             previous: None,
@@ -316,6 +288,8 @@ impl CpuCollector {
         let current = fs::read_to_string("/proc/stat")
             .map(|content| parse_proc_stat(&content))
             .unwrap_or_default();
+        // The CPPC edge right beside the /proc/stat edge: one window.
+        let delivered = self.cppc.as_mut().and_then(CppcReader::take);
 
         if let Some(previous) = &self.previous {
             snapshot.per_core_percent = current
@@ -357,7 +331,6 @@ impl CpuCollector {
         }
         // The busy clock: what the busy cores delivered over the window
         // (CPPC) when we have a window of it; else the instant read.
-        let delivered = self.cppc.as_mut().and_then(CppcReader::take);
         let delivered_mhz = delivered.as_deref().and_then(|cores| {
             let as_khz: Vec<Option<u64>> = cores.iter().map(|mhz| mhz.map(|m| (m * 1000.0) as u64)).collect();
             busy_weighted_mhz(&snapshot.per_core_percent, &as_khz)
@@ -391,15 +364,9 @@ mod tests {
     fn a_wrapped_or_idle_core_drops_out_of_the_window() {
         // C1b: going backwards (wrap/reset) or a zero reference delta
         // must yield None for that core, never a huge or infinite MHz.
-        let (request, _asks) = std::sync::mpsc::channel();
-        let mut reader = CppcReader {
-            nominal_mhz: 3400.0,
-            request,
-            latest: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            previous: Some(vec![Some((1000, 1000)), Some((1000, 5000)), Some((1000, 1000)), None]),
-        };
-        *reader.latest.lock().unwrap() = Some(vec![Some((2000, 2200)), Some((2000, 100)), Some((1000, 1500)), Some((5, 5))]);
-        let window = reader.take().expect("a window");
+        let before = vec![Some((1000, 1000)), Some((1000, 5000)), Some((1000, 1000)), None];
+        let after = vec![Some((2000, 2200)), Some((2000, 100)), Some((1000, 1500)), Some((5, 5))];
+        let window = delivered_mhz(3400.0, &before, &after);
         assert_eq!(window[0], Some(3400.0 * 1.2));
         assert_eq!(window[1], None, "delivered went backwards");
         assert_eq!(window[2], None, "no reference ticks");

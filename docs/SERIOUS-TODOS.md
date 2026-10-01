@@ -121,13 +121,16 @@ not confident about?" — each answer lands here as a real TODO.*
   the cache is keyed by pid, not (pid, starttime). Bounded and rare,
   but there's no live test, because a faithful one needs real GPU work.
 - **[watch] CPPC cost.** The busy clock reads ACPI CPPC counters, and
-  each read is a firmware mailbox (~0.6 ms; 32 cores ≈ 20 ms wall,
-  ≈ 11 ms CPU per sample, on a background thread). The sampler still
-  costs 44% less CPU than 3.0.3 overall, but on a 128-thread box this
-  sweep scales linearly. If it matters: sample only the cores carrying
-  90% of the busy weight (measured within 28 MHz of all-cores here).
-- **[watch] Sampler PSS +1.2 MB vs 3.0.3** (5.8 → 7.0 MB): the two
-  poller threads (CPPC, GPU clock) and the larger snapshot. Smaller
+  each read is a firmware mailbox (~0.7 ms; 32 cores ≈ 21 ms wall,
+  ≈ 10 ms CPU per sample). The sweep runs in the sample that uses it,
+  on the sampler's own thread (a background-thread version answered
+  with the previous window: C1c, Reviewer B). The sampler still costs
+  less CPU than 3.0.3 overall, but on a 128-thread box this sweep
+  scales linearly (~85 ms wall). If it matters: sample only the cores
+  carrying 90% of the busy weight (measured within 28 MHz of all-cores
+  here).
+- **[watch] Sampler PSS +1.2 MB vs 3.0.3** (5.8 → 7.0 MB): the GPU
+  clock poller thread and the larger snapshot. Smaller
   thread stacks were tried and made no difference (stacks aren't
   touched); a glibc arena cap saved 0.1 MB. Accepted for now.
 - **[env] An X11 launch that inherits swayfx's LD_LIBRARY_PATH
