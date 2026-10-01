@@ -78,6 +78,9 @@ pub struct PerformanceContext<'a> {
     pub actions: &'a mut Vec<AppAction>,
     /// Set by the page from the panel width each frame.
     pub wide: bool,
+    /// Written by the page: the width the CPU graph mode resolved
+    /// against this frame (the menu's "decide by width" reads it).
+    pub cpu_column_width: f32,
 }
 
 impl PerformanceContext<'_> {
@@ -93,9 +96,23 @@ impl PerformanceContext<'_> {
         graph_color(&self.settings.graph_palette, index, self.palette.dark)
     }
 
-    /// The quieter sibling of a series colour (kernel time, VRAM).
+    /// The quieter sibling of a series colour (kernel time, VRAM):
+    /// mixed toward the ink that reads ON THE FIELD. On light themes
+    /// the page ink is the field colour itself, so mixing toward it
+    /// sank the second trace to 2:1 (reviewer R13).
     fn sibling(&self, index: usize) -> Color32 {
-        self.series(index).lerp_to_gamma(self.palette.ink, 0.45)
+        self.series(index).lerp_to_gamma(self.palette.on_field(), 0.45)
+    }
+
+    /// Thermal traces: the theme's two signature text colours on dark
+    /// themes; on light themes those are dark on a dark field, so the
+    /// two warmest series colours stand in (R13).
+    fn thermal_colors(&self) -> (Color32, Color32) {
+        if self.palette.dark {
+            (self.palette.value, self.palette.title)
+        } else {
+            (self.series(GRAPH_SERIES_MEMORY), self.series(GRAPH_SERIES_GPU))
+        }
     }
 
     fn dashed_second(&self) -> bool {
@@ -232,7 +249,8 @@ fn resource_row(
                 let graph_response = draw_graph(ui, cx, scope_height);
                 if let Some(column) = graph_target {
                     let graph_response = graph_response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("Click: Processes sorted by {}", column.id()));
                     if graph_response.clicked() {
                         cx.actions.push(AppAction::ShowProcessesBy(column));
                     }
@@ -254,14 +272,55 @@ fn percent_formatter(labels: &'static [&'static str]) -> impl Fn(&[f64]) -> Stri
     }
 }
 
+/// Before the first sample a row keeps its place: the same box, an
+/// empty field, so the page does not jump when the data lands (R23).
+fn placeholder_row(ui: &mut Ui, cx: &mut PerformanceContext, title: &str) {
+    let palette = cx.palette;
+    let height = cx.scope_height();
+    let gap = cx.row_gap();
+    graphs::group_box(ui, palette, title, |ui| {
+        // Same height as a legend row, so the rows line up across columns.
+        ui.horizontal(|ui| {
+            legend(ui, &[(palette.muted, "waiting for the first sample")]);
+        });
+        ui.add_space(2.0);
+        ui.horizontal_top(|ui| {
+            graphs::led_meter(ui, palette, title, 0.0, palette.muted, "–", height);
+            ui.add_space(6.0);
+            let empty = History::default();
+            graphs::scope_graph(
+                ui,
+                palette,
+                &[&empty],
+                &ScopeConfig {
+                    name: title,
+                    height,
+                    fixed_maximum: Some(100.0),
+                    minimum_autoscale: 100.0,
+                    colors: &[palette.muted],
+                    dashed_second: false,
+                    ceiling_formatter: &|v| format!("{v:.0}"),
+                    hover_formatter: &|_| String::new(),
+                    tag: None,
+                    mini: false,
+                    fill_all: false,
+                },
+            );
+        });
+    });
+    ui.add_space(gap);
+}
+
 fn cpu_row(ui: &mut Ui, cx: &mut PerformanceContext) {
     let Some(cpu) = cx.snapshot.cpu.as_ref() else {
+        placeholder_row(ui, cx, "CPU");
         return;
     };
     let busy_color = cx.series(GRAPH_SERIES_CPU);
     let kernel_color = cx.sibling(GRAPH_SERIES_CPU);
     let percent = cpu.overall_percent;
     let column_width = ui.available_width();
+    cx.cpu_column_width = column_width;
     let mode = CpuGraphMode::resolve(&cx.settings.cpu_graph_mode, column_width);
     let per_core = &cx.histories.per_core;
     let kernel = &cx.histories.cpu_kernel;
@@ -291,6 +350,7 @@ fn cpu_row(ui: &mut Ui, cx: &mut PerformanceContext) {
                     hover_formatter: &percent_formatter(&["busy", "kernel"]),
                     tag: None,
                     mini: false,
+                    fill_all: false,
                 },
             ),
             CpuGraphMode::PerThread => per_thread_grid(ui, cx, per_core, core_count, busy_color),
@@ -362,6 +422,7 @@ fn per_thread_grid(
                 hover_formatter: &formatter,
                 tag: Some(&tag),
                 mini: true,
+                fill_all: false,
             },
         );
     }
@@ -370,13 +431,17 @@ fn per_thread_grid(
 
 fn memory_row(ui: &mut Ui, cx: &mut PerformanceContext) {
     let Some(memory) = cx.snapshot.memory.as_ref() else {
+        placeholder_row(ui, cx, "Memory");
         return;
     };
     let used_color = cx.series(GRAPH_SERIES_MEMORY);
     let cache_color = used_color.gamma_multiply(0.55);
     let percent = memory.used_percent;
     let used = &cx.histories.memory;
-    let cache = &cx.histories.memory_cache;
+    // Stacked (spec, R8): the lower trace is used, the upper trace is
+    // used + cache, and the band between them is the cache. The
+    // sampler keeps `memory_stacked` as that upper trace.
+    let stacked = &cx.histories.memory_stacked;
     let label = format_percent(percent);
     resource_row(
         ui,
@@ -390,18 +455,21 @@ fn memory_row(ui: &mut Ui, cx: &mut PerformanceContext) {
             graphs::scope_graph(
                 ui,
                 cx.palette,
-                &[used, cache],
+                &[stacked, used],
                 &ScopeConfig {
                     name: "Memory history",
                     height,
                     fixed_maximum: Some(100.0),
                     minimum_autoscale: 100.0,
-                    colors: &[used_color, cache_color],
+                    colors: &[cache_color, used_color],
                     dashed_second: cx.dashed_second(),
                     ceiling_formatter: &|v| format!("{v:.0}%"),
-                    hover_formatter: &percent_formatter(&["used", "cache"]),
+                    hover_formatter: &|values: &[f64]| {
+                        format!("used {:.0}%  cache {:.0}%", values[1], values[0] - values[1])
+                    },
                     tag: None,
                     mini: false,
+                    fill_all: true,
                 },
             )
         },
@@ -442,6 +510,7 @@ fn gpu_row(ui: &mut Ui, cx: &mut PerformanceContext) {
                     hover_formatter: &percent_formatter(&["busy", "VRAM"]),
                     tag: None,
                     mini: false,
+                    fill_all: false,
                 },
             )
         },
@@ -451,6 +520,7 @@ fn gpu_row(ui: &mut Ui, cx: &mut PerformanceContext) {
 
 fn disk_row(ui: &mut Ui, cx: &mut PerformanceContext) {
     let Some(disks) = cx.snapshot.disks.as_ref() else {
+        placeholder_row(ui, cx, "Disk");
         return;
     };
     let read_color = cx.series(GRAPH_SERIES_NET_DOWN);
@@ -488,6 +558,7 @@ fn disk_row(ui: &mut Ui, cx: &mut PerformanceContext) {
                     hover_formatter: &hover,
                     tag: None,
                     mini: false,
+                    fill_all: false,
                 },
             )
         },
@@ -497,6 +568,7 @@ fn disk_row(ui: &mut Ui, cx: &mut PerformanceContext) {
 
 fn network_row(ui: &mut Ui, cx: &mut PerformanceContext) {
     let Some(network) = cx.snapshot.network.as_ref() else {
+        placeholder_row(ui, cx, "Network");
         return;
     };
     let down_color = cx.series(GRAPH_SERIES_NET_DOWN);
@@ -512,9 +584,15 @@ fn network_row(ui: &mut Ui, cx: &mut PerformanceContext) {
         .filter_map(|i| i.speed_mbps)
         .max()
         .map(|mbps| mbps as f64 * 125_000.0);
-    let busiest = network.download_bps.max(network.upload_bps);
+    // The meter lights for whichever direction is busier, and the label
+    // names that direction so the bar and the number agree (R5).
+    let (busiest, arrow) = if network.upload_bps > network.download_bps {
+        (network.upload_bps, "↑")
+    } else {
+        (network.download_bps, "↓")
+    };
     let fraction = link_bps.map(|link| (busiest / link) as f32).unwrap_or(0.0);
-    let label = cx.rate(network.download_bps);
+    let label = format!("{arrow} {}", cx.rate(busiest));
     let hover = move |values: &[f64]| {
         format!("↓ {}  ↑ {}", format_rate(values[0], units), format_rate(values[1], units))
     };
@@ -543,6 +621,7 @@ fn network_row(ui: &mut Ui, cx: &mut PerformanceContext) {
                     hover_formatter: &hover,
                     tag: None,
                     mini: false,
+                    fill_all: false,
                 },
             )
         },
@@ -552,10 +631,10 @@ fn network_row(ui: &mut Ui, cx: &mut PerformanceContext) {
 
 fn thermals_row(ui: &mut Ui, cx: &mut PerformanceContext) {
     let Some(cpu) = cx.snapshot.cpu.as_ref() else {
+        placeholder_row(ui, cx, "Thermals");
         return;
     };
-    let cpu_color = cx.palette.value;
-    let gpu_color = cx.palette.title;
+    let (cpu_color, gpu_color) = cx.thermal_colors();
     let cpu_temperature = &cx.histories.cpu_temperature;
     let gpu_temperature = &cx.histories.gpu_temperature;
     let busy_clock = &cx.histories.busy_clock;
@@ -571,6 +650,7 @@ fn thermals_row(ui: &mut Ui, cx: &mut PerformanceContext) {
         parts.join("  ")
     };
     let has_gpu = !gpu_temperature.is_empty();
+    let hottest = cpu_temperature.max().max(gpu_temperature.max());
     resource_row(
         ui,
         cx,
@@ -594,7 +674,9 @@ fn thermals_row(ui: &mut Ui, cx: &mut PerformanceContext) {
                 &ScopeConfig {
                     name: "Thermal history",
                     height,
-                    fixed_maximum: Some(100.0),
+                    // 0..100 °C; a reading past 100 raises the ceiling
+                    // and writes it in the corner (R22).
+                    fixed_maximum: if hottest > 100.0 { None } else { Some(100.0) },
                     minimum_autoscale: 100.0,
                     colors: &[cpu_color, gpu_color],
                     dashed_second: cx.dashed_second(),
@@ -602,6 +684,7 @@ fn thermals_row(ui: &mut Ui, cx: &mut PerformanceContext) {
                     hover_formatter: &hover,
                     tag: None,
                     mini: false,
+                    fill_all: false,
                 },
             )
         },
@@ -635,7 +718,9 @@ fn rows(ui: &mut Ui, palette: &Palette, entries: &[(&str, String, Option<String>
 
 fn totals_box(ui: &mut Ui, cx: &mut PerformanceContext) {
     let processes = cx.snapshot.processes.as_ref().map(|p| p.len()).unwrap_or(0);
-    let threads: u64 = cx.snapshot.processes.as_ref().map(|p| p.iter().map(|r| r.threads as u64).sum()).unwrap_or(0);
+    // The kernel's own task count (loadavg's 4th field), the same
+    // number the Overview's CPU tooltip shows (R18).
+    let threads: u64 = cx.snapshot.cpu.as_ref().map(|c| c.tasks_total as u64).unwrap_or(0);
     let ctx = cx.snapshot.cpu.as_ref().map(|c| c.context_switches_per_second).unwrap_or(0.0);
     let uptime = cx.snapshot.system.as_ref().map(|s| s.uptime_seconds).unwrap_or(0.0);
     let entries = [
@@ -680,9 +765,9 @@ fn commit_box(ui: &mut Ui, cx: &mut PerformanceContext) {
             Some("CommitLimit: advisory under the default overcommit heuristic".to_string()),
         ),
         (
-            "Peak",
+            "Peak*",
             cx.size(cx.histories.commit_peak_bytes.max(memory.committed_bytes)),
-            Some("highest commit charge seen since SysMon launched (SysMon's own mark, not the kernel's)".to_string()),
+            Some("* since SysMon launched: SysMon's own high-water mark, not a kernel figure".to_string()),
         ),
     ];
     let palette = cx.palette;

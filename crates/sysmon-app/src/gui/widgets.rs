@@ -277,13 +277,25 @@ pub fn stone_switch(ui: &mut Ui, palette: &Palette, options: [&str; 2], selected
         .collect();
     let size = vec2(widths[0] + widths[1], 18.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tooltip));
+    // The accessible name says which side is down (R15); a keyboard
+    // activation (no pointer) flips to the other side.
+    {
+        let state = format!("{tooltip} (now: {})", options[selected]);
+        response.widget_info(move || {
+            let mut info = egui::WidgetInfo::labeled(egui::WidgetType::Button, true, state.clone());
+            info.selected = Some(true);
+            info
+        });
+    }
     let response = response.on_hover_text(tooltip);
     let mut chosen = None;
-    if response.clicked()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        let index = if pointer.x < rect.left() + widths[0] { 0 } else { 1 };
+    if response.clicked() {
+        let index = match response.interact_pointer_pos() {
+            Some(pointer) => {
+                if pointer.x < rect.left() + widths[0] { 0 } else { 1 }
+            }
+            None => 1 - selected,
+        };
         if index != selected {
             chosen = Some(index);
         }

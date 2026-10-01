@@ -66,8 +66,9 @@ pub struct Histories {
     /// One per thread, /proc/stat order.
     pub per_core: Vec<History>,
     pub cpu_kernel: History,
-    /// Cache as a % of total, stacked under `memory`.
-    pub memory_cache: History,
+    /// (used + cache) as a % of total: the upper trace of the stacked
+    /// memory graph; the band down to `memory` is the cache.
+    pub memory_stacked: History,
     pub vram: History,
     pub disk_read: History,
     pub disk_write: History,
@@ -97,7 +98,8 @@ impl Histories {
         if let Some(memory) = &snapshot.memory {
             self.memory.push(memory.used_percent as f64);
             if memory.total_bytes > 0 {
-                self.memory_cache.push(memory.cached_bytes as f64 / memory.total_bytes as f64 * 100.0);
+                let cache_percent = memory.cached_bytes as f64 / memory.total_bytes as f64 * 100.0;
+                self.memory_stacked.push((memory.used_percent as f64 + cache_percent).min(100.0));
             }
             self.commit_peak_bytes = self.commit_peak_bytes.max(memory.committed_bytes);
         }
@@ -240,6 +242,9 @@ pub struct SysMonApp {
     /// One-shot: scroll the Overview to this card (the Processes
     /// summary strip's way back).
     overview_scroll_to: Option<&'static str>,
+    /// The Performance page's CPU column width from the last frame
+    /// it drew (what `auto` resolved against).
+    last_performance_column_width: f32,
     /// Keeps the socket alive exactly as long as the app; Drop
     /// unlinks it.
     _control_server: Option<crate::control::ControlServer>,
@@ -326,6 +331,7 @@ impl SysMonApp {
             pending_screenshot: None,
             popout_drags: HashMap::new(),
             overview_scroll_to: None,
+            last_performance_column_width: 0.0,
             _control_server: control_server,
             settings,
         }
@@ -560,8 +566,11 @@ impl SysMonApp {
                 .on_hover_text("Performance page: per-thread graphs when the window is wide, one trace when narrow")
                 .clicked()
                 {
+                    // Unticking pins whatever the width currently shows,
+                    // so nothing jumps (R19).
                     self.settings.cpu_graph_mode = if self.settings.cpu_graph_mode == "auto" {
-                        "combined".to_string()
+                        let column = self.last_performance_column_width;
+                        performance::CpuGraphMode::resolve("auto", column).id().to_string()
                     } else {
                         "auto".to_string()
                     };
@@ -635,8 +644,10 @@ impl SysMonApp {
             histories: &histories,
             actions: actions_out,
             wide: false,
+            cpu_column_width: 0.0,
         };
         performance::performance_page(ui, &mut cx);
+        self.last_performance_column_width = cx.cpu_column_width;
     }
 
     fn overview(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
@@ -1000,14 +1011,14 @@ impl SysMonApp {
                 self.page = Page::Processes;
                 self.table_state.focus_filter = true;
             }
-            if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)) {
-                self.page = Page::Performance;
-            }
-            if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2)) {
-                self.page = Page::Overview;
-            }
-            if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3)) {
-                self.page = Page::Processes;
+            for (key, page) in [(Key::Num1, Page::Performance), (Key::Num2, Page::Overview), (Key::Num3, Page::Processes)] {
+                if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, key)) {
+                    self.page = page;
+                    // One meaning everywhere (R20): the window reopens on
+                    // the page it was last on.
+                    self.settings.start_page = page.id().to_string();
+                    self.settings.save();
+                }
             }
             if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Q)) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1064,6 +1075,8 @@ impl SysMonApp {
                 "page" => match Page::from_id(&value_or(&value)) {
                     Some(page) => {
                         self.page = page;
+                        self.settings.start_page = page.id().to_string();
+                        self.settings.save();
                         Ok(serde_json::json!({"page": page.id()}))
                     }
                     None => Err(VerbError::bad_args(
@@ -1304,7 +1317,9 @@ impl eframe::App for SysMonApp {
         if self.page == Page::Performance {
             let text = {
                 let snapshot = self.shared.latest.read().unwrap();
-                let wide = ctx.input(|i| i.viewport().inner_rect.map(|r| r.width()).unwrap_or(0.0))
+                // The same breakpoint the page uses: the central panel's
+                // width is the viewport minus its 8 px side margins (R17).
+                let wide = ctx.input(|i| i.viewport().inner_rect.map(|r| r.width()).unwrap_or(0.0)) - 16.0
                     >= performance::WIDE_BREAKPOINT;
                 performance::status_text(&snapshot, self.settings.display(), wide)
             };

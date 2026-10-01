@@ -116,6 +116,10 @@ pub struct ScopeConfig<'a> {
     pub tag: Option<&'a str>,
     /// Hairline graticule only (mini graphs skip the labels).
     pub mini: bool,
+    /// Fill under every series, not just the first: the memory graph
+    /// draws cache+used first and used on top of it, so the band
+    /// between the two traces IS the cache (stacked, R8).
+    pub fill_all: bool,
 }
 
 /// Where the vertical graticule lines sit, in samples from the newest.
@@ -219,7 +223,7 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
                 let y = drawable.bottom() - ((value / maximum).min(1.0) as f32) * drawable.height();
                 pos2(x, y)
             }));
-            if series_index == 0 && !config.mini {
+            if (series_index == 0 || config.fill_all) && !config.mini {
                 // Soft fill under the first trace as ONE mesh: a
                 // triangle strip between the trace and the baseline.
                 // (A single concave polygon tessellates into stripes;
@@ -316,8 +320,11 @@ pub fn led_meter(ui: &mut Ui, palette: &Palette, name: &str, fraction: f32, colo
         vec![label.to_string()]
     } else if label.contains(" · ") {
         label.split(" · ").map(str::to_string).collect()
+    } else if let Some((head, tail)) = label.rsplit_once(' ') {
+        // "↓ 1.3 kB/s" → "↓ 1.3" / "kB/s": the number keeps its arrow.
+        vec![head.to_string(), tail.to_string()]
     } else {
-        label.split(' ').map(str::to_string).collect()
+        vec![label.to_string()]
     };
     let label_height = line_height * lines.len() as f32 + 1.0;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height + label_height), Sense::click());
@@ -389,7 +396,8 @@ pub fn group_box<R>(ui: &mut Ui, palette: &Palette, title: &str, add_contents: i
     // then the text.
     let title_pos = pos2(frame_rect.left() + 8.0, outer_top);
     let title_rect = Rect::from_min_size(title_pos - vec2(3.0, 0.0), title_galley.size() + vec2(6.0, 0.0));
-    painter.rect_filled(title_rect, 0.0, palette.surface);
+    // The page ground is the plane, not a card surface (R12).
+    painter.rect_filled(title_rect, 0.0, palette.plane);
     painter.galley(title_pos, title_galley, palette.title);
     response.inner
 }

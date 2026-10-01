@@ -194,10 +194,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.1.0_amd64.deb
+sudo apt install ./sysmon_3.2.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.1.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.2.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -207,7 +207,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.1.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.2.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully. Motherboard fan and voltage

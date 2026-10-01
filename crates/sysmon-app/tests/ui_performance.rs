@@ -179,6 +179,7 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
         .query_all_by_role(Role::Button)
         .find(|n| label_of(n).starts_with("CPU graph:"))
         .expect("stone switch");
+    assert!(label_of(&switch).ends_with("(now: combined)"), "R15: the switch names its state: {}", label_of(&switch));
     let rect = switch.rect();
     let right_half = egui::pos2(rect.right() - rect.width() * 0.25, rect.center().y);
     harness.input_mut().events.push(egui::Event::PointerMoved(right_half));
@@ -199,6 +200,7 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(config.join("sysmon/settings.json")).unwrap()).unwrap();
     assert_eq!(saved["cpu_graph_mode"], "per_thread", "…and it survives a restart");
+    assert!(find_label(&harness, "CPU graph:").unwrap().ends_with("(now: per thread)"));
 
     // ---- V3 + V9 at 430 px: 8 thread graphs, in order, each with
     // its own value, inside the window, ≥ 28 px tall.

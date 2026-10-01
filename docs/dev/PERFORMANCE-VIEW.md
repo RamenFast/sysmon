@@ -1,9 +1,17 @@
 # The Performance page
 
 *Spec for SysMon 3.2's startup page. Ratified by Ben 2026-10-01 (plan
-approved in conversation). The code in `crates/sysmon-app/src/gui/performance.rs`
-and the new pieces in `graphs.rs` are compiled from this file: when
-they disagree, this file wins and the code is regenerated.*
+approved in conversation; Ben then delegated creative and technical
+direction for the round). The code in
+`crates/sysmon-app/src/gui/performance.rs` and the new pieces in
+`graphs.rs` are compiled from this file: when they disagree, this file
+wins and the code is regenerated.*
+
+*Revision 2 (2026-10-01, after the read-only review): busy clock is a
+number beside the thermal graph, not a third trace (§Thermals); mini
+graphs are leaner (§Mini graph); the three meter definitions are
+written down (§Meters); Peak is `Peak*`; the network label follows the
+bar; explicit per-thread at 430 px is noted.*
 
 ## Lineage
 
@@ -33,8 +41,8 @@ Two breakpoints, decided by the central panel's width each frame.
 ├ Network ──────────────────────────────────────────┤
 │ 1.2 MB/s ↓     │ scope graph (down + up)            │
 ├ Thermals ─────────────────────────────────────────┤
-│ 160°F · 71°C   │ scope graph (CPU °C + GPU °C,      │
-│                │  busy clock as a faint third)       │
+│ 160°F · 71°C   │ scope graph (CPU °C + GPU °C)      │
+│                │  busy clock as a number, title row  │
 ├ Totals ───────────┬ Physical memory ───────────────┤
 │ Processes    636  │ Installed        137.4 GB      │
 │ Threads     3214  │ Usable           135.0 GB      │
@@ -51,9 +59,10 @@ Two breakpoints, decided by the central panel's width each frame.
 The page scrolls vertically only when the window is shorter than the
 content (a 430×780 window shows everything at the default interval).
 
-*Peak is the highest commit charge seen since SysMon started (an
-in-process high-water mark, labelled "since launch" on hover). It is
-not the kernel's figure, and the label says so.
+*Peak\* is the highest commit charge seen since SysMon started (an
+in-process high-water mark). The asterisk is in the label and the
+hover says "since SysMon launched: SysMon's own high-water mark, not a
+kernel figure".
 
 ### Wide (≥ 760 px)
 
@@ -79,7 +88,12 @@ page, which is how the eye finds it.
 - The choice persists in `settings.cpu_graph_mode`. Until the user
   picks, it is `auto`: per thread when the column is ≥ 420 px wide,
   combined below that. Picking either side writes it down; the
-  settings menu has a "Decide by width" row to return to `auto`.
+  settings menu has a "Decide by width" row to return to `auto`
+  (unticking it pins whatever the width currently shows, so nothing
+  jumps).
+- Per thread chosen explicitly at 430 px puts 32 threads above the
+  fold and pushes Network, Thermals and the boxes below it; that is
+  the user's call, and `auto` avoids it.
 
 ## Pieces
 
@@ -106,7 +120,34 @@ All painted straight onto egui in `graphs.rs`. No new crates.
   field in the muted ink (`↑ 48 MB/s`) so a flat line is never read as
   "nothing" when it is "small against a big spike".
 - **Hover** reads out every series at the cursor's sample, through the
-  same `hover_formatter` as today.
+  same `hover_formatter` as today, and a clickable graph's hover also
+  says where the click goes ("Click: Processes sorted by cpu").
+- Temperature graphs are 0..100 °C until a reading passes 100; then
+  the ceiling rises and is written in the corner like a rate graph.
+
+### Mini graph
+
+The per-thread cell is a scope graph with `mini: true`: the midline
+only (no quarter lines), vertical graticule every 30 samples, no fill
+under the trace, no shadow, a 1 px stroke, the thread number as its
+tag. Thirty-two of these draw every frame; the leaner field is what
+keeps the page under the Overview's cost (V8, V10).
+
+### Meters
+
+Each meter's fraction and label come from one definition:
+
+| row | fraction | label |
+|---|---|---|
+| CPU | `overall_percent / 100` | that percent |
+| Memory | `used_percent / 100` | that percent |
+| GPU | `busy_percent / 100` | that percent |
+| Disk | the busiest drive's `util_percent / 100` (max across drives) | that percent |
+| Network | the busier direction over the fastest *up* physical link (`speed_mbps`); 0 when no link reports a speed | that direction's rate, with its arrow (`↓ 1.2 MB/s`) |
+| Thermals | CPU `temperature_celsius / 100` (a position on the scale everyone knows, not a verdict) | the temperature in the chosen scale |
+
+Disk util and link speed are audited through the Overview's rows (D5,
+N-series); the fractions are arithmetic on those.
 
 ### LED meter
 
@@ -148,7 +189,7 @@ series plus two derived tints:
 | CPU busy | `GRAPH_SERIES_CPU` |
 | CPU kernel time | `GRAPH_SERIES_CPU` mixed 45 % toward the ink (a quieter sibling) |
 | memory used | `GRAPH_SERIES_MEMORY` |
-| memory cache | `GRAPH_SERIES_MEMORY` at 55 % alpha, stacked beneath used |
+| memory cache | `GRAPH_SERIES_MEMORY` at 55 % alpha; the graph draws used+cache filled, then used filled on top, so the band between them is the cache (stacked) |
 | GPU busy | `GRAPH_SERIES_GPU` |
 | VRAM | `GRAPH_SERIES_GPU` mixed 45 % toward the ink |
 | disk read | `GRAPH_SERIES_NET_DOWN` |
@@ -157,11 +198,13 @@ series plus two derived tints:
 | network up | `GRAPH_SERIES_NET_UP` |
 | CPU temperature | `palette.value` (gold) |
 | GPU temperature | `palette.title` (rose) |
-| busy clock | `palette.muted`, faint, right-hand scale |
+| busy clock | a number in the Thermals title row (`4.13 GHz`), not a trace: a third scale on one field was noise |
 
 Every graph's legend names the colour and the series next to each
 other in the box title row (`■ busy  ■ kernel`), so the meaning is
-stated where the colour is used.
+stated where the colour is used. On light themes the two sibling
+tints and the thermal pair are chosen to read on the dark field
+(contrast ≥ 3:1 against `field()`), not on the page.
 
 ## Data
 
@@ -178,7 +221,7 @@ stated where the colour is used.
 | network | `network.download_bps`, `upload_bps` | |
 | temperatures | `cpu.temperature_celsius`, `gpu.temperature_edge_celsius` | |
 | busy clock | `cpu.frequency_busy_mhz` | |
-| threads | sum of `processes[].threads` | |
+| threads | `cpu.tasks_total` (the kernel's task count, the number the Overview's CPU tooltip shows) | |
 | uptime | `system.uptime_seconds` | |
 
 Histories for every graphed value are kept by the sampler thread in
