@@ -35,8 +35,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# utime+stime ticks of one pid (fields 14,15 after the comm parens)
-ticks() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $12 + $13}'; }
+# utime+stime+cutime+cstime ticks of one pid (fields 14-17 after the
+# comm parens). The reaped-children terms matter: a binary that shells
+# out per frame (3.2 reviewer, R1: `gsettings` per graph) hides its
+# cost there, and the 3.1 version of this line could not see it.
+ticks() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $12 + $13 + $14 + $15}'; }
 pss_kb() { awk '/^Pss:/ {print $2}' "/proc/$1/smaps_rollup"; }
 rss_kb() { awk '/^VmRSS:/ {print $2}' "/proc/$1/status"; }
 

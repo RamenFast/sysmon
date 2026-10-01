@@ -523,6 +523,11 @@ pub fn eased_bool(ctx: &egui::Context, id: egui::Id, value: bool) -> f32 {
 /// Cinnamon/GNOME: `org.gnome.desktop.interface enable-animations`.
 /// `SYSMON_REDUCED_MOTION` overrides for testing and for desktops
 /// that have no such setting.
+///
+/// This shells out to `gsettings`. Call it from `apply` (once per
+/// theme change), never per frame: the 3.2 reviewer caught a scope
+/// graph calling it per graph per frame, 3610 execs in 8 s (V10).
+/// Per-frame code reads [`reduced_motion`] instead.
 pub fn prefers_reduced_motion() -> bool {
     if let Ok(value) = std::env::var("SYSMON_REDUCED_MOTION") {
         return matches!(value.as_str(), "1" | "true" | "on");
@@ -530,6 +535,12 @@ pub fn prefers_reduced_motion() -> bool {
     gsettings_get("org.gnome.desktop.interface", "enable-animations")
         .map(|value| value.trim() == "false")
         .unwrap_or(false)
+}
+
+/// The answer `apply` already wrote into the style: zero animation
+/// time means reduced motion. Free to call every frame.
+pub fn reduced_motion(ctx: &egui::Context) -> bool {
+    ctx.style().animation_time == 0.0
 }
 
 /// Does the desktop ask for high contrast? Cinnamon/GNOME express it

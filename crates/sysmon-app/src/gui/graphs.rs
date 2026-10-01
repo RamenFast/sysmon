@@ -163,13 +163,16 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
     let painter = ui.painter_at(rect);
 
     // The field, carved a hair into the surface: a dark fill, the
-    // hairline frame, and a one-pixel shadow along the top and left
-    // so the trace sits *in* the panel rather than on it.
+    // hairline frame, and (full-size only) a one-pixel shadow along
+    // the top and left so the trace sits *in* the panel rather than
+    // on it. Mini graphs skip the shadow: 32 of them per frame.
     painter.rect_filled(rect, 0.0, palette.field());
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
-    let shadow = Stroke::new(1.0, Color32::BLACK.gamma_multiply(0.35));
-    painter.line_segment([pos2(rect.left() + 1.0, rect.top() + 1.5), pos2(rect.right() - 1.0, rect.top() + 1.5)], shadow);
-    painter.line_segment([pos2(rect.left() + 1.5, rect.top() + 1.0), pos2(rect.left() + 1.5, rect.bottom() - 1.0)], shadow);
+    if !config.mini {
+        let shadow = Stroke::new(1.0, Color32::BLACK.gamma_multiply(0.35));
+        painter.line_segment([pos2(rect.left() + 1.0, rect.top() + 1.5), pos2(rect.right() - 1.0, rect.top() + 1.5)], shadow);
+        painter.line_segment([pos2(rect.left() + 1.5, rect.top() + 1.0), pos2(rect.left() + 1.5, rect.bottom() - 1.0)], shadow);
+    }
 
     let padding = 2.0f32;
     let drawable = rect.shrink(padding);
@@ -187,7 +190,9 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
         painter.line_segment([pos2(drawable.left(), y), pos2(drawable.right(), y)], grid);
     }
     let pushed = series.iter().map(|s| s.pushed()).max().unwrap_or(0);
-    let offset = graticule_offset(pushed, super::theme::prefers_reduced_motion());
+    let offset = graticule_offset(pushed, super::theme::reduced_motion(ui.ctx()));
+    // Mini graphs: the midline and verticals every 30 samples, which
+    // on a 100-px-wide cell is one line per ~20 px.
     let pitch = if config.mini { GRATICULE_PITCH * 2 } else { GRATICULE_PITCH };
     let mut from_newest = offset;
     while from_newest < HISTORY_LENGTH {
@@ -215,17 +220,13 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
                 pos2(x, y)
             }));
             if series_index == 0 && !config.mini {
-                // Soft fill under the first trace, one trapezoid per
-                // segment (a single concave polygon tessellates into
-                // stripes).
+                // Soft fill under the first trace as ONE mesh: a
+                // triangle strip between the trace and the baseline.
+                // (A single concave polygon tessellates into stripes;
+                // one convex polygon per segment was 149 allocations
+                // per graph per frame, reviewer R14.)
                 let fill_color = color.gamma_multiply(0.22);
-                for pair in points.windows(2) {
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![pos2(pair[0].x, drawable.bottom()), pair[0], pair[1], pos2(pair[1].x, drawable.bottom())],
-                        fill_color,
-                        Stroke::NONE,
-                    ));
-                }
+                painter.add(fill_mesh(&points, drawable.bottom(), fill_color));
             }
             let stroke = Stroke::new(if config.mini { 1.0 } else { 1.4 }, color);
             if series_index == 1 && config.dashed_second {
@@ -271,6 +272,28 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
         }
     }
     response
+}
+
+/// The soft fill under a trace as one mesh (a triangle strip between
+/// the trace and the baseline): one shape, one allocation.
+pub(crate) fn fill_mesh(points: &[Pos2], baseline: f32, color: Color32) -> egui::Shape {
+    let mut mesh = egui::Mesh::default();
+    if points.len() < 2 {
+        return egui::Shape::Mesh(std::sync::Arc::new(mesh));
+    }
+    mesh.vertices.reserve(points.len() * 2);
+    mesh.indices.reserve((points.len() - 1) * 6);
+    for (index, point) in points.iter().enumerate() {
+        mesh.colored_vertex(*point, color);
+        mesh.colored_vertex(pos2(point.x, baseline), color);
+        if index > 0 {
+            let base = (index as u32 - 1) * 2;
+            // Two triangles per segment: (top0, base0, top1), (top1, base0, base1).
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base + 2, base + 1, base + 3);
+        }
+    }
+    egui::Shape::Mesh(std::sync::Arc::new(mesh))
 }
 
 /// The LED meter: a vertical column of segments lit from the bottom,
@@ -448,21 +471,10 @@ pub fn history_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config
                 } else {
                     0.14
                 };
-                // Fill under the curve as one trapezoid per segment —
-                // a single concave polygon tessellates into stripes.
+                // Fill under the curve as one mesh (a concave polygon
+                // would tessellate into stripes).
                 let fill_color = color.gamma_multiply(fill_alpha);
-                for pair in points.windows(2) {
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![
-                            pos2(pair[0].x, drawable.bottom()),
-                            pair[0],
-                            pair[1],
-                            pos2(pair[1].x, drawable.bottom()),
-                        ],
-                        fill_color,
-                        Stroke::NONE,
-                    ));
-                }
+                painter.add(fill_mesh(&points, drawable.bottom(), fill_color));
                 let line_width = if config.style == GraphStyle::Area {
                     1.3
                 } else {
@@ -617,13 +629,7 @@ pub fn sparkline(ui: &mut Ui, palette: &Palette, values: &[f64], height: f32, co
             pos2(x, y)
         })
         .collect();
-    for pair in points.windows(2) {
-        painter.add(egui::Shape::convex_polygon(
-            vec![pos2(pair[0].x, rect.bottom()), pair[0], pair[1], pos2(pair[1].x, rect.bottom())],
-            color.gamma_multiply(0.18),
-            Stroke::NONE,
-        ));
-    }
+    painter.add(fill_mesh(&points, rect.bottom(), color.gamma_multiply(0.18)));
     painter.add(egui::Shape::line(points, Stroke::new(1.3, color)));
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
 }
