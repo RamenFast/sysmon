@@ -158,10 +158,12 @@ fn script_label(path: &str) -> String {
 /// isn't a flag. Inline code (`-c`, `-e`, `--eval`) has no name.
 /// `-m module` names the module.
 fn script_name(argv: &[&str]) -> Option<String> {
+    let python = argv.first().map(|first| is_python(basename(first))).unwrap_or(false);
     let mut arguments = argv.iter().skip(1);
     while let Some(argument) = arguments.next() {
         match *argument {
-            "-c" | "-e" | "--eval" | "-p" | "--print" | "-E" => return None,
+            "-c" => return arguments.next().and_then(|code| python.then(|| inline_import_name(code)).flatten()),
+            "-e" | "--eval" | "-p" | "--print" | "-E" => return None,
             "-m" => return arguments.next().map(|module| module.to_string()),
             "-jar" => return arguments.next().map(|jar| basename(jar).to_string()),
             flag if FLAGS_WITH_VALUE.contains(&flag) => {
@@ -174,7 +176,11 @@ fn script_name(argv: &[&str]) -> Option<String> {
                 && flag[1..].bytes().all(|b| b.is_ascii_alphabetic())
                 && flag[1..].contains(['c', 'e']) =>
             {
-                return None;
+                return if flag[1..].contains('c') && python {
+                    arguments.next().and_then(|code| inline_import_name(code))
+                } else {
+                    None
+                };
             }
             flag if flag.starts_with('-') => {}
             // `bun run src/server/index.ts`, `deno run x.ts`
@@ -183,6 +189,60 @@ fn script_name(argv: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn is_python(name: &str) -> bool {
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    matches!(base, "python" | "pypy")
+}
+
+/// Python inline code that is really a module launcher (`-c "from
+/// multiprocessing.resource_tracker import main;main(5)"`, `-c
+/// "import http.server; http.server.test()"`) is named by that
+/// module, the way `-m` is. The bar (reviewer R2): a single plain
+/// module name (identifier, dots allowed; no `__future__`, no
+/// relative `.`, no `a,b` list) whose imported name is then *called*
+/// in the same code. Anything else inline has no better name than
+/// the interpreter.
+fn inline_import_name(code: &str) -> Option<String> {
+    let is_module = |word: &str| {
+        !word.is_empty()
+            && word != "__future__"
+            && !word.starts_with('.')
+            && word.split('.').all(|part| {
+                let mut chars = part.chars();
+                chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    };
+    // Split the first statement off; the rest must use what it imported.
+    let (statement, rest) = code.trim().split_once(';').unwrap_or((code.trim(), ""));
+    let mut words = statement.split_ascii_whitespace();
+    let (module, name_used) = match words.next()? {
+        "from" => {
+            let module = words.next()?;
+            words.next().filter(|w| *w == "import")?;
+            let imported = words.next()?.trim_end_matches(',');
+            if words.next().is_some() || !is_module(module) || !is_module(imported) {
+                return None;
+            }
+            (module.rsplit('.').next()?.to_string(), imported.to_string())
+        }
+        "import" => {
+            let module = words.next()?;
+            if words.next().is_some() || !is_module(module) {
+                return None;
+            }
+            (module.to_string(), module.to_string())
+        }
+        _ => return None,
+    };
+    // `main(5)`, `http.server.test()`: the imported name, called.
+    let called = rest
+        .split(';')
+        .map(str::trim)
+        .any(|stmt| stmt.starts_with(&name_used) && stmt[name_used.len()..].trim_start().starts_with(['(', '.']));
+    called.then_some(module)
 }
 
 /// What a person calls this process. comm is what the kernel calls
@@ -542,6 +602,25 @@ mod tests {
         assert_eq!(name("bash", &["bash", "-lc", "cd /home/ben/Dev && cargo build --release"], None), "bash");
         assert_eq!(name("bash", &["/bin/bash", "-ec", "eval \"$X\"; status=$?"], None), "bash");
         assert_eq!(name("python3", &["python3", "-Bc", "print(1)"], None), "python3");
+        // ...unless the inline code is an import: then the module is
+        // the program (3.2 audit P2: multiprocessing's resource
+        // tracker is `python3 -I -c "from multiprocessing.resource_tracker import main;main(5)"`).
+        assert_eq!(
+            name("python3", &["python3", "-I", "-c", "from multiprocessing.resource_tracker import main;main(5)"], None),
+            "resource_tracker"
+        );
+        assert_eq!(name("python3", &["python3", "-c", "import http.server; http.server.test()"], None), "http.server");
+        // Reviewer R2: the module is the program only when the code
+        // then *uses* it. Everything else inline keeps the interpreter.
+        assert_eq!(name("python3", &["python3", "-c", "import sys,time; time.sleep(9)"], None), "python3");
+        assert_eq!(name("python3", &["python3", "-c", "import sys; import time; time.sleep(9)"], None), "python3");
+        assert_eq!(name("python3", &["python3", "-c", "from __future__ import annotations; x()"], None), "python3");
+        assert_eq!(name("python3", &["python3", "-c", "from . import x; x.run()"], None), "python3");
+        assert_eq!(name("python3", &["python3", "-c", "  from   os import path"], None), "python3");
+        // Shells are not Python: `sh -c "import -window root …"` is
+        // ImageMagick's `import`, not a module.
+        assert_eq!(name("sh", &["sh", "-c", "import -window root shot.png"], Some("dash")), "sh");
+        assert_eq!(name("bash", &["bash", "-lc", "from here import that"], None), "bash");
         // A cluster without c/e is just flags.
         assert_eq!(name("python3", &["python3", "-uB", "x.py"], None), "x.py");
         // comm truncated at 15 bytes.

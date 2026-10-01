@@ -35,8 +35,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# utime+stime ticks of one pid (fields 14,15 after the comm parens)
-ticks() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $12 + $13}'; }
+# utime+stime+cutime+cstime ticks of one pid (fields 14-17 after the
+# comm parens). The reaped-children terms matter: a binary that shells
+# out per frame (3.2 reviewer, R1: `gsettings` per graph) hides its
+# cost there, and the 3.1 version of this line could not see it.
+ticks() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $12 + $13 + $14 + $15}'; }
 pss_kb() { awk '/^Pss:/ {print $2}' "/proc/$1/smaps_rollup"; }
 rss_kb() { awk '/^VmRSS:/ {print $2}' "/proc/$1/status"; }
 
@@ -78,8 +81,14 @@ display=":$((90 + RANDOM % 9))"
 Xvfb "${display}" -screen 0 1280x900x24 >/dev/null 2>&1 &
 pids+=("$!")
 sleep 1
-printf '{"settings_version":2,"update_interval_seconds":1.0}' \
-  >"${XDG_CONFIG_HOME}/sysmon/settings.json"
+# Which page the window measures on (SYSMON_PERF_PAGE: performance |
+# overview | processes; 3.1 and older ignore the key and open the
+# Overview) and the Performance page's CPU graph (SYSMON_PERF_CPUGRAPH:
+# auto | combined | per_thread).
+perf_page="${SYSMON_PERF_PAGE:-performance}"
+perf_cpugraph="${SYSMON_PERF_CPUGRAPH:-auto}"
+printf '{"settings_version":2,"update_interval_seconds":1.0,"start_page":"%s","cpu_graph_mode":"%s"}' \
+  "${perf_page}" "${perf_cpugraph}" >"${XDG_CONFIG_HOME}/sysmon/settings.json"
 DISPLAY="${display}" "${bin}" >/dev/null 2>&1 &
 gui_pid=$!
 pids+=("${gui_pid}")
@@ -103,6 +112,7 @@ probe_median="$(printf '%s\n' "${probe_ms[@]}" | sort -n | sed -n 3p)"
 jq -n \
   --arg version "$("${bin}" --version)" \
   --arg renderer "${renderer}" \
+  --arg page "${perf_page}" --arg cpugraph "${perf_cpugraph}" \
   --argjson seconds "${seconds}" \
   --argjson sampler_cpu "${sampler_cpu}" --argjson sampler_pss "${sampler_pss}" \
   --argjson sampler_rss "${sampler_rss}" \
@@ -111,5 +121,6 @@ jq -n \
   --argjson processes "$(ls -d /proc/[0-9]* | wc -l)" \
   '{version: $version, window_seconds: $seconds, processes_on_machine: $processes,
     sampler: {cpu_percent_of_one_core: $sampler_cpu, pss_kb: $sampler_pss, rss_kb: $sampler_rss},
-    gui: {cpu_percent_of_one_core: $gui_cpu, pss_kb: $gui_pss, rss_kb: $gui_rss, renderer: $renderer},
+    gui: {cpu_percent_of_one_core: $gui_cpu, pss_kb: $gui_pss, rss_kb: $gui_rss, renderer: $renderer,
+          page: $page, cpu_graph: $cpugraph},
     probe_all_wall_ms_median: $probe_ms}'

@@ -262,3 +262,73 @@ pub fn menu_check_row(ui: &mut Ui, palette: &Palette, checked: bool, label: &str
     menu_item(ui, palette, checked, label, MenuMark::Check, true)
 }
 
+
+// ------------------------------------------------------------ stone switch
+
+/// A two-position carved stone switch (the Performance page's CPU
+/// graph toggle). Both labels sit on one raised plate; the chosen
+/// side is sunk in and tinted toward the accent. Returns the newly
+/// chosen index when clicked.
+pub fn stone_switch(ui: &mut Ui, palette: &Palette, options: [&str; 2], selected: usize, tooltip: &str) -> Option<usize> {
+    let font = egui::FontId::monospace(10.5);
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|label| ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), palette.ink).size().x) + 14.0)
+        .collect();
+    let size = vec2(widths[0] + widths[1], 18.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    // The accessible name says which side is down (R15); a keyboard
+    // activation (no pointer) flips to the other side.
+    {
+        let state = format!("{tooltip} (now: {})", options[selected]);
+        response.widget_info(move || {
+            let mut info = egui::WidgetInfo::labeled(egui::WidgetType::Button, true, state.clone());
+            info.selected = Some(true);
+            info
+        });
+    }
+    let response = response.on_hover_text(tooltip);
+    let mut chosen = None;
+    if response.clicked() {
+        let index = match response.interact_pointer_pos() {
+            Some(pointer) => {
+                if pointer.x < rect.left() + widths[0] { 0 } else { 1 }
+            }
+            None => 1 - selected,
+        };
+        if index != selected {
+            chosen = Some(index);
+        }
+    }
+    if !ui.is_rect_visible(rect) {
+        return chosen;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, palette.stone);
+    let mut x = rect.left();
+    for (index, label) in options.iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(widths[index], rect.height()));
+        let sunk = index == selected;
+        let mix = theme::eased_bool(ui.ctx(), response.id.with(index), sunk) * 0.26;
+        painter.rect_filled(cell, 0.0, palette.stone.lerp_to_gamma(palette.accent, mix));
+        let (top_left, bottom_right) = if sunk {
+            (palette.stone_lo, palette.stone_hi)
+        } else {
+            (palette.stone_hi, palette.stone_lo)
+        };
+        painter.line_segment([cell.left_top(), cell.right_top()], Stroke::new(1.0, top_left));
+        painter.line_segment([cell.left_top(), cell.left_bottom()], Stroke::new(1.0, top_left));
+        painter.line_segment([cell.left_bottom(), cell.right_bottom()], Stroke::new(1.0, bottom_right));
+        painter.line_segment([cell.right_top(), cell.right_bottom()], Stroke::new(1.0, bottom_right));
+        painter.text(
+            cell.center() + if sunk { vec2(0.5, 0.5) } else { vec2(0.0, 0.0) },
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            if sunk { palette.ink } else { palette.ink_2 },
+        );
+        x += widths[index];
+    }
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, palette.line), StrokeKind::Inside);
+    chosen
+}

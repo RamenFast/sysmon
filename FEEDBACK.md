@@ -43,3 +43,9 @@ Rules:
 - 2026-10-01 [ask] up to 2 subagents at high reasoning (Opus 5.5 recommended)
 - 2026-10-01 [ask] if hardware sensors need a boot flag or reboot, install what's possible and leave the rest documented for the next instance
 - 2026-10-01 [claim] "if this application needs 100 dependencies to gather the correct hardware information, that's what we do"
+- 2026-10-01 [ask] a new design pass: compact, efficient, all relevant info in beautiful charts/graphs, in the spirit of the original Windows XP Task Manager with your own coat of paint; no GTK
+- 2026-10-01 [decision] Performance becomes the startup page; Overview and Processes stay as tabs
+- 2026-10-01 [decision] graphs always on a dark instrument field, tinted per theme, even on light themes
+- 2026-10-01 [decision] CPU graph: a toggle between combined and per-thread that works at every window size
+- 2026-10-01 [context] the CPU cooler is known to be underpowered; a high Tctl is expected, not a fault. Show it as data next to the clock, never as a warning
+- 2026-10-01 [ask] full creative and technical authority for the 3.2 round; report at the end

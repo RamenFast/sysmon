@@ -120,7 +120,11 @@ fn context_menu_keeps_the_process_it_was_opened_on() {
     let (_command_tx, command_rx) = std::sync::mpsc::channel();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(600.0, 900.0))
-        .build_eframe(|cc| SysMonApp::new(cc, Settings::default(), shared, command_rx, None));
+        .build_eframe(|cc| {
+            // Overview card menus are under test; start there.
+            let settings = Settings { start_page: "overview".to_string(), ..Settings::default() };
+            SysMonApp::new(cc, settings, shared, command_rx, None)
+        });
 
     // Freeze the sampler, outwait an in-flight sample, then own the data.
     control.paused.store(true, Ordering::Relaxed);

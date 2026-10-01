@@ -249,7 +249,8 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             };
             request["seconds"] = json!(seconds);
         }
-        "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" | "temperature" => {
+        "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" | "temperature"
+        | "cpugraph" => {
             let Some(value) = positional.get(1) else {
                 return envelope::fail_forced(
                     format!("`{verb}` needs a value"),
@@ -459,7 +460,9 @@ fn build_schema() -> Value {
                         "resume":   {"value": null, "needs_gui": true},
                         "interval": {"value": {"type": "number", "minimum": 0.2, "maximum": 60.0}, "needs_gui": true},
                         "raise":    {"value": null, "needs_gui": true},
-                        "page":     {"value": {"enum": ["overview", "processes"]}, "needs_gui": true},
+                        "page":     {"value": {"enum": ["performance", "overview", "processes"]}, "needs_gui": true},
+                        "cpugraph": {"value": {"enum": ["auto", "combined", "per_thread"]}, "needs_gui": true,
+                                      "note": "Performance page CPU graph: auto picks per_thread when the column is ≥ 420 px wide"},
                         "theme":    {"value": {"enum": theme_enum}, "needs_gui": true},
                         "palette":  {"value": {"enum": palette_enum}, "needs_gui": true},
                         "popout":   {"value": {"enum": popout_enum}, "needs_gui": true},
@@ -492,7 +495,7 @@ fn build_schema() -> Value {
                 "protocol": "one JSON object per line in; one envelope line out; `subscribe` upgrades to a raw NDJSON snapshot stream",
                 "verbs": ["status", "snapshot", "subscribe", "pause", "resume", "interval",
                            "quit", "raise", "page", "theme", "palette", "popout", "popin",
-                           "shot", "compact", "units", "temperature"],
+                           "shot", "compact", "units", "temperature", "cpugraph"],
                 "single_owner": "GUI or serve — whoever binds first; `sysmon serve` exits 2 if occupied",
             },
         },
@@ -521,6 +524,7 @@ fn build_schema() -> Value {
                 "temperature_celsius": "CPU package (k10temp Tdie/Tctl or coretemp Package)",
                 "temperature_source": "which sensor that is, e.g. \"k10temp Tctl\"",
                 "iowait_percent": "idle time spent waiting on storage, 0–100 — not included in overall_percent",
+                "kernel_percent": "the kernel's own share of the window (system + irq + softirq), 0–100 — inside overall_percent, never above it",
                 "context_switches_per_second": "machine-wide",
             },
             "memory": {
@@ -532,6 +536,8 @@ fn build_schema() -> Value {
                 "cached_bytes": "Cached + SReclaimable",
                 "buffers_bytes | dirty_bytes | shared_bytes": "meminfo verbatim",
                 "swap_total_bytes | swap_used_bytes | swap_cached_bytes": "swap",
+                "committed_bytes | commit_limit_bytes": "Committed_AS / CommitLimit — the commit charge; the limit is advisory under the default overcommit heuristic",
+                "slab_bytes | kernel_stack_bytes | page_tables_bytes": "kernel memory: Slab (whole; its reclaimable part is also inside cached_bytes) / KernelStack / PageTables",
             },
             "gpu": {
                 "available": "false ⇒ no amdgpu card (all other fields empty)",

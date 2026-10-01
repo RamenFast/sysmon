@@ -45,6 +45,13 @@ pub struct Settings {
     pub show_inspector: bool,
     /// Sensors card groups the user folded shut ("board", "drives"…).
     pub folded_sensor_groups: Vec<String>,
+    /// The page the window opens on: "performance" | "overview" |
+    /// "processes". New in 3.2 (older files open on Performance too:
+    /// it is the new front page).
+    pub start_page: String,
+    /// Performance page CPU graph: "auto" (by width) | "combined" |
+    /// "per_thread". New in 3.2.
+    pub cpu_graph_mode: String,
 }
 
 impl Default for Settings {
@@ -68,6 +75,8 @@ impl Default for Settings {
             group_by_app: false,
             show_inspector: true,
             folded_sensor_groups: Vec::new(),
+            start_page: "performance".to_string(),
+            cpu_graph_mode: "auto".to_string(),
         }
     }
 }
@@ -87,6 +96,30 @@ impl Default for Display {
             temperature: TemperatureScale::Celsius,
         }
     }
+}
+
+/// A key of the wrong JSON type (a number where a string goes, a
+/// list where a bool goes) would fail the whole typed parse and
+/// throw away every other preference, and the next save would then
+/// overwrite the file with defaults (reviewer R3). Drop only that key:
+/// the container default fills it in.
+fn drop_wrongly_typed_keys(raw: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut map) = raw else {
+        return raw;
+    };
+    let shape = serde_json::to_value(Settings::default()).unwrap_or_default();
+    if let serde_json::Value::Object(shape) = shape {
+        map.retain(|key, value| match shape.get(key) {
+            Some(expected) => {
+                std::mem::discriminant(expected) == std::mem::discriminant(value)
+                    // A float field accepts an integer; an integer field
+                    // (window size) only an integer.
+                    && (!expected.is_number() || expected.is_f64() || value.is_i64() || value.is_u64())
+            }
+            None => true, // unknown keys are serde's business (ignored)
+        });
+    }
+    serde_json::Value::Object(map)
 }
 
 fn settings_path() -> PathBuf {
@@ -112,6 +145,7 @@ impl Settings {
     pub fn from_json(content: &str) -> Option<Settings> {
         let raw: serde_json::Value = serde_json::from_str(content).ok()?;
         let is_v1_file = raw.get("settings_version").is_none();
+        let raw = drop_wrongly_typed_keys(raw);
         let mut settings: Settings = serde_json::from_value(raw).ok()?;
 
         if is_v1_file {
@@ -143,6 +177,12 @@ impl Settings {
         }
         if TemperatureScale::from_id(&settings.temperature_scale).is_none() {
             settings.temperature_scale = Settings::default().temperature_scale;
+        }
+        if !matches!(settings.start_page.as_str(), "performance" | "overview" | "processes") {
+            settings.start_page = Settings::default().start_page;
+        }
+        if !matches!(settings.cpu_graph_mode.as_str(), "auto" | "combined" | "per_thread") {
+            settings.cpu_graph_mode = Settings::default().cpu_graph_mode;
         }
         Some(settings)
     }
@@ -194,6 +234,50 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 3.1.0 file has neither key: it opens on the new front page
+    /// with the CPU graph decided by width. Edited junk falls back
+    /// the same way instead of leaving the app on no page.
+    #[test]
+    fn a_3_1_file_opens_on_performance_and_junk_falls_back() {
+        let from_3_1 = r#"{"settings_version":2,"theme_mode":"amoled","temperature_scale":"both"}"#;
+        let settings = Settings::from_json(from_3_1).unwrap();
+        assert_eq!(settings.start_page, "performance");
+        assert_eq!(settings.cpu_graph_mode, "auto");
+        assert_eq!(settings.theme_mode, "amoled");
+        assert_eq!(settings.temperature_scale, "both");
+        let junk = r#"{"settings_version":2,"start_page":"kitchen","cpu_graph_mode":"sideways"}"#;
+        let settings = Settings::from_json(junk).unwrap();
+        assert_eq!(settings.start_page, "performance");
+        assert_eq!(settings.cpu_graph_mode, "auto");
+        let kept = r#"{"settings_version":2,"start_page":"processes","cpu_graph_mode":"per_thread"}"#;
+        let settings = Settings::from_json(kept).unwrap();
+        assert_eq!(settings.start_page, "processes");
+        assert_eq!(settings.cpu_graph_mode, "per_thread");
+    }
+
+    /// Reviewer R3: one wrongly *typed* key (a number where a string
+    /// goes) must not throw away every other preference, and the
+    /// next save must not overwrite the file with defaults.
+    #[test]
+    fn a_wrongly_typed_key_loses_only_itself() {
+        let file = r#"{"settings_version":2,"theme_mode":"light","update_interval_seconds":1.0,
+                       "start_page":42,"cpu_graph_mode":["x"],"use_binary_units":"yes","window_width":"wide"}"#;
+        let settings = Settings::from_json(file).unwrap();
+        assert_eq!(settings.theme_mode, "light", "the good keys survive");
+        assert_eq!(settings.update_interval_seconds, 1.0);
+        assert_eq!(settings.start_page, "performance", "the bad key falls back alone");
+        assert_eq!(settings.cpu_graph_mode, "auto");
+        assert!(!settings.use_binary_units);
+        assert_eq!(settings.window_width, 430);
+        // A float where an int goes is not an int: that key alone falls back.
+        let settings = Settings::from_json(r#"{"settings_version":2,"theme_mode":"dark","window_width":500.5}"#).unwrap();
+        assert_eq!(settings.window_width, 430);
+        assert_eq!(settings.theme_mode, "dark");
+        // An int where a float goes is fine.
+        let settings = Settings::from_json(r#"{"settings_version":2,"update_interval_seconds":3}"#).unwrap();
+        assert_eq!(settings.update_interval_seconds, 3.0);
+    }
 
     #[test]
     fn v1_blossom_migrates_to_amoled() {

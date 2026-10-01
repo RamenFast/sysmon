@@ -303,6 +303,39 @@ pub fn palette_by_id(id: &str) -> Option<&'static Palette> {
     PALETTES.iter().find(|palette| palette.id == id)
 }
 
+impl Palette {
+    /// The instrument field every Performance-page trace is drawn on
+    /// (PERFORMANCE-VIEW.md): dark on every theme, tinted toward the
+    /// theme. Dark themes darken their plane; light themes use their
+    /// ink, which already carries the theme's hue (plum on Blossom,
+    /// slate on Light). Always darker than any line drawn on it.
+    pub fn field(&self) -> Color32 {
+        if self.dark {
+            // Pure black planes (amoled, greyscale) stay black; tinted
+            // planes go a step deeper.
+            self.plane.gamma_multiply(0.7)
+        } else {
+            self.ink.gamma_multiply(0.92)
+        }
+    }
+
+    /// Ink that reads on the field: the light themes' ink is the
+    /// field itself, so they borrow their surface colour.
+    pub fn on_field(&self) -> Color32 {
+        if self.dark { self.ink } else { self.surface }
+    }
+
+    /// Muted ink on the field (scale labels, thread numbers).
+    pub fn on_field_muted(&self) -> Color32 {
+        self.on_field().gamma_multiply(0.55)
+    }
+
+    /// The graticule: the accent, faint.
+    pub fn graticule(&self) -> Color32 {
+        self.accent.gamma_multiply(0.22)
+    }
+}
+
 /// System mode: map the Cinnamon GTK theme to our nearest family.
 /// Blossom (Ben's theme) is a dark theme → blossom_dark; anything
 /// with "dark" in the name → dark; otherwise light.
@@ -490,6 +523,11 @@ pub fn eased_bool(ctx: &egui::Context, id: egui::Id, value: bool) -> f32 {
 /// Cinnamon/GNOME: `org.gnome.desktop.interface enable-animations`.
 /// `SYSMON_REDUCED_MOTION` overrides for testing and for desktops
 /// that have no such setting.
+///
+/// This shells out to `gsettings`. Call it from `apply` (once per
+/// theme change), never per frame: the 3.2 reviewer caught a scope
+/// graph calling it per graph per frame, 3610 execs in 8 s (V10).
+/// Per-frame code reads [`reduced_motion`] instead.
 pub fn prefers_reduced_motion() -> bool {
     if let Ok(value) = std::env::var("SYSMON_REDUCED_MOTION") {
         return matches!(value.as_str(), "1" | "true" | "on");
@@ -497,6 +535,12 @@ pub fn prefers_reduced_motion() -> bool {
     gsettings_get("org.gnome.desktop.interface", "enable-animations")
         .map(|value| value.trim() == "false")
         .unwrap_or(false)
+}
+
+/// The answer `apply` already wrote into the style: zero animation
+/// time means reduced motion. Free to call every frame.
+pub fn reduced_motion(ctx: &egui::Context) -> bool {
+    ctx.style().animation_time == 0.0
 }
 
 /// Does the desktop ask for high contrast? Cinnamon/GNOME express it

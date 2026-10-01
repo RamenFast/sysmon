@@ -19,6 +19,9 @@ pub struct CpuTicks {
     pub idle: u64,
     /// The iowait share of `idle`, kept apart so it can be reported.
     pub iowait: u64,
+    /// system + irq + softirq: time the kernel itself was working.
+    /// Inside `total − idle`, never overlapping iowait or guest.
+    pub kernel: u64,
 }
 
 /// Parse a `cpu…` line from /proc/stat (either the aggregate `cpu`
@@ -42,6 +45,7 @@ pub fn parse_cpu_line(line: &str) -> Option<CpuTicks> {
         total: counted,
         idle,
         iowait: values[4],
+        kernel: values[2] + values[5] + values[6],
     })
 }
 
@@ -91,6 +95,18 @@ fn iowait_percent(previous: CpuTicks, current: CpuTicks) -> f32 {
     }
     let iowait_delta = current.iowait.saturating_sub(previous.iowait);
     (iowait_delta as f64 / total_delta as f64 * 100.0).clamp(0.0, 100.0) as f32
+}
+
+/// The kernel's share of the window (system + irq + softirq), 0–100.
+/// Always ≤ `busy_percent` for the same pair: kernel ticks are busy
+/// ticks (C7).
+fn kernel_percent(previous: CpuTicks, current: CpuTicks) -> f32 {
+    let total_delta = current.total.saturating_sub(previous.total);
+    if total_delta == 0 {
+        return 0.0;
+    }
+    let kernel_delta = current.kernel.saturating_sub(previous.kernel);
+    (kernel_delta as f64 / total_delta as f64 * 100.0).clamp(0.0, 100.0) as f32
 }
 
 /// The clock the working cores ran at: each core's current frequency
@@ -300,6 +316,7 @@ impl CpuCollector {
                 .collect();
             snapshot.overall_percent = busy_percent(previous.aggregate, current.aggregate);
             snapshot.iowait_percent = iowait_percent(previous.aggregate, current.aggregate);
+            snapshot.kernel_percent = kernel_percent(previous.aggregate, current.aggregate);
             if interval_seconds > 0.0 {
                 snapshot.context_switches_per_second = current
                     .context_switches
@@ -400,16 +417,41 @@ procs_blocked 0
             total: 1000,
             idle: 800,
             iowait: 100,
+            kernel: 50,
         };
         let current = CpuTicks {
             total: 2000,
             idle: 1400,
             iowait: 250,
+            kernel: 150,
         };
         // 1000 new ticks, 600 idle → 40% busy; 150 of the idle ticks
         // were iowait → 15% iowait (counted idle, reported apart).
         assert_eq!(busy_percent(previous, current), 40.0);
         assert_eq!(iowait_percent(previous, current), 15.0);
+        // 100 kernel ticks of the 1000 → 10%, inside the 40% busy.
+        assert_eq!(kernel_percent(previous, current), 10.0);
+    }
+
+    /// C7: kernel time is system + irq + softirq only. Never iowait
+    /// (that's idle), never guest (already inside user/nice), and so
+    /// never above the busy share it is drawn inside of.
+    #[test]
+    fn kernel_time_is_system_irq_softirq_and_never_exceeds_busy() {
+        //                user nice sys  idle  iow  irq soft steal guest gnice
+        let a = parse_cpu_line("cpu  100  20   50   800   30   5   5    0     40    0").unwrap();
+        let b = parse_cpu_line("cpu  300  20   250  1000  130  25  15   0     40    0").unwrap();
+        // deltas: user 200, sys 200, idle 200, iowait 100, irq 20, softirq 10
+        // total 730; kernel 230; busy = 730 − 300 idle = 430
+        assert_eq!(a.kernel, 60);
+        assert_eq!(b.kernel, 290);
+        let kernel = kernel_percent(a, b);
+        let busy = busy_percent(a, b);
+        assert!((kernel - 230.0 / 730.0 * 100.0).abs() < 0.01, "{kernel}");
+        assert!(kernel <= busy, "kernel {kernel} > busy {busy}");
+        // A window that is all iowait has no kernel time at all.
+        let c = parse_cpu_line("cpu  300  20   250  1000  630  25  15   0     40    0").unwrap();
+        assert_eq!(kernel_percent(b, c), 0.0);
     }
 
     #[test]

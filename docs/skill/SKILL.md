@@ -96,7 +96,8 @@ is identical either way.
 
 ```bash
 sysmon ctl status              # who owns the socket: mode gui|serve, pid, version, renderer
-sysmon ctl page processes      # overview | processes
+sysmon ctl page performance    # performance | overview | processes
+sysmon ctl cpugraph per_thread # Performance page CPU graph: auto | combined | per_thread
 sysmon ctl theme blossom_dark  # system blossom_dark blossom amoled light dark
                                #   funky paper basalt amber chromacore greyscale
                                # greyscale is the a11y floor; `system` picks it
@@ -194,7 +195,7 @@ Wayland path on a private headless sway). For any change to a number,
 `scripts/accuracy-audit.sh target/release/sysmon audit-out/<name>`
 compares every shown figure to `free`/`turbostat`/`mpstat`/`sensors`/
 `df`/DMI/`iostat`/`pidstat`, idle, under load and under a known disk
-writer (56 checks; 0 fail is the bar). List the
+writer (66 checks; 0 fail is the bar). List the
 ways a number could lie in `docs/dev/FAILURE-MODES.md` *before*
 writing its test. `docs/SERIOUS-TODOS.md` is the honest-uncertainty
 ledger and `FEEDBACK.md` is the session ledger Ben mines: append,
