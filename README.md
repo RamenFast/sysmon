@@ -5,8 +5,9 @@ state API you can script against. One Rust binary: the window, the
 engine, the CLI, the socket.
 
 Every number it shows is checked against the tool a skeptic would open
-beside it (`free`, `turbostat`, `mpstat`, `sensors`, `df`, firmware
-tables) on real hardware, idle and under load: **52 of 52 agree.**
+beside it (`free`, `turbostat`, `mpstat`, `sensors`, `iostat`, `pidstat`,
+`df`, firmware tables) on real hardware, idle, under load and under a
+known disk writer: **56 of 56 agree.**
 
 ![processes with the inspector open](docs/screenshot-inspector.png)
 
@@ -28,7 +29,7 @@ new engine.
 | per-process network | nethogs only (or nothing) | native TCP attribution with zero setup; nethogs upgrades it to UDP/QUIC + all users |
 | programmatic access | none | `probe` / `tap` / `ctl` / `schema` + control socket, JSON envelopes, a strict machine contract, and a conformance harness that re-runs the whole standard |
 | idle CPU (same display, 60 s, software rendering) | 13.0% of a core | **6.0%** — and `serve` idles at **0.00% / 5.6 MB** |
-| accuracy | trusted psutil | a 52-check live audit against free/turbostat/mpstat/sensors/df/DMI, plus cross-checks in `cargo test` |
+| accuracy | trusted psutil | a 56-check live audit against free/turbostat/mpstat/sensors/iostat/pidstat/df/DMI, plus cross-checks in `cargo test` |
 | theming | adopts the GTK theme | eleven built-in palettes (including a greyscale a11y floor) + a System mode that maps your GTK theme to the nearest family, and honors high-contrast and reduced-motion |
 | process icons | icon theme lookup, gaps common | desktop-entry index over the real icon-theme inherit chain, letter-tile fallback |
 

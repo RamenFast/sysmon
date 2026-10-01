@@ -4,11 +4,11 @@ Two layers keep every figure honest, and both run on real hardware:
 
 - **`crates/sysmon-core/tests/accuracy.rs`** (14 tests, in `cargo test`):
   each reading cross-checked live against an independent authority.
-- **`scripts/accuracy-audit.sh`** (52 checks): every number the app
+- **`scripts/accuracy-audit.sh`** (56 checks): every number the app
   shows next to the tool a skeptical human would open beside it
   (`free`, `turbostat`, `mpstat`, `sensors -j`, `lspci`, `df`, `findmnt`,
-  `ps`, udev DMI, `/sys/firmware/memmap`), idle and under `stress-ng`
-  load. Writes `report.json` + `report.md`.
+  `ps`, `iostat`, `pidstat`, udev DMI, `/sys/firmware/memmap`), idle,
+  under `stress-ng` load, and under a known `fio` writer. Writes `report.json` + `report.md`.
 
 **A failure is a collector bug.** Tolerances are the contract and are
 never widened to turn a red test green. The ways each number could lie
@@ -66,19 +66,23 @@ here match ids there.
 Ryzen 9 5950X · Radeon AI PRO R9700 (Navi 48) · 4 × 32 GB DDR4 ·
 ASRock X570 Phantom Gaming 4 (nct6798) · Mint 22.3.
 
-`scripts/accuracy-audit.sh`: **52 pass, 0 fail** (idle + `stress-ng`
-load). Selected rows, under load:
+`scripts/accuracy-audit.sh`: **56 pass, 0 fail** (idle, `stress-ng`
+load with row L1 proving the load was still running, and a 64 MB/s
+`fio` direct-I/O writer). Selected rows:
 
 | id | reading | SysMon | authority |
 |---|---|---|---|
 | M2 | installed RAM | 137 438 953 472 | DMI: 137 438 953 472 |
 | M4 | usable RAM | 134 979 108 864 | `free -b`: 134 979 108 864 |
-| C1 | busy clock | 3892 MHz | turbostat Bzy_MHz: 3887 |
-| C2 | CPU busy % | 32.2 | mpstat: 32.2 |
-| C2b | iowait % | 11.2 | mpstat: 12.1 |
-| C3 | CPU temp | 82.6 °C | sensors: 82.6 °C |
-| G3 | VRAM used | 953.8 MB | sysfs: 955.1 MB |
+| C1 | busy clock (load) | 3908 MHz | turbostat Bzy_MHz: 3969 |
+| C2 | CPU busy % (load) | 33.0 | mpstat: 32.3 |
+| C2b | iowait % (load) | 12.2 | mpstat: 11.0 |
+| C3 | CPU temp (load) | 90.5 °C | sensors: 90.5 °C |
+| G3 | VRAM used | 938 074 112 | sysfs: 938 074 112 |
 | S0 | temperature channels | 28 | sensors -j: 28 |
+| D3 | partition write rate | 67.3 MB/s | iostat: 67.1 MB/s |
+| D5 | partition util % | 15.4 | iostat: 16.2 |
+| P6b | writer's disk write rate | 67.3 MB/s | pidstat -d: 67.1 MB/s |
 
 The 3.0.3 baseline on the same machine was 34 pass / 16 fail. What
 moved, each with a red test first, is in the 3.1 release notes and

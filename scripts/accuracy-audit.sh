@@ -136,7 +136,7 @@ audit_phase() {
     read -r bzy avg <<<"${ts_out}"
     record C1 "${phase}" "cpu clock while busy (MHz)" "${ours_peak}" "${bzy}" "turbostat Bzy_MHz (same window)" \
       "$([ "${ours_peak}" = absent ] && echo fail || within "${ours_peak}" "${bzy}" 700)" \
-      "busy-weighted cpufreq samples vs APERF/MPERF; ±700 MHz"
+      "busy-weighted CPPC delivered clock vs APERF/MPERF (same counters, separate 2 s windows); ±700 MHz"
     record C1b "${phase}" "cpu mean clock (MHz)" "${ours_mean}" "${avg}" "turbostat Avg_MHz (incl. idle)" \
       "info" "different quantities: mean of requested clocks vs time-averaged incl. sleep"
   else
