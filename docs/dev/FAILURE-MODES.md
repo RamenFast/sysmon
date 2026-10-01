@@ -16,6 +16,8 @@ and `tests/accuracy.rs` are the checks.*
 | M4 | kB in /proc/meminfo is KiB (×1024), easy to treat as ×1000 | existing identity test (`total == free -b` to the byte) |
 | M5 | DIMM speed shown is the rated (XMP) speed, not the configured speed | audit compares `CONFIGURED_SPEED_MTS` to what the card shows |
 | M6 | swap "none" when zram/zswap exists | audit reads /proc/swaps |
+| M7 | commit charge read from a line that isn't Committed_AS (Committed_AS vs CommitLimit swapped, or VmallocTotal mistaken for a limit) | unit test on the meminfo fixture; audit M7 vs /proc/meminfo read in the same second |
+| M8 | kernel memory (Slab, PageTables, KernelStack) parsed off by the kB unit, or Slab counted twice (SReclaimable is inside Slab and already inside `cached_bytes`) | unit test on the fixture: slab = Slab line exactly; audit M8 vs /proc/meminfo |
 
 ## CPU
 
@@ -30,6 +32,7 @@ and `tests/accuracy.rs` are the checks.*
 | C4 | °F conversion rounding drifts from °C reading | unit test `c_to_f` exact points (0, 37, 100, -40) |
 | C5 | load average mislabeled as % | visual review |
 | C6 | min/max range taken from scaling_ (governor) instead of cpuinfo_ (hardware) | audit vs lscpu |
+| C7 | kernel time % counts iowait or idle, or guest time twice, so it can exceed the busy % it is drawn inside | unit test: system + irq + softirq only, and kernel ≤ busy on every tick pair; audit C7 vs `mpstat` %sys + %irq + %soft over the same window |
 
 ## GPU
 
@@ -116,3 +119,17 @@ and `tests/accuracy.rs` are the checks.*
 | W1 | one client keeps the sampler warm (`tap network`), so a second client's first `probe cpu processes` sees a "0.65 s window" and every rate in it is 0 (those collectors had never run) | each section records when it last ran; serve opens a fresh common window unless the wanted sections share one. Contract test `a_warm_serve_measures_each_section_over_its_own_window` (red: overall 0%, spinner 0%) |
 | W2 | a section last asked for 8 s ago answers with its 8 s average under the 0.35 s label of whichever section ran most recently | `interval_seconds` is the oldest wanted section's window, and sections more than 10% apart get a fresh common window |
 | W3 | the GPU clock poller parks after 5 s idle but keeps its sums, so the next window's "mean of N reads" covers only its first 5 s | a take after the idle limit reports no reads (clock_source falls back to "instant read"); unit test `a_window_after_a_park_is_not_a_partial_mean` (red: 15 reads). The parked thread waits on its condvar with no timer (`the_poller_shares_its_last_table_and_sleeps_when_parked`, red: no shared table) and the VRM temps reuse the poller's last table instead of a second SMU wake |
+
+## Performance page (3.2, `docs/dev/PERFORMANCE-VIEW.md`)
+
+| # | way it could lie | caught by |
+|---|---|---|
+| V1 | the LED meter shows one sample and the graph's newest point another (meter from the snapshot, graph from a history pushed a frame earlier or later) | `ui_kittest`: meter label equals the newest history sample equals the snapshot field, same frame |
+| V2 | kernel time plotted above total busy (wrong tick columns, or kernel from one window and busy from another) | C7 unit test (kernel ≤ busy always); both come from the same `CpuSnapshot` |
+| V3 | per-thread mini graphs drawn in a different order than `/proc/stat` (a HashMap, a sort by value), so "cpu7 is pegged" points at the wrong thread | `ui_kittest`: the grid's labels read 0..core_count in row-major order and each graph's newest sample equals `per_core_percent[i]` |
+| V4 | a rate graph autoscales to a 2 GB/s spike and the 5 MB/s that follows reads as a flat zero line | the ceiling is written in the field's corner; unit test on the scale picker (ceiling ≥ observed max, label present) |
+| V5 | the scrolling graticule drifts away from the data (grid advanced per frame instead of per sample) | the grid offset is derived from the history length, not from time or frames; unit test: offset(n) == offset(n+15) |
+| V6 | the greyscale theme can't tell the two lines apart | the second series is dashed when `palette.id == "greyscale"`; screenshot review |
+| V7 | the status bar or a group box clips a value at 430 px | `ui_kittest` at 430 px: every status/box value node is fully inside the panel rect |
+| V8 | the page costs more CPU than the Overview it replaces as the startup page (32 mini graphs × 150 points per frame) | `scripts/perf.sh` A/B on the Performance page in both modes vs 3.1.0 Overview; one shape per series, no per-point allocations |
+| V9 | the per-thread grid overflows or squashes to unreadable at some width (fixed column count) | columns follow width (`clamp(width/96, 2, 8)`), minimum graph height 28 px; `ui_kittest` at 430 and 1240 px asserts every mini graph rect is inside the panel and ≥ 28 px tall |
