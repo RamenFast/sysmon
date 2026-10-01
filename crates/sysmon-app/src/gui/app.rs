@@ -621,6 +621,7 @@ impl SysMonApp {
             snapshot: &snapshot,
             histories: &histories,
             actions: actions_out,
+            wide: false,
         };
         performance::performance_page(ui, &mut cx);
     }
@@ -1290,7 +1291,9 @@ impl eframe::App for SysMonApp {
         if self.page == Page::Performance {
             let text = {
                 let snapshot = self.shared.latest.read().unwrap();
-                performance::status_text(&snapshot, self.settings.display())
+                let wide = ctx.input(|i| i.viewport().inner_rect.map(|r| r.width()).unwrap_or(0.0))
+                    >= performance::WIDE_BREAKPOINT;
+                performance::status_text(&snapshot, self.settings.display(), wide)
             };
             performance::status_bar(ctx, palette, &text);
         }

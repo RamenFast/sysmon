@@ -270,18 +270,28 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
 
 /// The LED meter: a vertical column of segments lit from the bottom,
 /// the value in monospace under it. One click target with its label.
+/// The column is a fixed width so every graph in a stack lines up; a
+/// label wider than it ("166°F · 74°C", "3.5 kB/s") wraps at its
+/// separators onto more lines.
 pub const LED_SEGMENTS: usize = 20;
 pub const LED_WIDTH: f32 = 18.0;
+pub const METER_COLUMN_WIDTH: f32 = 52.0;
 
 pub fn led_meter(ui: &mut Ui, palette: &Palette, name: &str, fraction: f32, color: Color32, label: &str, height: f32) -> egui::Response {
-    let label_height = 14.0;
-    let label_width = ui.fonts_mut(|fonts| {
-        fonts
-            .layout_no_wrap(label.to_string(), egui::FontId::monospace(10.5), palette.ink)
-            .size()
-            .x
-    });
-    let width = label_width.max(LED_WIDTH + 8.0);
+    let font = egui::FontId::monospace(10.5);
+    let line_height = 13.0;
+    let width = METER_COLUMN_WIDTH;
+    let fits = |text: &str| {
+        ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font.clone(), palette.ink).size().x) <= width
+    };
+    let lines: Vec<String> = if fits(label) {
+        vec![label.to_string()]
+    } else if label.contains(" · ") {
+        label.split(" · ").map(str::to_string).collect()
+    } else {
+        label.split(' ').map(str::to_string).collect()
+    };
+    let label_height = line_height * lines.len() as f32 + 1.0;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height + label_height), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{name} meter: {label}")));
     if !ui.is_rect_visible(rect) {
@@ -308,13 +318,16 @@ pub fn led_meter(ui: &mut Ui, palette: &Palette, name: &str, fraction: f32, colo
         };
         painter.rect_filled(segment, 0.0, fill);
     }
-    painter.text(
-        pos2(rect.center().x, rect.bottom()),
-        egui::Align2::CENTER_BOTTOM,
-        label,
-        egui::FontId::monospace(10.5),
-        if response.hovered() { palette.ink } else { palette.value },
-    );
+    let ink = if response.hovered() { palette.ink } else { palette.value };
+    for (index, line) in lines.iter().enumerate() {
+        painter.text(
+            pos2(rect.center().x, column.bottom() + 1.0 + line_height * (index + 1) as f32),
+            egui::Align2::CENTER_BOTTOM,
+            line,
+            font.clone(),
+            ink,
+        );
+    }
     response
 }
 
@@ -327,7 +340,7 @@ pub fn group_box<R>(ui: &mut Ui, palette: &Palette, title: &str, add_contents: i
     let title_height = title_galley.size().y;
     let outer_top = ui.cursor().min.y;
     let frame_top = outer_top + title_height / 2.0;
-    let inner_margin = egui::Margin { left: 8, right: 8, top: (title_height / 2.0 + 6.0) as i8, bottom: 7 };
+    let inner_margin = egui::Margin { left: 7, right: 7, top: (title_height / 2.0 + 4.0) as i8, bottom: 5 };
     let frame = egui::Frame::new().inner_margin(inner_margin);
     let response = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());

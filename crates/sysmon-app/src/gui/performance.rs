@@ -12,7 +12,7 @@
 use egui::{Align, Color32, Layout, RichText, Ui, vec2};
 
 use sysmon_core::snapshot::SystemSnapshot;
-use sysmon_core::units::{format_frequency_mhz, format_rate, format_size, format_temperature_in};
+use sysmon_core::units::{format_frequency_mhz, format_percent, format_rate, format_size, format_temperature_in};
 
 use super::app::Histories;
 use super::cards::AppAction;
@@ -30,7 +30,12 @@ pub const WIDE_BREAKPOINT: f32 = 760.0;
 /// `auto` CPU graph mode: per thread when the column is this wide.
 pub const PER_THREAD_AUTO_WIDTH: f32 = 420.0;
 pub const MINI_GRAPH_MIN_HEIGHT: f32 = 28.0;
-const SCOPE_HEIGHT: f32 = 64.0;
+/// Scope height by layout: wide windows have the room, the 430 px
+/// default must fit six rows and four boxes on one 780 px screen.
+const SCOPE_HEIGHT_WIDE: f32 = 64.0;
+const SCOPE_HEIGHT_NARROW: f32 = 42.0;
+const ROW_GAP_WIDE: f32 = 6.0;
+const ROW_GAP_NARROW: f32 = 2.0;
 
 /// Which CPU graph a given setting + width resolves to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,9 +76,19 @@ pub struct PerformanceContext<'a> {
     pub snapshot: &'a SystemSnapshot,
     pub histories: &'a Histories,
     pub actions: &'a mut Vec<AppAction>,
+    /// Set by the page from the panel width each frame.
+    pub wide: bool,
 }
 
 impl PerformanceContext<'_> {
+    fn scope_height(&self) -> f32 {
+        if self.wide { SCOPE_HEIGHT_WIDE } else { SCOPE_HEIGHT_NARROW }
+    }
+
+    fn row_gap(&self) -> f32 {
+        if self.wide { ROW_GAP_WIDE } else { ROW_GAP_NARROW }
+    }
+
     fn series(&self, index: usize) -> Color32 {
         graph_color(&self.settings.graph_palette, index, self.palette.dark)
     }
@@ -104,19 +119,20 @@ impl PerformanceContext<'_> {
 
 pub fn performance_page(ui: &mut Ui, cx: &mut PerformanceContext) {
     let wide = ui.available_width() >= WIDE_BREAKPOINT;
+    cx.wide = wide;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(2.0);
         if wide {
             let gap = 8.0;
             let column = (ui.available_width() - gap) / 2.0;
             ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
                 ui.allocate_ui_with_layout(vec2(column, 0.0), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(column);
                     cpu_row(ui, cx);
                     memory_row(ui, cx);
                     gpu_row(ui, cx);
                 });
-                ui.add_space(gap);
                 ui.allocate_ui_with_layout(vec2(column, 0.0), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(column);
                     disk_row(ui, cx);
@@ -127,10 +143,8 @@ pub fn performance_page(ui: &mut Ui, cx: &mut PerformanceContext) {
             ui.add_space(4.0);
             let box_width = (ui.available_width() - gap * 3.0) / 4.0;
             ui.horizontal_top(|ui| {
-                for (index, draw) in [totals_box, physical_box, commit_box, kernel_box].into_iter().enumerate() {
-                    if index > 0 {
-                        ui.add_space(gap);
-                    }
+                ui.spacing_mut().item_spacing.x = gap;
+                for draw in [totals_box, physical_box, commit_box, kernel_box] {
                     ui.allocate_ui_with_layout(vec2(box_width, 0.0), Layout::top_down(Align::Min), |ui| {
                         ui.set_width(box_width);
                         draw(ui, cx);
@@ -144,7 +158,7 @@ pub fn performance_page(ui: &mut Ui, cx: &mut PerformanceContext) {
             disk_row(ui, cx);
             network_row(ui, cx);
             thermals_row(ui, cx);
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             two_boxes(ui, cx, totals_box, physical_box);
             two_boxes(ui, cx, commit_box, kernel_box);
         }
@@ -156,11 +170,11 @@ fn two_boxes(ui: &mut Ui, cx: &mut PerformanceContext, left: BoxFn, right: BoxFn
     let gap = 8.0;
     let width = (ui.available_width() - gap) / 2.0;
     ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
         ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.set_width(width);
             left(ui, cx);
         });
-        ui.add_space(gap);
         ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.set_width(width);
             right(ui, cx);
@@ -197,6 +211,8 @@ fn resource_row(
     title_extra: impl FnOnce(&mut Ui, &mut PerformanceContext),
 ) {
     let palette = cx.palette;
+    let scope_height = cx.scope_height();
+    let row_gap = cx.row_gap();
     graphs::group_box(ui, palette, title, |ui| {
         ui.horizontal(|ui| {
             legend(ui, legend_entries);
@@ -205,7 +221,7 @@ fn resource_row(
         ui.add_space(2.0);
         ui.horizontal_top(|ui| {
             let (fraction, color, label) = meter;
-            let meter_response = graphs::led_meter(ui, palette, title, fraction, color, &label, SCOPE_HEIGHT)
+            let meter_response = graphs::led_meter(ui, palette, title, fraction, color, &label, scope_height)
                 .on_hover_text(format!("Open the {title} card on the Overview"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if meter_response.clicked() {
@@ -213,7 +229,7 @@ fn resource_row(
             }
             ui.add_space(6.0);
             ui.vertical(|ui| {
-                let graph_response = draw_graph(ui, cx, SCOPE_HEIGHT);
+                let graph_response = draw_graph(ui, cx, scope_height);
                 if let Some(column) = graph_target {
                     let graph_response = graph_response
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -224,7 +240,7 @@ fn resource_row(
             });
         });
     });
-    ui.add_space(6.0);
+    ui.add_space(row_gap);
 }
 
 fn percent_formatter(labels: &'static [&'static str]) -> impl Fn(&[f64]) -> String {
@@ -256,7 +272,7 @@ fn cpu_row(ui: &mut Ui, cx: &mut PerformanceContext) {
         cx,
         "CPU",
         &[(busy_color, "busy"), (kernel_color, "kernel")],
-        (percent / 100.0, busy_color, format!("{percent:.0}%")),
+        (percent / 100.0, busy_color, format_percent(percent)),
         "cpu",
         Some(SortColumn::Cpu),
         |ui, cx, height| match mode {
@@ -313,7 +329,8 @@ fn per_thread_grid(
     let cell_width = (width - gap * (columns as f32 - 1.0)) / columns as f32;
     // Keep the whole grid near the height of a single scope graph
     // (two rows of it at most), never squashing a cell below the floor.
-    let cell_height = ((SCOPE_HEIGHT * 2.0 - gap * (rows as f32 - 1.0)) / rows as f32).max(MINI_GRAPH_MIN_HEIGHT);
+    let budget = cx.scope_height() * 2.0;
+    let cell_height = ((budget - gap * (rows as f32 - 1.0)) / rows as f32).max(MINI_GRAPH_MIN_HEIGHT);
     let total_height = cell_height * rows as f32 + gap * (rows as f32 - 1.0);
     let (outer, outer_response) = ui.allocate_exact_size(vec2(width, total_height), egui::Sense::click());
     outer_response.widget_info(move || {
@@ -360,7 +377,7 @@ fn memory_row(ui: &mut Ui, cx: &mut PerformanceContext) {
     let percent = memory.used_percent;
     let used = &cx.histories.memory;
     let cache = &cx.histories.memory_cache;
-    let label = format!("{percent:.0}%");
+    let label = format_percent(percent);
     resource_row(
         ui,
         cx,
@@ -406,7 +423,7 @@ fn gpu_row(ui: &mut Ui, cx: &mut PerformanceContext) {
         cx,
         "GPU",
         &[(busy_color, "busy"), (vram_color, "VRAM")],
-        (percent / 100.0, busy_color, format!("{percent:.0}%")),
+        (percent / 100.0, busy_color, format_percent(percent)),
         "gpu",
         Some(SortColumn::Gpu),
         |ui, cx, height| {
@@ -602,7 +619,7 @@ fn thermals_row(ui: &mut Ui, cx: &mut PerformanceContext) {
 // ------------------------------------------------------------ group boxes
 
 fn rows(ui: &mut Ui, palette: &Palette, entries: &[(&str, String, Option<String>)]) {
-    egui::Grid::new(ui.next_auto_id()).num_columns(2).spacing(vec2(8.0, 2.0)).show(ui, |ui| {
+    egui::Grid::new(ui.next_auto_id()).num_columns(2).spacing(vec2(8.0, 1.0)).show(ui, |ui| {
         for (label, value, note) in entries {
             ui.label(RichText::new(*label).color(palette.muted).monospace().size(10.5));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -629,7 +646,7 @@ fn totals_box(ui: &mut Ui, cx: &mut PerformanceContext) {
     ];
     let palette = cx.palette;
     graphs::group_box(ui, palette, "Totals", |ui| rows(ui, palette, &entries));
-    ui.add_space(6.0);
+    ui.add_space(cx.row_gap());
 }
 
 fn physical_box(ui: &mut Ui, cx: &mut PerformanceContext) {
@@ -648,7 +665,7 @@ fn physical_box(ui: &mut Ui, cx: &mut PerformanceContext) {
     ];
     let palette = cx.palette;
     graphs::group_box(ui, palette, "Physical memory", |ui| rows(ui, palette, &entries));
-    ui.add_space(6.0);
+    ui.add_space(cx.row_gap());
 }
 
 fn commit_box(ui: &mut Ui, cx: &mut PerformanceContext) {
@@ -670,7 +687,7 @@ fn commit_box(ui: &mut Ui, cx: &mut PerformanceContext) {
     ];
     let palette = cx.palette;
     graphs::group_box(ui, palette, "Commit charge", |ui| rows(ui, palette, &entries));
-    ui.add_space(6.0);
+    ui.add_space(cx.row_gap());
 }
 
 fn kernel_box(ui: &mut Ui, cx: &mut PerformanceContext) {
@@ -684,7 +701,7 @@ fn kernel_box(ui: &mut Ui, cx: &mut PerformanceContext) {
     ];
     let palette = cx.palette;
     graphs::group_box(ui, palette, "Kernel memory", |ui| rows(ui, palette, &entries));
-    ui.add_space(6.0);
+    ui.add_space(cx.row_gap());
 }
 
 /// `3d 04:12` style uptime: days, then hours:minutes.
@@ -702,21 +719,26 @@ pub fn format_uptime(seconds: f64) -> String {
 
 // ------------------------------------------------------------ status bar
 
-/// The status line's text: the same snapshot fields as the boxes.
-pub fn status_text(snapshot: &SystemSnapshot, display: Display) -> String {
+/// The status line's text: the same snapshot fields as the boxes. A
+/// narrow window drops the commit limit so nothing truncates (V7).
+pub fn status_text(snapshot: &SystemSnapshot, display: Display, wide: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(processes) = &snapshot.processes {
-        parts.push(format!("Processes {}", processes.len()));
+        parts.push(format!("{} proc", processes.len()));
     }
     if let Some(cpu) = &snapshot.cpu {
         parts.push(format!("CPU {:.0}%", cpu.overall_percent));
     }
     if let Some(memory) = &snapshot.memory {
-        parts.push(format!(
-            "Commit {} / {}",
-            format_size(memory.committed_bytes, display.units),
-            format_size(memory.commit_limit_bytes, display.units)
-        ));
+        if wide {
+            parts.push(format!(
+                "Commit {} / {}",
+                format_size(memory.committed_bytes, display.units),
+                format_size(memory.commit_limit_bytes, display.units)
+            ));
+        } else {
+            parts.push(format!("Commit {}", format_size(memory.committed_bytes, display.units)));
+        }
     }
     if let Some(gpu) = snapshot.gpu.as_ref().filter(|g| g.available) {
         parts.push(format!("GPU {:.0}%", gpu.busy_percent));
@@ -731,10 +753,14 @@ pub fn status_bar(ctx: &egui::Context, palette: &Palette, text: &str) {
     egui::TopBottomPanel::bottom("performance_status")
         .frame(egui::Frame::new().fill(palette.surface_2).inner_margin(egui::Margin::symmetric(8, 3)))
         .show(ctx, |ui| {
+            // A sensed label gets a real accessibility node (the plain
+            // label's text is otherwise invisible to the harness).
             let response = ui.add(
-                egui::Label::new(RichText::new(text).monospace().size(11.0).color(palette.ink_2)).truncate(),
+                egui::Label::new(RichText::new(text).monospace().size(11.0).color(palette.ink_2))
+                    .truncate()
+                    .sense(egui::Sense::click()),
             );
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("status: {text}")));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("status: {text}")));
         });
 }
 
