@@ -22,6 +22,8 @@ and `tests/accuracy.rs` are the checks.*
 | # | way it could lie | caught by |
 |---|---|---|
 | C1 | headline frequency = mean over all 32 threads incl. parked ones, so it understates what busy cores run at | audit: turbostat Bzy_MHz vs our busiest-core and mean |
+| C1a | the "busy clock" (busy-weighted `scaling_cur_freq`) is one instant read per core, so a core busy 60% of the window but idle at the instant of the read reports its idle clock. Measured 2026-10-01 vs CPPC delivered/reference over the same 2 s windows: 572–2100 MHz low; audit C1 failed both phases (3074 vs 3929, 2213 vs 3868) | the window's true delivered clock from ACPI CPPC `feedback_ctrs` (delivered/reference × nominal_freq, unprivileged, the same APERF/MPERF ratio turbostat reads). Reading it costs ~0.6 ms per core (a firmware mailbox, every read). Read cost bounded by reading it on a background poller thread like the GPU clock, never on the sampling path |
+| C1b | CPPC counters wrap (`wraparound_time`), or a core goes offline between reads, or the firmware doesn't expose CPPC (Intel, VMs) | wrap: delivered < previous → drop that core for the window; missing file → fall back to the instant read, labelled `frequency_busy_source: "instant read"` |
 | C2 | per-core % double-counts guest time | existing pinned-spinner test |
 | C3 | Tctl reported as die temperature (Zen offset) | audit: k10temp label set; Zen3 has Tctl == Tdie, older Zen had +10/+20 °C |
 | C4 | °F conversion rounding drifts from °C reading | unit test `c_to_f` exact points (0, 37, 100, -40) |

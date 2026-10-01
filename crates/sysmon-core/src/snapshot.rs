@@ -76,6 +76,11 @@ pub struct CpuSnapshot {
     /// or when every core idled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_busy_mhz: Option<f64>,
+    /// How the busy clock was measured: "delivered over the window"
+    /// (ACPI CPPC counters, the APERF/MPERF ratio turbostat reads) or
+    /// "instant read" (scaling_cur_freq; no CPPC, or the first window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_busy_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_min_mhz: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

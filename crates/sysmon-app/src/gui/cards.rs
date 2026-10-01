@@ -550,18 +550,37 @@ fn gpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
         (Some(rpm), _) => format!("{rpm} rpm"),
         (None, _) => "—".to_string(),
     };
-    stat_grid(
-        ui,
-        cx.palette,
-        &[
-            stat("Core", gpu.core_clock_mhz.map(format_frequency_mhz).unwrap_or("—".into())),
-            stat("VRAM Clk", gpu.memory_clock_mhz.map(format_frequency_mhz).unwrap_or("—".into())),
-            stat("Power", power),
-            stat("Hot Spot", gpu.temperature_junction_celsius.map(|c| cx.temperature(c)).unwrap_or("—".into())),
-            stat("Fan", fan),
-            ("GTT", gtt, Some("system RAM the GPU has mapped (spill-over from VRAM)".into())),
-        ],
-    );
+    // The clock moves every few ms (0 when gated), so say what the
+    // figure is: a window mean, or a single read.
+    let clock_note = match gpu.clock_source.as_deref() {
+        Some(source) if source.starts_with("mean") => format!("average over the update window ({source})"),
+        Some(source) => format!("{source} — the clock changes every few ms, so this one is a snapshot"),
+        None => "current clock".to_string(),
+    };
+    // Voltage regulators: show the hottest rail, all three on hover.
+    let vrms = [
+        ("graphics", gpu.temperature_vrm_gfx_celsius),
+        ("SoC", gpu.temperature_vrm_soc_celsius),
+        ("memory", gpu.temperature_vrm_mem_celsius),
+    ];
+    let hottest_vrm = vrms.iter().filter_map(|(_, c)| *c).fold(None, |a: Option<f32>, c| Some(a.map_or(c, |a| a.max(c))));
+    let vrm_note = vrms
+        .iter()
+        .filter_map(|(rail, c)| c.map(|c| format!("{rail} {}", cx.temperature(c))))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let mut stats = vec![
+        ("Core", gpu.core_clock_mhz.map(format_frequency_mhz).unwrap_or("—".into()), Some(clock_note.clone())),
+        ("VRAM Clk", gpu.memory_clock_mhz.map(format_frequency_mhz).unwrap_or("—".into()), Some(clock_note)),
+        stat("Power", power),
+        stat("Hot Spot", gpu.temperature_junction_celsius.map(|c| cx.temperature(c)).unwrap_or("—".into())),
+        stat("Fan", fan),
+        ("GTT", gtt, Some("system RAM the GPU has mapped (spill-over from VRAM)".into())),
+    ];
+    if let Some(hottest) = hottest_vrm {
+        stats.push(("VRM", cx.temperature(hottest), Some(format!("voltage regulators, hottest shown: {vrm_note}"))));
+    }
+    stat_grid(ui, cx.palette, &stats);
 
     if let Some(records) = &cx.snapshot.processes {
         let rows: Vec<(ProcessRecord, String)> = gpu
@@ -782,6 +801,14 @@ fn cpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
                 Some(format!("{} kernel tasks (threads) in total", cpu.tasks_total)),
             ),
             stat("Ctx/s", format!("{:.0}", cpu.context_switches_per_second)),
+            (
+                "Busy clock",
+                cpu.frequency_busy_mhz.map(format_frequency_mhz).unwrap_or("—".into()),
+                Some(format!(
+                    "the clock the working cores actually ran at, weighted by how busy each was ({})",
+                    cpu.frequency_busy_source.as_deref().unwrap_or("no window yet")
+                )),
+            ),
             (
                 "Avg clock",
                 cpu.frequency_mhz.map(format_frequency_mhz).unwrap_or("—".into()),

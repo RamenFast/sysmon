@@ -604,3 +604,98 @@ fn gpu_clock_is_the_window_mean_not_one_read() {
     let rms = (z_squares.iter().sum::<f64>() / z_squares.len() as f64).sqrt();
     assert!(rms <= 0.6, "RMS error {rms:.2}σ — that's a single read, not a window mean: {report:?}");
 }
+
+/// C1a: the busy clock is what the busy cores actually delivered over
+/// the window, not one instant read per core (which caught idle cores
+/// at their idle clock and ran 0.6–2.1 GHz low on this machine).
+///
+/// Authority: ACPI CPPC feedback counters (delivered/reference, the
+/// APERF/MPERF ratio turbostat reads), sampled by this test at the
+/// window's edges and busy-weighted from /proc/stat over the same
+/// window. Tolerance 150 MHz: the two windows' edges differ by the
+/// few ms it takes to read 32 cores' counters (~0.6 ms each).
+#[test]
+fn cpu_busy_clock_is_what_the_busy_cores_delivered() {
+    let cppc = |core: usize| -> Option<(u64, u64)> {
+        let text = std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{core}/acpi_cppc/feedback_ctrs")).ok()?;
+        let mut fields = text.split_whitespace();
+        let reference = fields.next()?.strip_prefix("ref:")?.parse().ok()?;
+        let delivered = fields.next()?.strip_prefix("del:")?.parse().ok()?;
+        Some((reference, delivered))
+    };
+    let Some(nominal_mhz) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+    else {
+        eprintln!("no ACPI CPPC here — skipping");
+        return;
+    };
+    let busy_ticks = || -> Vec<(u64, u64)> {
+        std::fs::read_to_string("/proc/stat")
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("cpu") && l.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
+            .map(|l| {
+                let v: Vec<u64> = l.split_whitespace().skip(1).map(|f| f.parse().unwrap()).collect();
+                let total: u64 = v.iter().sum();
+                (total, total - v[3] - v[4])
+            })
+            .collect()
+    };
+
+    // Load half the cores so the weighting has something to weigh.
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spinners: Vec<_> = (0..cores / 2)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::black_box(1u64.wrapping_mul(3));
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mut wants = Wants::none();
+    wants.cpu = true;
+    let mut sampler = Sampler::new();
+    let mut results = Vec::new();
+    for _ in 0..3 {
+        let _prime = sampler.sample(wants);
+        let ticks_0 = busy_ticks();
+        let cppc_0: Vec<_> = (0..cores).map(cppc).collect();
+        std::thread::sleep(Duration::from_millis(1500));
+        let ticks_1 = busy_ticks();
+        let cppc_1: Vec<_> = (0..cores).map(cppc).collect();
+        let ours = sampler.sample(wants).cpu.expect("cpu");
+
+        let (mut weight, mut sum) = (0.0, 0.0);
+        for core in 0..cores {
+            let (Some(a), Some(b)) = (cppc_0[core], cppc_1[core]) else { continue };
+            let (t0, b0) = ticks_0[core];
+            let (t1, b1) = ticks_1[core];
+            if b.0 <= a.0 || t1 <= t0 {
+                continue;
+            }
+            let busy = (b1 - b0) as f64 / (t1 - t0) as f64;
+            let delivered = nominal_mhz * (b.1 - a.1) as f64 / (b.0 - a.0) as f64;
+            weight += busy;
+            sum += busy * delivered;
+        }
+        let truth = sum / weight;
+        let busy_clock = ours.frequency_busy_mhz.expect("frequency_busy_mhz");
+        results.push((busy_clock, truth, ours.frequency_busy_source.clone()));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for spinner in spinners {
+        spinner.join().unwrap();
+    }
+    for (ours, truth, source) in &results {
+        assert!(
+            (ours - truth).abs() <= 150.0,
+            "busy clock {ours:.0} MHz ({source:?}) vs CPPC delivered {truth:.0} MHz over the same window: {results:?}"
+        );
+    }
+}

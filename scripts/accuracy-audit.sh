@@ -206,7 +206,10 @@ audit_phase() {
   record S0 "${phase}" "temperature channel census" "${ours_temps}" "${sensors_temps}" "sensors -j temp*_input" \
     "$([ "${ours_temps}" = "${sensors_temps}" ] && echo pass || echo fail)" "every readable channel, none invented"
   local bogus_visible
-  bogus_visible="$(jq '[.sensors.chips[].temps[] | select((.celsius < -30 or .celsius == 0) and ((.plausible // true) == true))] | length' <<<"${snap}")"
+  # `.plausible != false`, not `(.plausible // true)`: jq's `//`
+  # treats false as missing, so the latter reads every marked row as
+  # unmarked.
+  bogus_visible="$(jq '[.sensors.chips[].temps[] | select((.celsius < -30 or .celsius == 0) and .plausible != false)] | length' <<<"${snap}")"
   record S2 "${phase}" "implausible readings marked" "${bogus_visible} unmarked" "0" "jq over probe" \
     "$([ "${bogus_visible}" = 0 ] && echo pass || echo fail)" "−62 °C / 0 °C must carry plausible:false"
 
