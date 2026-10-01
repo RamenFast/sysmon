@@ -37,6 +37,11 @@ pub fn parse_meminfo(content: &str) -> MemorySnapshot {
     let mut swap_total = 0u64;
     let mut swap_free = 0u64;
     let mut swap_cached = 0u64;
+    let mut committed = 0u64;
+    let mut commit_limit = 0u64;
+    let mut slab = 0u64;
+    let mut kernel_stack = 0u64;
+    let mut page_tables = 0u64;
 
     for line in content.lines() {
         let Some((key, rest)) = line.split_once(':') else {
@@ -60,6 +65,11 @@ pub fn parse_meminfo(content: &str) -> MemorySnapshot {
             "SwapTotal" => swap_total = kilobytes,
             "SwapFree" => swap_free = kilobytes,
             "SwapCached" => swap_cached = kilobytes,
+            "Committed_AS" => committed = kilobytes,
+            "CommitLimit" => commit_limit = kilobytes,
+            "Slab" => slab = kilobytes,
+            "KernelStack" => kernel_stack = kilobytes,
+            "PageTables" => page_tables = kilobytes,
             _ => {}
         }
     }
@@ -84,6 +94,11 @@ pub fn parse_meminfo(content: &str) -> MemorySnapshot {
         swap_total_bytes: kb(swap_total),
         swap_used_bytes: kb(swap_total.saturating_sub(swap_free)),
         swap_cached_bytes: kb(swap_cached),
+        committed_bytes: kb(committed),
+        commit_limit_bytes: kb(commit_limit),
+        slab_bytes: kb(slab),
+        kernel_stack_bytes: kb(kernel_stack),
+        page_tables_bytes: kb(page_tables),
         installed_bytes: None,
         modules: Vec::new(),
     }
@@ -180,6 +195,13 @@ Shmem:             22000 kB
 SReclaimable:    1200000 kB
 SwapTotal:             0 kB
 SwapFree:              0 kB
+Slab:            1500000 kB
+SUnreclaim:       300000 kB
+KernelStack:       48600 kB
+PageTables:       210400 kB
+VmallocTotal:   34359738367 kB
+CommitLimit:    16400000 kB
+Committed_AS:   30100000 kB
 ";
 
     #[test]
@@ -191,6 +213,20 @@ SwapFree:              0 kB
         assert_eq!(memory.dirty_bytes, 1234 * 1024);
         assert_eq!(memory.swap_total_bytes, 0);
         assert!((memory.used_percent - 26.219513).abs() < 0.01);
+    }
+
+    /// M7/M8: commit charge is Committed_AS against CommitLimit (not
+    /// VmallocTotal, which is 32 TB on x86-64 and the easiest line to
+    /// grab by mistake); kernel memory is the three lines exactly, in
+    /// KiB, Slab whole (SReclaimable is already inside cached_bytes).
+    #[test]
+    fn commit_charge_and_kernel_memory_are_the_named_lines() {
+        let memory = parse_meminfo(MEMINFO_FIXTURE);
+        assert_eq!(memory.committed_bytes, 30_100_000 * 1024);
+        assert_eq!(memory.commit_limit_bytes, 16_400_000 * 1024);
+        assert_eq!(memory.slab_bytes, 1_500_000 * 1024);
+        assert_eq!(memory.kernel_stack_bytes, 48_600 * 1024);
+        assert_eq!(memory.page_tables_bytes, 210_400 * 1024);
     }
 
     /// The shape udev writes on this machine (X570, 4× DDR4 at the

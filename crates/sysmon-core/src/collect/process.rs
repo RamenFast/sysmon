@@ -161,7 +161,8 @@ fn script_name(argv: &[&str]) -> Option<String> {
     let mut arguments = argv.iter().skip(1);
     while let Some(argument) = arguments.next() {
         match *argument {
-            "-c" | "-e" | "--eval" | "-p" | "--print" | "-E" => return None,
+            "-c" => return arguments.next().and_then(|code| inline_import_name(code)),
+            "-e" | "--eval" | "-p" | "--print" | "-E" => return None,
             "-m" => return arguments.next().map(|module| module.to_string()),
             "-jar" => return arguments.next().map(|jar| basename(jar).to_string()),
             flag if FLAGS_WITH_VALUE.contains(&flag) => {
@@ -174,7 +175,11 @@ fn script_name(argv: &[&str]) -> Option<String> {
                 && flag[1..].bytes().all(|b| b.is_ascii_alphabetic())
                 && flag[1..].contains(['c', 'e']) =>
             {
-                return None;
+                return if flag[1..].contains('c') {
+                    arguments.next().and_then(|code| inline_import_name(code))
+                } else {
+                    None
+                };
             }
             flag if flag.starts_with('-') => {}
             // `bun run src/server/index.ts`, `deno run x.ts`
@@ -183,6 +188,26 @@ fn script_name(argv: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+/// Inline code that is really a module launcher (`-c "from
+/// multiprocessing.resource_tracker import main;main(5)"`, `-c
+/// "import http.server; …"`) is named by that module, the way `-m`
+/// is. Anything else inline has no better name than the interpreter.
+fn inline_import_name(code: &str) -> Option<String> {
+    let mut words = code.split_ascii_whitespace();
+    match words.next()? {
+        "from" => {
+            let module = words.next()?;
+            words.next().filter(|w| *w == "import")?;
+            module.rsplit('.').next().map(str::to_string)
+        }
+        "import" => words
+            .next()
+            .map(|module| module.trim_end_matches([';', ',']).to_string())
+            .filter(|module| !module.is_empty()),
+        _ => None,
+    }
 }
 
 /// What a person calls this process. comm is what the kernel calls
@@ -542,6 +567,15 @@ mod tests {
         assert_eq!(name("bash", &["bash", "-lc", "cd /home/ben/Dev && cargo build --release"], None), "bash");
         assert_eq!(name("bash", &["/bin/bash", "-ec", "eval \"$X\"; status=$?"], None), "bash");
         assert_eq!(name("python3", &["python3", "-Bc", "print(1)"], None), "python3");
+        // ...unless the inline code is an import: then the module is
+        // the program (3.2 audit P2: multiprocessing's resource
+        // tracker is `python3 -I -c "from multiprocessing.resource_tracker import main;main(5)"`).
+        assert_eq!(
+            name("python3", &["python3", "-I", "-c", "from multiprocessing.resource_tracker import main;main(5)"], None),
+            "resource_tracker"
+        );
+        assert_eq!(name("python3", &["python3", "-c", "import http.server; http.server.test()"], None), "http.server");
+        assert_eq!(name("python3", &["python3", "-c", "  from   os import path"], None), "os");
         // A cluster without c/e is just flags.
         assert_eq!(name("python3", &["python3", "-uB", "x.py"], None), "x.py");
         // comm truncated at 15 bytes.

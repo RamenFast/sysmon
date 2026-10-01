@@ -64,6 +64,11 @@ pub struct CpuSnapshot {
     /// mystery when a disk is slow.
     #[serde(default)]
     pub iowait_percent: f32,
+    /// Share of the window the kernel itself was working (system +
+    /// irq + softirq), 0–100. Inside `overall_percent`, never above
+    /// it. mpstat's %sys + %irq + %soft. New in 3.2.
+    #[serde(default)]
+    pub kernel_percent: f32,
     pub per_core_percent: Vec<f32>,
     pub core_count: usize,
     /// Mean of the per-core current frequencies, idle cores included
@@ -124,6 +129,26 @@ pub struct MemorySnapshot {
     pub swap_total_bytes: u64,
     pub swap_used_bytes: u64,
     pub swap_cached_bytes: u64,
+    /// Committed_AS: every byte of address space the kernel has
+    /// promised to processes. The XP "commit charge". New in 3.2.
+    #[serde(default)]
+    pub committed_bytes: u64,
+    /// CommitLimit: what the overcommit policy would let
+    /// `committed_bytes` reach (RAM × ratio + swap). On the default
+    /// heuristic policy the kernel does not enforce it, so committed
+    /// may legitimately exceed it. New in 3.2.
+    #[serde(default)]
+    pub commit_limit_bytes: u64,
+    /// Slab: every kernel slab cache, reclaimable and not (the
+    /// reclaimable part is also inside `cached_bytes`). New in 3.2.
+    #[serde(default)]
+    pub slab_bytes: u64,
+    /// KernelStack. New in 3.2.
+    #[serde(default)]
+    pub kernel_stack_bytes: u64,
+    /// PageTables. New in 3.2.
+    #[serde(default)]
+    pub page_tables_bytes: u64,
     /// Sum of the installed memory modules (SMBIOS via udev) — the
     /// number on the box, in bytes. None when firmware tables are
     /// unreadable (VMs, containers).

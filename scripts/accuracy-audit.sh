@@ -85,6 +85,29 @@ audit_phase() {
   record M2b "${phase}" "usable ≤ firmware System RAM ≤ installed" \
     "${mem_total}" "${memmap_ram} / ${dimm_sum}" "/sys/firmware/memmap" \
     "$([ "${mem_total}" -le "${memmap_ram}" ] && [ "${memmap_ram}" -le "${dimm_sum}" ] && echo pass || echo fail)"
+  # Commit charge + kernel memory: the same /proc/meminfo lines, read
+  # right after the probe. Committed_AS moves with every mmap, so a
+  # 2% band; the kernel lines barely move.
+  local mi_committed mi_limit mi_slab mi_stack mi_pt
+  read -r mi_committed mi_limit mi_slab mi_stack mi_pt < <(awk '
+    /^Committed_AS:/ {c=$2*1024} /^CommitLimit:/ {l=$2*1024} /^Slab:/ {s=$2*1024}
+    /^KernelStack:/ {k=$2*1024} /^PageTables:/ {p=$2*1024}
+    END {print c, l, s, k, p}' /proc/meminfo)
+  local ours_committed
+  ours_committed="$(jq -r .memory.committed_bytes <<<"${snap}")"
+  record M7 "${phase}" "commit charge Committed_AS (bytes)" "${ours_committed}" "${mi_committed}" \
+    "/proc/meminfo (next read)" "$(within "${ours_committed}" "${mi_committed}" $((mi_committed / 50)))" \
+    "±2%: address space is promised and released constantly"
+  record M7b "${phase}" "commit limit (bytes)" "$(jq -r .memory.commit_limit_bytes <<<"${snap}")" "${mi_limit}" \
+    "/proc/meminfo CommitLimit" \
+    "$([ "$(jq -r .memory.commit_limit_bytes <<<"${snap}")" = "${mi_limit}" ] && echo pass || echo fail)"
+  record M8 "${phase}" "kernel memory Slab/KernelStack/PageTables (bytes)" \
+    "$(jq -r '"\(.memory.slab_bytes)/\(.memory.kernel_stack_bytes)/\(.memory.page_tables_bytes)"' <<<"${snap}")" \
+    "${mi_slab}/${mi_stack}/${mi_pt}" "/proc/meminfo (next read)" \
+    "$({ [ "$(within "$(jq -r .memory.slab_bytes <<<"${snap}")" "${mi_slab}" $((mi_slab / 20)))" = pass ] \
+        && [ "$(within "$(jq -r .memory.kernel_stack_bytes <<<"${snap}")" "${mi_stack}" $((mi_stack / 10 + 1)))" = pass ] \
+        && [ "$(within "$(jq -r .memory.page_tables_bytes <<<"${snap}")" "${mi_pt}" $((mi_pt / 10 + 1)))" = pass ]; } \
+       && echo pass || echo fail)" "±5% slab, ±10% stacks/page tables between reads"
   local swaps
   swaps="$(awk 'NR>1' /proc/swaps | wc -l)"
   record M6 "${phase}" "swap devices vs swap_total" "$(jq -r .memory.swap_total_bytes <<<"${snap}")" \
@@ -98,16 +121,18 @@ audit_phase() {
     # the delta baseline) runs concurrently with mpstat's interval.
     # Identity: busy = everything but idle AND iowait (htop's, ours);
     # mpstat's 100 − %idle would count iowait as busy.
-    local ours_cpu mp_cpu mp_iowait ours_iowait tap_file
+    local ours_cpu mp_cpu mp_iowait ours_iowait mp_kernel ours_kernel tap_file
     tap_file="$(mktemp)"
     ("${bin}" tap cpu -i 2 2>/dev/null | head -2 | tail -1 >"${tap_file}") &
     local tap_pid=$!
-    read -r mp_cpu mp_iowait < <(LC_ALL=C mpstat 2 1 \
-      | awk '/^Average:/ && $2=="all" {print 100-$NF-$6, $6}')
+    # mpstat columns: CPU %usr %nice %sys %iowait %irq %soft %steal %guest %gnice %idle
+    read -r mp_cpu mp_iowait mp_kernel < <(LC_ALL=C mpstat 2 1 \
+      | awk '/^Average:/ && $2=="all" {print 100-$NF-$6, $6, $5+$7+$8}')
     # Its own pid: a bare `wait` would also wait out the load generator.
     wait "${tap_pid}"
     ours_cpu="$(jq -r .cpu.overall_percent "${tap_file}")"
     ours_iowait="$(jq -r '.cpu.iowait_percent // "absent"' "${tap_file}")"
+    ours_kernel="$(jq -r '.cpu.kernel_percent // "absent"' "${tap_file}")"
     rm -f "${tap_file}"
     record C2 "${phase}" "cpu overall busy % (iowait counted idle)" "${ours_cpu}" "${mp_cpu}" \
       "mpstat 2 1: 100 − idle − iowait (same window)" \
@@ -115,6 +140,12 @@ audit_phase() {
     record C2b "${phase}" "cpu iowait %" "${ours_iowait}" "${mp_iowait}" "mpstat 2 1 %iowait" \
       "$([ "${ours_iowait}" = absent ] && echo fail || within "${ours_iowait}" "${mp_iowait}" 8)" \
       "concurrent 2 s windows, ±8 pp"
+    record C7 "${phase}" "cpu kernel time % (sys+irq+soft)" "${ours_kernel}" "${mp_kernel}" \
+      "mpstat 2 1 %sys + %irq + %soft" \
+      "$([ "${ours_kernel}" = absent ] && echo fail || within "${ours_kernel}" "${mp_kernel}" 8)" \
+      "concurrent 2 s windows, ±8 pp"
+    record C7b "${phase}" "cpu kernel % ≤ busy %" "${ours_kernel}" "${ours_cpu}" "same snapshot" \
+      "$(awk -v k="${ours_kernel}" -v b="${ours_cpu}" 'BEGIN {print (k<=b+0.001) ? "pass" : "fail"}')"
   else
     skip C2 "${phase}" "cpu overall busy %" "mpstat" "sysstat"
   fi
