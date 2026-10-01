@@ -44,9 +44,9 @@ and `tests/accuracy.rs` are the checks.*
 | G10 | unsupported fields read as 65535 MHz / 655 °C (the firmware's 0xFFFF "not supported") | 0xFFFF → None; fixture test |
 | G11 | short read / truncated blob taken as zeros | length checked against `structure_size` and the field's offset |
 | G12 | VR temps (vrgfx/vrsoc/vrmem) exist but are never shown — hot VRMs invisible | surfaced as GPU sensor readings when supported |
-| G13 | a faster DRM-client scan misses GPU users: stat-free detection by fd *link text* (`/dev/dri/renderD128`, `/dev/dri/card1`) misses a client whose node was opened via a different path (a bind-mounted /dev in a container/flatpak) or a dup'd fd | detection keeps the char-major check (226) as the authority for anything the link text can't decide; live test opens `/dev/dri/renderD*` from a child and asserts it is listed |
-| G14 | the negative cache hides a process that *starts* using the GPU (Ollama loading a model) for up to N samples | cache window bounded (5 samples = 10 s at the default 2 s); live test opens the render node mid-run and asserts it appears within the window |
-| G15 | the fd walk is skipped for a pid recycled from a non-GPU process | negative cache keyed by (pid, starttime) not pid alone |
+| G13 | a faster DRM-client scan that trusts fd *link text* misses clients opened via another path (bind-mounted /dev in flatpak/containers) | not taken: detection stays `stat` → char major 226, the kernel's own answer. Measured 2026-10-01 the fd walk is 6 ms median, p90 16 ms on refresh samples; the remaining cost is syscalls a link-text shortcut would not remove |
+| G14 | the negative cache hides a process that *starts* using the GPU (Ollama loading a model) for up to N samples | accepted, bounded: re-checked every 5 samples (10 s at the default 2 s). No live test yet: an idle render-node client shows 0% and no VRAM, so a faithful test needs real GPU work. SERIOUS-TODO |
+| G15 | the cache is keyed by pid, so a recycled pid inherits "no GPU" | same 5-sample bound as G14; pid reuse inside 10 s is rare on a 4M pid_max. SERIOUS-TODO with G14 |
 
 ## Sensors
 

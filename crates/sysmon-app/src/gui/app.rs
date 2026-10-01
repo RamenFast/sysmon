@@ -61,6 +61,9 @@ pub struct SharedUi {
     /// but slower and hungrier than it should be — `status` and the
     /// startup toast say so out loud (never silently slow).
     pub renderer: OnceLock<RendererInfo>,
+    /// Set by the control socket's `quit`; honored on the next frame
+    /// (including a quit that arrived before the first one).
+    pub quit_requested: AtomicBool,
 }
 
 pub struct RendererInfo {
@@ -79,6 +82,7 @@ impl SharedUi {
             open_viewports: Mutex::new(Vec::new()),
             main_window_rect: Mutex::new(None),
             renderer: OnceLock::new(),
+            quit_requested: AtomicBool::new(false),
         }
     }
 }
@@ -1135,6 +1139,9 @@ fn save_color_image_png(image: &egui::ColorImage, path: &str) -> Result<(), Stri
 
 impl eframe::App for SysMonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.shared.quit_requested.load(Ordering::SeqCst) {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
         if std::env::var_os("SYSMON_DEBUG_FPS").is_some() {
             use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
             static FRAMES: AtomicU64 = AtomicU64::new(0);

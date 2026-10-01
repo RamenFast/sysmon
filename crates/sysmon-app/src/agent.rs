@@ -230,7 +230,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             "ctl needs a verb",
             "verbs: status quit pause resume interval <s> raise page <overview|processes> \
              theme <id> palette <id> popout <section> popin <section> shot [path] \
-             compact <on|off> units <decimal|binary>",
+             compact <on|off> units <decimal|binary> temperature <celsius|fahrenheit|both>",
             EXIT_BAD_ARGS,
             force_json,
         );
@@ -249,7 +249,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             };
             request["seconds"] = json!(seconds);
         }
-        "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" => {
+        "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" | "temperature" => {
             let Some(value) = positional.get(1) else {
                 return envelope::fail_forced(
                     format!("`{verb}` needs a value"),
@@ -469,6 +469,8 @@ fn build_schema() -> Value {
                                       "note": "BLOCKS until the PNG exists; result.path names it. Captures the main viewport only — pop-outs are separate OS windows"},
                         "compact":  {"value": {"enum": ["on", "off"]}, "needs_gui": true},
                         "units":    {"value": {"enum": ["decimal", "binary"]}, "needs_gui": true},
+                        "temperature": {"value": {"enum": ["celsius", "fahrenheit", "both"]}, "needs_gui": true,
+                                         "note": "display only: every JSON reading stays in °C (`*_celsius`)"},
                     },
                     "exits": [0, 2, 3, 4],
                 },
@@ -490,14 +492,14 @@ fn build_schema() -> Value {
                 "protocol": "one JSON object per line in; one envelope line out; `subscribe` upgrades to a raw NDJSON snapshot stream",
                 "verbs": ["status", "snapshot", "subscribe", "pause", "resume", "interval",
                            "quit", "raise", "page", "theme", "palette", "popout", "popin",
-                           "shot", "compact", "units"],
+                           "shot", "compact", "units", "temperature"],
                 "single_owner": "GUI or serve — whoever binds first; `sysmon serve` exits 2 if occupied",
             },
         },
         "commands": {
             "sysmon": "GUI (default command); plain re-launch raises the running instance",
             "sysmon --background": "GUI on a private Xvfb display — renders and serves the socket without touching your screen",
-            "sysmon probe [sections…] [--json]": "one-shot snapshot; asks the live instance, else samples in-process (two samples, 250 ms apart, so rates are real)",
+            "sysmon probe [sections…] [--json]": "one-shot snapshot; asks the live instance, else samples in-process (two samples 250 ms apart — 1 s when `processes` is asked for, so per-process CPU% moves in 1% steps, not 4%)",
             "sysmon tap [sections…] [--interval N]": "NDJSON stream, one snapshot per line (default section: network, 1 s cadence)",
             "sysmon ctl <verb> […]": "drive the live instance",
             "sysmon serve": "headless daemon; samples only when asked — idle cost is zero",
@@ -511,14 +513,19 @@ fn build_schema() -> Value {
                 "per_core_percent": "[f32]",
                 "core_count": "logical cores",
                 "frequency_mhz": "mean of per-core current frequencies (cpufreq)",
+                "frequency_busy_mhz": "the same mean weighted by each core's busy share over the window — the clock the work actually ran at (parked cores excluded)",
                 "frequency_min_mhz | frequency_max_mhz": "hardware limits",
                 "load_1m | load_5m | load_15m": "loadavg",
                 "tasks_running | tasks_total": "loadavg 4th field (kernel tasks = threads)",
                 "temperature_celsius": "CPU package (k10temp Tdie/Tctl or coretemp Package)",
+                "temperature_source": "which sensor that is, e.g. \"k10temp Tctl\"",
+                "iowait_percent": "idle time spent waiting on storage, 0–100 — not included in overall_percent",
                 "context_switches_per_second": "machine-wide",
             },
             "memory": {
                 "total_bytes | free_bytes | available_bytes": "MemTotal / MemFree / MemAvailable",
+                "installed_bytes": "physical RAM fitted (sum of DMI memory devices); total_bytes is what the kernel can use after firmware/GPU reservations",
+                "modules": "[{locator, size_bytes, kind (DDR4…), rated_speed_mts, configured_speed_mts, part_number}] from /run/udev/data/+dmi:id; empty when DMI is unreadable",
                 "used_bytes": "total − available (psutil identity; htop shows a smaller figure by design)",
                 "used_percent": "used / total",
                 "cached_bytes": "Cached + SReclaimable",
@@ -532,8 +539,10 @@ fn build_schema() -> Value {
                 "vram_used_bytes | vram_total_bytes": "dedicated VRAM",
                 "gtt_used_bytes | gtt_total_bytes": "system RAM mapped by the GPU",
                 "temperature_edge_celsius | temperature_junction_celsius | temperature_memory_celsius": "hwmon temp1/2/3",
+                "temperature_vrm_gfx_celsius | temperature_vrm_soc_celsius | temperature_vrm_mem_celsius": "voltage-regulator temperatures from gpu_metrics (absent when the table doesn't report them)",
                 "power_draw_watts | power_cap_watts": "hwmon power1",
-                "core_clock_mhz | memory_clock_mhz": "hwmon freq1/2",
+                "core_clock_mhz | memory_clock_mhz": "mean across the sample window (the clock changes every few ms, 0 when gated)",
+                "clock_source": "\"mean of N reads\" or \"instant read\" (a window's first sample)",
                 "fan_rpm | fan_max_rpm": "hwmon fan1",
                 "processes": "[{pid, busy_percent, vram_bytes}] via DRM fdinfo, busiest first",
             },
@@ -546,9 +555,9 @@ fn build_schema() -> Value {
                 "top_processes": "[{pid, name, rx_bps, tx_bps}] busiest first — the bar's click-through",
             },
             "disks": "[{device, mount_point, display_name (label if any), fs_type, read_bps, write_bps, used_bytes, total_bytes, util_percent}] — real block devices, deduped",
-            "processes": "[{pid, ppid, name, user, state, state_word, is_kernel_thread, cpu_percent (can exceed 100 when multithreaded), memory_rss_bytes, memory_virtual_bytes, threads, nice, started_ts, cpu_time_seconds, disk_read_bps?, disk_write_bps? (None = unreadable, not zero), gpu_busy_percent, gpu_vram_bytes, net_rx_bps?, net_tx_bps?, command_line, exe_basename?}]",
+            "processes": "[{pid, ppid, name (kernel comm, 15 chars), display_name (what to show: a generic thread name like MainThread resolved to its executable, python3 to its script), user, state, state_word, is_kernel_thread, cpu_percent (can exceed 100 when multithreaded), memory_rss_bytes (statm, matches ps), memory_virtual_bytes, threads, nice, started_ts, cpu_time_seconds, disk_read_bps?, disk_write_bps? (None = unreadable, not zero), gpu_busy_percent, gpu_vram_bytes, net_rx_bps?, net_tx_bps?, command_line, exe_basename?}]",
             "sensors": {
-                "chips": "[{name, device? (block dev a drive chip measures, e.g. sda), device_model?, temps: [{label, celsius, max_celsius?, crit_celsius?}], fans: [{label, rpm, max_rpm?}], voltages?: [{label, volts}], power?: [{label, watts, cap_watts?}]}] — every hwmon chip (indices scanned, gaps honored)",
+                "chips": "[{name, kind: cpu|gpu|drive|board|battery|other, device? (block dev a drive chip measures, e.g. sda), device_model?, temps: [{label, celsius, plausible (false for an unconnected input: -62 °C or exactly 0 °C with no limits), max_celsius?, crit_celsius? (firmware sentinels dropped)}], fans: [{label, rpm, max_rpm?, duty_percent? (the pwm drive; duty > 0 with rpm 0 means a stalled or unplugged fan)}], voltages?: [{label, volts}], power?: [{label, watts, cap_watts?}]}] — every hwmon chip (indices scanned, gaps honored)",
                 "battery": "{name, percent, status, power_draw_watts?, seconds_remaining?} when present",
             },
             "connections": "[{pid (-1 = unresolved), process_name?, protocol tcp|tcp6|udp|udp6, local_address, remote_address, state, rx_bps?, tx_bps? (TCP only)}] — the full socket table",

@@ -77,6 +77,11 @@ fn run_background(arguments: &[String]) -> i32 {
     };
     let rest: Vec<&String> = arguments.iter().filter(|a| a.as_str() != "--background").collect();
     use std::os::unix::process::CommandExt;
+    // The virtual display is X11 and nothing else. From a Wayland
+    // session the inherited WAYLAND_DISPLAY makes winit dial a
+    // compositor instead (and fail: exit 4), and a custom compositor's
+    // LD_LIBRARY_PATH (swayfx ships its own libxkbcommon) mixes two
+    // xkbcommon builds into the process, which segfaulted on quit.
     let error = std::process::Command::new("xvfb-run")
         .arg("-a")
         .args(["-s", "-screen 0 1280x900x24"])
@@ -84,6 +89,10 @@ fn run_background(arguments: &[String]) -> i32 {
         .arg("--background")
         .args(rest)
         .env("SYSMON_BACKGROUND", "1")
+        .env("XDG_SESSION_TYPE", "x11")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .env_remove("LD_LIBRARY_PATH")
         .exec();
     eprintln!("sysmon --background: could not launch xvfb-run: {error}");
     eprintln!("fix: install it (sudo apt install xvfb), or run sysmon on your display normally");

@@ -171,6 +171,12 @@ impl Backend for GuiBackend {
     }
 
     fn request_quit(&self) {
+        // The socket is bound before the window exists, so a `quit`
+        // can arrive while the GUI is still starting. Remember it: the
+        // app checks the flag on its first frame. (It was dropped
+        // before, and the window lived on after a `quit` that had
+        // replied "quitting": true.)
+        self.shared.quit_requested.store(true, Ordering::SeqCst);
         if let Some(ctx) = self.ctx.get() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             ctx.request_repaint();

@@ -235,6 +235,23 @@ fn published_enums_match_the_code_that_enforces_them() {
             "schema publishes pop-out section `{section}`, which does not exist"
         );
     }
+
+    // Temperature scale: every published id parses, and every scale
+    // the code has is published (a scale the GUI offers but the
+    // schema hides is one an agent can't set).
+    use sysmon_core::units::TemperatureScale;
+    let scales: Vec<&str> = ctl["temperature"]["value"]["enum"]
+        .as_array()
+        .expect("temperature enum")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for id in &scales {
+        assert!(TemperatureScale::from_id(id).is_some(), "schema publishes scale `{id}`, which doesn't parse");
+    }
+    for scale in [TemperatureScale::Celsius, TemperatureScale::Fahrenheit, TemperatureScale::Both] {
+        assert!(scales.contains(&scale.id()), "scale `{}` exists but isn't published", scale.id());
+    }
 }
 
 /// Every section the schema names must be probeable, and answer.
@@ -528,4 +545,173 @@ fn a_fresh_serve_never_answers_with_an_empty_window() {
     assert_eq!(reply["result"]["via"], "socket", "rode the fresh serve");
     let window = reply["result"]["interval_seconds"].as_f64().unwrap_or(0.0);
     assert!(window >= 0.2, "first answer from serve spans {window} s — its rates are all zero");
+}
+
+/// Every field a real probe emits is named in `schema.sections`. A
+/// field an agent can see but can't look up is a field it will guess
+/// about (3.1 added a dozen; this keeps the map from drifting again).
+#[test]
+fn every_live_field_is_documented_in_the_schema() {
+    let schema = schema();
+    let sections = &schema["sections"];
+    let documented = |section: &str| -> String { sections[section].to_string() };
+    let (probe, code) = Sandbox::new().run(&["probe", "all", "--json"]);
+    assert_eq!(code, 0);
+    let result = &probe["result"];
+    let mut missing = Vec::new();
+    let mut check = |section: &str, object: &Value| {
+        let text = documented(section);
+        if let Some(fields) = object.as_object() {
+            for key in fields.keys() {
+                if !text.contains(key.as_str()) {
+                    missing.push(format!("{section}.{key}"));
+                }
+            }
+        }
+    };
+    for section in ["system", "cpu", "memory", "gpu", "network"] {
+        check(section, &result[section]);
+    }
+    check("memory", &result["memory"]["modules"][0]);
+    check("network", &result["network"]["interfaces"][0]);
+    check("disks", &result["disks"][0]);
+    check("processes", &result["processes"][0]);
+    if let Some(chips) = result["sensors"]["chips"].as_array() {
+        for chip in chips {
+            check("sensors", chip);
+            for list in ["temps", "fans", "voltages", "power"] {
+                if let Some(first) = chip[list].get(0) {
+                    check("sensors", first);
+                }
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(missing.is_empty(), "live fields the schema never names: {missing:?}");
+}
+
+/// `--background` runs the GUI on a private Xvfb display. It must work
+/// when launched from a Wayland session (the inherited WAYLAND_DISPLAY
+/// made winit dial a compositor that isn't there and exit 4), and it
+/// must quit cleanly (an inherited LD_LIBRARY_PATH from a custom
+/// compositor build mixed two libxkbcommons and segfaulted on exit).
+#[test]
+fn background_mode_starts_and_quits_cleanly_from_a_wayland_session() {
+    if Command::new("xvfb-run").arg("--help").output().is_err() {
+        eprintln!("xvfb-run not installed — skipping");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let mut command = Command::new(binary());
+    command
+        .arg("--background")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        // What a launcher in a Wayland session hands down.
+        .env("WAYLAND_DISPLAY", "wayland-1")
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env("LD_LIBRARY_PATH", "/opt/swayfx-ux/lib/x86_64-linux-gnu:/opt/swayfx-ux/lib")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut gui = GroupGuard::spawn(command);
+    let gui = &mut gui.child;
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        if let Ok(Some(status)) = gui.try_wait() {
+            let mut stderr = String::new();
+            use std::io::Read;
+            let _ = gui.stderr.take().unwrap().read_to_string(&mut stderr);
+            panic!("--background exited {status} before serving: {stderr}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (status, code) = sandbox.run(&["ctl", "status", "--json"]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["result"]["mode"], "gui");
+    let (_, code) = sandbox.run(&["ctl", "quit", "--json"]);
+    assert_eq!(code, 0);
+    let status = gui.wait().expect("wait");
+    let mut stderr = String::new();
+    if let Some(mut pipe) = gui.stderr.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(
+        status.success(),
+        "--background exited {status:?} on quit: {stderr}"
+    );
+}
+
+/// `--background` forks xvfb-run → Xvfb + the GUI. A failing test that
+/// only killed its direct child left both orphaned to init. The guard
+/// starts the tree in its own process group and kills the group on
+/// drop — pass, fail or panic.
+struct GroupGuard {
+    child: std::process::Child,
+}
+
+impl GroupGuard {
+    fn spawn(mut command: Command) -> GroupGuard {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        GroupGuard {
+            child: command.spawn().expect("spawn --background"),
+        }
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        let group = self.child.id() as i32;
+        // Only signal a group that still exists (a clean quit already
+        // reaped it).
+        unsafe {
+            if libc::kill(-group, 0) == 0 {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.wait();
+    }
+}
+
+/// The GUI binds the socket before its window exists. A `quit` sent in
+/// that gap replied `"quitting": true` and was then dropped: the window
+/// lived on (found as orphaned test GUIs). A quit is a quit.
+#[test]
+fn a_quit_during_gui_startup_is_honored() {
+    if Command::new("xvfb-run").arg("--help").output().is_err() {
+        eprintln!("xvfb-run not installed — skipping");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let mut command = Command::new(binary());
+    command
+        .arg("--background")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut guard = GroupGuard::spawn(command);
+    let gui = &mut guard.child;
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The instant the socket exists: no waiting for the window.
+    let (_, code) = sandbox.run(&["ctl", "quit", "--json"]);
+    assert_eq!(code, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(status) = gui.try_wait().expect("try_wait") {
+            assert!(status.success(), "GUI exited {status} after an early quit");
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("GUI still running 20 s after `quit` was acknowledged");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
