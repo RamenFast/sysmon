@@ -539,7 +539,7 @@ fn build_schema() -> Value {
                 "busy_percent": "gpu_busy_percent",
                 "vram_used_bytes | vram_total_bytes": "dedicated VRAM",
                 "gtt_used_bytes | gtt_total_bytes": "system RAM mapped by the GPU",
-                "temperature_edge_celsius | temperature_junction_celsius | temperature_memory_celsius": "hwmon temp1/2/3",
+                "temperature_edge_celsius | temperature_junction_celsius | temperature_memory_celsius": "amdgpu hwmon, matched by label (edge / junction / mem), never by index",
                 "temperature_vrm_gfx_celsius | temperature_vrm_soc_celsius | temperature_vrm_mem_celsius": "voltage-regulator temperatures from gpu_metrics (absent when the table doesn't report them)",
                 "power_draw_watts | power_cap_watts": "hwmon power1",
                 "core_clock_mhz | memory_clock_mhz": "mean across the sample window (the clock changes every few ms, 0 when gated)",

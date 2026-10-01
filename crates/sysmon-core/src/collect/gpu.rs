@@ -153,10 +153,16 @@ pub fn parse_gpu_metrics(blob: &[u8]) -> Option<GpuMetrics> {
 /// back to back). Against an independent 100 Hz poll, 20/s reached
 /// 0.09 σ RMS error at 1.6% of a core; 5/s reaches 0.27 σ at 0.4%.
 /// One read alone is ~1 σ off. The thread only runs while someone
-/// samples: no `take` for 5 s and it parks until the next one, so an
-/// idle `sysmon serve` still costs nothing.
+/// samples: no `take` for 5 s and it parks, with no timer, until the
+/// next `take` or the collector's drop, so an idle `sysmon serve`
+/// costs nothing. A window that outlived the park is refused (W3):
+/// its reads would cover only its first 5 s.
+///
+/// The last parsed table is kept too, so the VRM temperatures cost no
+/// second SMU wake on the sampling path.
 struct ClockPoller {
     shared: std::sync::Arc<(std::sync::Mutex<ClockSums>, std::sync::Condvar)>,
+    idle_after: std::time::Duration,
 }
 
 #[derive(Default)]
@@ -166,6 +172,10 @@ struct ClockSums {
     gfx_reads: u32,
     uclk_reads: u32,
     last_take: Option<std::time::Instant>,
+    latest: Option<GpuMetrics>,
+    closed: bool,
+    /// Loop turns of the poller thread, for the idle-cost test.
+    turns: u64,
 }
 
 impl ClockPoller {
@@ -173,57 +183,88 @@ impl ClockPoller {
     const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
     fn spawn(metrics_path: PathBuf) -> Option<ClockPoller> {
+        Self::spawn_with(metrics_path, Self::PERIOD, Self::IDLE_AFTER)
+    }
+
+    fn spawn_with(metrics_path: PathBuf, period: std::time::Duration, idle_after: std::time::Duration) -> Option<ClockPoller> {
         let shared = std::sync::Arc::new((std::sync::Mutex::new(ClockSums::default()), std::sync::Condvar::new()));
-        let worker = std::sync::Arc::downgrade(&shared);
+        let worker = shared.clone();
         std::thread::Builder::new()
             .name("sysmon-gpu-clock".to_string())
             .spawn(move || {
-                // Ends when the collector (the only strong owner) drops.
-                while let Some(shared) = worker.upgrade() {
-                    let (lock, wake) = &*shared;
-                    {
-                        let mut sums = lock.lock().unwrap_or_else(|p| p.into_inner());
-                        let idle = sums.last_take.is_none_or(|at| at.elapsed() > Self::IDLE_AFTER);
-                        if idle {
-                            // Park; `take` wakes us. The timeout lets a
-                            // dropped collector end the thread.
-                            let _ = wake.wait_timeout(sums, std::time::Duration::from_secs(2));
-                            continue;
-                        }
-                        if let Some(metrics) = fs::read(&metrics_path).ok().as_deref().and_then(parse_gpu_metrics) {
-                            if let Some(mhz) = metrics.average_gfxclk_mhz {
-                                sums.gfx_sum += f64::from(mhz);
-                                sums.gfx_reads += 1;
-                            }
-                            if let Some(mhz) = metrics.average_uclk_mhz {
-                                sums.uclk_sum += f64::from(mhz);
-                                sums.uclk_reads += 1;
-                            }
-                        }
+                let (lock, wake) = &*worker;
+                loop {
+                    let mut sums = lock.lock().unwrap_or_else(|p| p.into_inner());
+                    sums.turns += 1;
+                    if sums.closed {
+                        return; // the collector dropped
                     }
-                    drop(shared);
-                    std::thread::sleep(Self::PERIOD);
+                    if sums.last_take.is_none_or(|at| at.elapsed() > idle_after) {
+                        // Park until a take or the drop notifies.
+                        drop(wake.wait(sums));
+                        continue;
+                    }
+                    if let Some(metrics) = fs::read(&metrics_path).ok().as_deref().and_then(parse_gpu_metrics) {
+                        if let Some(mhz) = metrics.average_gfxclk_mhz {
+                            sums.gfx_sum += f64::from(mhz);
+                            sums.gfx_reads += 1;
+                        }
+                        if let Some(mhz) = metrics.average_uclk_mhz {
+                            sums.uclk_sum += f64::from(mhz);
+                            sums.uclk_reads += 1;
+                        }
+                        sums.latest = Some(metrics);
+                    }
+                    // Sleep on the condvar, not the clock: a drop ends
+                    // the thread at once.
+                    drop(wake.wait_timeout(sums, period));
                 }
             })
             .ok()?;
-        Some(ClockPoller { shared })
+        Some(ClockPoller { shared, idle_after })
     }
 
-    /// The window's mean clocks and read count; resets the window.
+    /// The last table the poller parsed (None before its first read).
+    fn latest(&self) -> Option<GpuMetrics> {
+        self.shared.0.lock().unwrap_or_else(|p| p.into_inner()).latest
+    }
+
+    #[cfg(test)]
+    fn turns(&self) -> u64 {
+        self.shared.0.lock().unwrap_or_else(|p| p.into_inner()).turns
+    }
+
+    /// The window's mean clocks and read count; resets the window. A
+    /// window longer than the idle limit reports no reads: the poller
+    /// parked partway through it.
     fn take(&self) -> (Option<f64>, Option<f64>, u32) {
         let (lock, wake) = &*self.shared;
         let mut sums = lock.lock().unwrap_or_else(|p| p.into_inner());
-        let was_idle = sums.last_take.is_none_or(|at| at.elapsed() > Self::IDLE_AFTER);
+        let was_idle = sums.last_take.is_none_or(|at| at.elapsed() > self.idle_after);
         let mean = |sum: f64, reads: u32| (reads > 0).then(|| (sum / f64::from(reads)).round());
-        let result = (mean(sums.gfx_sum, sums.gfx_reads), mean(sums.uclk_sum, sums.uclk_reads), sums.gfx_reads);
+        let result = if was_idle {
+            (None, None, 0)
+        } else {
+            (mean(sums.gfx_sum, sums.gfx_reads), mean(sums.uclk_sum, sums.uclk_reads), sums.gfx_reads)
+        };
         *sums = ClockSums {
             last_take: Some(std::time::Instant::now()),
+            latest: sums.latest,
+            turns: sums.turns,
             ..Default::default()
         };
         if was_idle {
             wake.notify_one();
         }
         result
+    }
+}
+
+impl Drop for ClockPoller {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.shared;
+        lock.lock().unwrap_or_else(|p| p.into_inner()).closed = true;
+        wake.notify_one();
     }
 }
 
@@ -354,11 +395,10 @@ impl GpuCollector {
         }
 
         // Clocks: the window's mean from the poller (G8). The first
-        // sample of a window has no reads yet and keeps hwmon's
-        // instant value, labelled as such.
-        if let Some((core, memory, reads)) = self.clocks.as_ref().map(ClockPoller::take)
-            && reads > 0
-        {
+        // sample of a window (or one after a park) has no reads and
+        // keeps hwmon's instant value, labelled as such.
+        let (core, memory, reads) = self.clocks.as_ref().map_or((None, None, 0), ClockPoller::take);
+        if reads > 0 {
             snapshot.core_clock_mhz = core.or(snapshot.core_clock_mhz);
             snapshot.memory_clock_mhz = memory.or(snapshot.memory_clock_mhz);
             snapshot.clock_source = Some(format!("mean of {reads} reads"));
@@ -366,9 +406,16 @@ impl GpuCollector {
             snapshot.clock_source = Some("instant read".to_string());
         }
         // The VRM temperatures move slowly; one read is honest (G12).
-        if self.clocks.is_some()
-            && let Some(metrics) = fs::read(device.join("gpu_metrics")).ok().as_deref().and_then(parse_gpu_metrics)
-        {
+        // A warm poller read the table within the last 200 ms, so use
+        // its copy; only a cold window costs its own SMU wake.
+        let table = self.clocks.as_ref().and_then(|clocks| {
+            if reads > 0 {
+                clocks.latest()
+            } else {
+                fs::read(device.join("gpu_metrics")).ok().as_deref().and_then(parse_gpu_metrics)
+            }
+        });
+        if let Some(metrics) = table {
             snapshot.temperature_vrm_gfx_celsius = metrics.temperature_vrgfx_celsius.map(f32::from);
             snapshot.temperature_vrm_soc_celsius = metrics.temperature_vrsoc_celsius.map(f32::from);
             snapshot.temperature_vrm_mem_celsius = metrics.temperature_vrmem_celsius.map(f32::from);
@@ -586,6 +633,63 @@ mod tests {
     /// decoded by hand against `struct gpu_metrics_v1_3`
     /// (kgd_pp_interface.h): temps at 0x04.., averages at 0x28..
     const NAVI48_V1_3: &[u8] = include_bytes!("fixtures/gpu_metrics_v1_3_navi48.bin");
+
+    fn poller_on_fixture(tag: &str, period_ms: u64, idle_after_ms: u64) -> (ClockPoller, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("sysmon-poller-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gpu_metrics");
+        fs::write(&path, NAVI48_V1_3).unwrap();
+        let poller = ClockPoller::spawn_with(
+            path,
+            std::time::Duration::from_millis(period_ms),
+            std::time::Duration::from_millis(idle_after_ms),
+        )
+        .expect("poller");
+        (poller, dir)
+    }
+
+    #[test]
+    fn a_window_after_a_park_is_not_a_partial_mean() {
+        // W3: after IDLE_AFTER with no take the poller parks. The next
+        // take spans the whole quiet stretch, but its reads cover only
+        // the first IDLE_AFTER of it: a mean of part of the window,
+        // labelled as the window's. It must be refused (None reads).
+        let (poller, dir) = poller_on_fixture("park", 10, 150);
+        let _ = poller.take();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let (_, _, reads) = poller.take();
+        let _ = fs::remove_dir_all(dir);
+        assert_eq!(reads, 0, "a window that outlived the poller's idle limit reported {reads} reads");
+    }
+
+    #[test]
+    fn a_window_while_warm_is_the_mean_of_its_reads() {
+        let (poller, dir) = poller_on_fixture("warm", 10, 5_000);
+        let _ = poller.take();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let (core, _, reads) = poller.take();
+        let _ = fs::remove_dir_all(dir);
+        assert!(reads >= 5, "only {reads} reads in 120 ms at 10 ms");
+        assert_eq!(core, Some(725.0), "the fixture's average_gfxclk");
+    }
+
+    #[test]
+    fn the_poller_shares_its_last_table_and_sleeps_when_parked() {
+        // VRM temps come from the poller's last parse, not a second
+        // SMU wake on the sampling path (Reviewer B #9); a parked
+        // poller does no periodic reads at all (#10).
+        let (poller, dir) = poller_on_fixture("share", 10, 50);
+        let _ = poller.take();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let latest = poller.latest().expect("a parsed table");
+        assert_eq!(latest.temperature_vrmem_celsius, Some(40));
+        std::thread::sleep(std::time::Duration::from_millis(150)); // parked now
+        let parked_turns = poller.turns();
+        std::thread::sleep(std::time::Duration::from_millis(2_300));
+        let after = poller.turns();
+        let _ = fs::remove_dir_all(dir);
+        assert_eq!(after, parked_turns, "a parked poller kept waking");
+    }
 
     #[test]
     fn gpu_metrics_v1_3_reads_the_firmware_averages() {
