@@ -994,7 +994,10 @@ fn disks_card(ui: &mut Ui, cx: &mut CardContext) {
                             .monospace()
                             .size(10.5),
                     )
-                    .on_hover_text("share of the window the disk was busy");
+                    .on_hover_text(
+                        "share of the window this partition had I/O in flight \
+                         (iostat's %util for the same partition)",
+                    );
                 }
             });
         });

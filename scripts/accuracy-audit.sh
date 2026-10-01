@@ -101,9 +101,11 @@ audit_phase() {
     local ours_cpu mp_cpu mp_iowait ours_iowait tap_file
     tap_file="$(mktemp)"
     ("${bin}" tap cpu -i 2 2>/dev/null | head -2 | tail -1 >"${tap_file}") &
+    local tap_pid=$!
     read -r mp_cpu mp_iowait < <(LC_ALL=C mpstat 2 1 \
       | awk '/^Average:/ && $2=="all" {print 100-$NF-$6, $6}')
-    wait
+    # Its own pid: a bare `wait` would also wait out the load generator.
+    wait "${tap_pid}"
     ours_cpu="$(jq -r .cpu.overall_percent "${tap_file}")"
     ours_iowait="$(jq -r '.cpu.iowait_percent // "absent"' "${tap_file}")"
     rm -f "${tap_file}"
@@ -122,10 +124,11 @@ audit_phase() {
   local cpu_file
   cpu_file="$(mktemp)"
   ("${bin}" tap cpu -i 2 2>/dev/null | head -2 | tail -1 >"${cpu_file}") &
+  local cpu_tap_pid=$!
   ts_out="$(root turbostat --quiet --Summary --show Busy%,Bzy_MHz,Avg_MHz --interval 2 \
     --num_iterations 1 2>/dev/null | awk 'NR==1 {for (i=1;i<=NF;i++) col[$i]=i; next}
       NR==2 {print $col["Bzy_MHz"], $col["Avg_MHz"]}')"
-  wait
+  wait "${cpu_tap_pid}"
   ours_mean="$(jq -r .cpu.frequency_mhz "${cpu_file}")"
   ours_peak="$(jq -r '.cpu.frequency_busy_mhz // "absent"' "${cpu_file}")"
   rm -f "${cpu_file}"
@@ -232,11 +235,14 @@ audit_phase() {
   ps_count="$(ps -e --no-headers | wc -l)"
   record P0 "${phase}" "process census" "${ours_count}" "${ps_count}" "ps -e" \
     "$(within "${ours_count}" "${ps_count}" 50)" "±50 spawn churn"
-  local generic
+  local generic offenders
   generic="$(jq '[.processes[] | select((.display_name // .name)|test("^(MainThread|Main Thread|GMainThread|node|python3?(\\.[0-9]+)?)$"))
     | select(.command_line != "")] | length' <<<"${snap}")"
+  offenders="$(jq -r '[.processes[] | select((.display_name // .name)|test("^(MainThread|Main Thread|GMainThread|node|python3?(\\.[0-9]+)?)$"))
+    | select(.command_line != "") | "\(.pid): \(.command_line[0:120])"] | join(" | ")' <<<"${snap}")"
   record P2 "${phase}" "processes shown by a thread or bare interpreter name" "${generic}" "0" "jq over probe" \
-    "$([ "${generic}" = 0 ] && echo pass || echo fail)" "comm 'MainThread' / 'python3' must resolve to the program"
+    "$([ "${generic}" = 0 ] && echo pass || echo fail)" \
+    "comm 'MainThread' / 'python3' must resolve to the program${offenders:+; offenders: ${offenders}}"
 
   # ── network ────────────────────────────────────────────────────────
   local ours_rx dev_rx
@@ -256,9 +262,73 @@ if have stress-ng; then
   stress_pid=$!
   sleep 4
   audit_phase load
+  # Every "load" row must have been measured under load: if anything in
+  # the phase waited on stress-ng (a bare `wait` does), the rows after
+  # it were idle readings wearing a load label.
+  load_alive="$(kill -0 "${stress_pid}" 2>/dev/null && echo running || echo exited)"
+  record L1 load "stress-ng still running when the load phase ends" "${load_alive}" "running" "kill -0" \
+    "$([ "${load_alive}" = running ] && echo pass || echo fail)" "no load row is an idle reading"
   wait "${stress_pid}" 2>/dev/null
 else
   skip LOAD load "load phase" "stress-ng" "stress-ng"
+fi
+
+# ── disk + per-process IO (D3–D6, P6b) ───────────────────────────────
+# A known writer: fio, direct I/O (no page cache, so the bytes hit the
+# device inside the window), bounded by size and time, in the audit's
+# own output dir; fio unlinks its file when done. Our partition row and
+# the writer's process row are compared with iostat (same partition,
+# same window) and pidstat -d (same pid, same window).
+if have iostat && have pidstat && have fio; then
+  io_dir="${out}/io-scratch"
+  mkdir -p "${io_dir}"
+  io_partition="$(basename "$(readlink -f "$(df --output=source "${io_dir}" | tail -1)")")"
+  io_mount="$(df --output=target "${io_dir}" | tail -1)"
+  # 8 s at a fixed 64 MB/s: steady across both 2 s windows, and gentle
+  # enough for spinning rust.
+  fio --name=sysmon-audit --directory="${io_dir}" --rw=write --bs=1M --size=1G \
+    --direct=1 --rate=64m --time_based --runtime=8 --unlink=1 \
+    --output=/dev/null >/dev/null 2>&1 &
+  fio_parent=$!
+  sleep 1.5
+  # fio forks a worker; the worker is the one doing the I/O.
+  writer_pid="$(pgrep -P "${fio_parent}" -n fio || echo "${fio_parent}")"
+  io_file="$(mktemp)"
+  ("${bin}" tap disks processes -i 2 2>/dev/null | head -2 | tail -1 >"${io_file}") &
+  tap_pid=$!
+  iostat_line="$(LC_ALL=C iostat -dxyk "${io_partition}" 2 1 | awk -v d="${io_partition}" '$1==d {print}')"
+  pidstat_wr="$(LC_ALL=C pidstat -d -p "${writer_pid}" 2 1 2>/dev/null | awk '/^Average:/ && $3 ~ /^[0-9]+$/ {print $5}')"
+  wait "${tap_pid}" 2>/dev/null
+  wait "${fio_parent}" 2>/dev/null
+  rmdir "${io_dir}" 2>/dev/null || true
+  if [ -s "${io_file}" ] && [ -n "${iostat_line}" ]; then
+    # iostat -x columns by header name (the order moved between sysstat versions).
+    hdr="$(LC_ALL=C iostat -dxyk "${io_partition}" 1 1 | awk '/^Device/ {print; exit}')"
+    io_wkb="$(awk -v h="${hdr}" -v l="${iostat_line}" 'BEGIN {n=split(h,H); split(l,L); for (i=1;i<=n;i++) if (H[i]=="wkB/s") print L[i]}')"
+    io_util="$(awk -v h="${hdr}" -v l="${iostat_line}" 'BEGIN {n=split(h,H); split(l,L); for (i=1;i<=n;i++) if (H[i]=="%util") print L[i]}')"
+    ours_wbps="$(jq -r --arg m "${io_mount}" '.disks[] | select(.mount_point==$m) | .write_bps' "${io_file}")"
+    ours_util="$(jq -r --arg m "${io_mount}" '.disks[] | select(.mount_point==$m) | .util_percent' "${io_file}")"
+    ours_proc_w="$(jq -r --argjson p "${writer_pid}" '.processes[] | select(.pid==$p) | .disk_write_bps // "absent"' "${io_file}")"
+    auth_bps="$(awk -v k="${io_wkb}" 'BEGIN {printf "%.0f", k*1024}')"
+    record D3 io "partition write rate (B/s)" "${ours_wbps}" "${auth_bps}" "iostat -dxyk ${io_partition} 2 1 wkB/s" \
+      "$(within "${ours_wbps}" "${auth_bps}" "$(awk -v a="${auth_bps}" 'BEGIN {print a*0.25 + 1048576}')")" \
+      "fio direct-I/O writer at 64 MB/s, concurrent 2 s windows; ±25% + 1 MiB/s"
+    record D5 io "partition util %" "${ours_util}" "${io_util}" "iostat %util (same partition)" \
+      "$(within "${ours_util}" "${io_util}" 20)" "partition io_ticks share; ±20 pp across two windows"
+    if [ -n "${pidstat_wr}" ]; then
+      auth_proc="$(awk -v k="${pidstat_wr}" 'BEGIN {printf "%.0f", k*1024}')"
+      record P6b io "per-process disk write (B/s)" "${ours_proc_w}" "${auth_proc}" "pidstat -d -p <fio writer> kB_wr/s" \
+        "$([ "${ours_proc_w}" = absent ] && echo fail || within "${ours_proc_w}" "${auth_proc}" "$(awk -v a="${auth_proc}" 'BEGIN {print a*0.25 + 1048576}')")" \
+        "/proc/pid/io write_bytes, not wchar; ±25% + 1 MiB/s"
+    else
+      skip P6b io "per-process disk write" "pidstat gave no row for the writer" "sysstat"
+    fi
+  else
+    skip D3 io "disk IO" "iostat/tap produced no row" "sysstat"
+  fi
+  rm -f "${io_file}"
+else
+  skip D3 io "disk + per-process IO" "iostat, pidstat, fio" "sysstat fio"
 fi
 
 failed="$(jq -s '[.[] | select(.verdict=="fail")] | length' "${results}")"

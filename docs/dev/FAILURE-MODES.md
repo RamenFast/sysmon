@@ -68,6 +68,11 @@ and `tests/accuracy.rs` are the checks.*
 | D1 | a mounted filesystem missing from the GUI but present on the wire | audit: GUI-visible set == probe set (fuseblk NTFS on nvme0n1p1) |
 | D2 | used vs available confusion (df "used" vs root-reserved blocks) | existing df test |
 | D3 | read/write rates per partition vs per whole disk | audit vs iostat |
+| D4 | rates are per *partition* (what's mounted), iostat's default rows are per device: comparing / to `sdc` mixes /boot/efi in | audit compares against `iostat -dxyk <partition>`, the same partition row, same window |
+| D5 | util% from a partition's own `io_ticks`: on this kernel a partition's ticks (sdc2 272 s) can exceed its parent device's (sdc 251 s), so partition util% is not the device's busy share | stated, not hidden: audit compares partition util% to iostat's partition `%util` (same counter), and the card's hover says "share of the window this partition had I/O in flight" |
+| D6 | a write burst lands between our two reads and iostat's | the audit runs `fio --direct=1 --rate=64m` for 8 s across both windows, so both see a steady rate; tolerance 25% of the authority + 1 MiB/s |
+| P6b | per-process disk read/write from `/proc/pid/io` misread (rchar/wchar are syscall bytes incl. page cache; read_bytes/write_bytes are storage) | audit: our rate for fio's writer process vs `pidstat -d` kB_wr/s for that pid, same window |
+| L1 | the audit's "load" rows were measured after the load ended (a bare `wait` in a phase waits for the backgrounded `stress-ng` too, so every row after it is an idle reading under a load label; 3.1 runs 1–3 had this) | audit row L1: `stress-ng` must still be running when the load phase finishes; each concurrent window waits on its own pid |
 
 ## Processes
 

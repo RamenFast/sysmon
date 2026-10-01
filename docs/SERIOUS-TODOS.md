@@ -110,12 +110,12 @@ not confident about?" — each answer lands here as a real TODO.*
 
 ## From the v3.1 accuracy round (2026-10-01)
 
-- **[test] Per-process CPU, disk IO and disk util% have no scripted
-  authority.** The audit compares system-wide CPU to `mpstat` but not
-  per-process CPU to `pidstat -u`, per-process IO to `pidstat -d`, or
-  disk util% to `iostat -x`. 3.1 fixed the CPU window (F12) and Worker
-  A checked pidstat by hand; nobody checked the other two. Add three
-  audit rows (sysstat is installed).
+- **[fixed] Disk rate, disk util% and per-process disk writes now have
+  scripted authorities** (audit stage `io`: a 64 MB/s fio direct-I/O
+  writer vs `iostat -dxyk <partition>` and `pidstat -d -p <writer>`,
+  same windows; first run 67.3 vs 67.1 MB/s, util 14.3 vs 13.7%,
+  per-process 67.5 vs 67.1 MB/s). Still unscripted: per-process *CPU*
+  vs `pidstat -u` (3.1 fixed its window, Worker A checked by hand).
 - **[watch] GPU negative cache (G14/G15).** A process that starts
   using the GPU stays invisible for up to 5 samples (10 s at 2 s), and
   the cache is keyed by pid, not (pid, starttime). Bounded and rare,
