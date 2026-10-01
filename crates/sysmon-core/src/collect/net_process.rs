@@ -114,8 +114,9 @@ impl NetlinkSocket {
         Ok(NetlinkSocket { fd })
     }
 
-    /// One SOCK_DIAG_BY_FAMILY dump request.
-    fn request(&self, family: u8, protocol: u8) -> std::io::Result<()> {
+    /// One SOCK_DIAG_BY_FAMILY dump request for the sockets whose
+    /// TCP state bit is set in `states` (bit n = state n).
+    fn request(&self, family: u8, protocol: u8, states: u32) -> std::io::Result<()> {
         let mut packet = Vec::with_capacity(72);
         packet.extend_from_slice(&72u32.to_ne_bytes()); // nlmsg_len
         packet.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
@@ -127,7 +128,7 @@ impl NetlinkSocket {
         packet.push(protocol);
         packet.push(EXT_INFO_BIT);
         packet.push(0); // pad
-        packet.extend_from_slice(&u32::MAX.to_ne_bytes()); // all states
+        packet.extend_from_slice(&states.to_ne_bytes());
         packet.extend_from_slice(&[0u8; 48]); // sockid: wildcard
         debug_assert_eq!(packet.len(), 72);
 
@@ -275,20 +276,32 @@ fn parse_diag_message(payload: &[u8], protocol: &'static str) -> Option<DiagSock
     })
 }
 
-/// Dump every TCP (and optionally UDP) socket in the namespace.
-fn dump_sockets(include_udp: bool) -> std::io::Result<Vec<DiagSocket>> {
+/// Every TCP state.
+const ALL_STATES: u32 = u32::MAX;
+/// States that can carry traffic: ESTABLISHED (1), SYN_SENT (2),
+/// SYN_RECV (3), FIN_WAIT1 (4), FIN_WAIT2 (5), CLOSE_WAIT (8),
+/// LAST_ACK (9), CLOSING (11). TIME_WAIT (6) sockets have no owner
+/// and no counters, and a busy desktop holds hundreds; LISTEN (10)
+/// moves no bytes.
+const LIVE_STATES: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 8) | (1 << 9) | (1 << 11);
+
+/// The TCP (and, for the full connection table, UDP) sockets. Rate
+/// sampling asks the kernel for live states only; the connection
+/// table is the whole picture.
+fn dump_sockets(full_table: bool) -> std::io::Result<Vec<DiagSocket>> {
     let socket = NetlinkSocket::open()?;
     let mut sockets = Vec::new();
-    let mut dumps: Vec<(u8, u8, &'static str)> = vec![
-        (libc::AF_INET as u8, libc::IPPROTO_TCP as u8, "tcp"),
-        (libc::AF_INET6 as u8, libc::IPPROTO_TCP as u8, "tcp6"),
+    let tcp_states = if full_table { ALL_STATES } else { LIVE_STATES };
+    let mut dumps: Vec<(u8, u8, &'static str, u32)> = vec![
+        (libc::AF_INET as u8, libc::IPPROTO_TCP as u8, "tcp", tcp_states),
+        (libc::AF_INET6 as u8, libc::IPPROTO_TCP as u8, "tcp6", tcp_states),
     ];
-    if include_udp {
-        dumps.push((libc::AF_INET as u8, libc::IPPROTO_UDP as u8, "udp"));
-        dumps.push((libc::AF_INET6 as u8, libc::IPPROTO_UDP as u8, "udp6"));
+    if full_table {
+        dumps.push((libc::AF_INET as u8, libc::IPPROTO_UDP as u8, "udp", ALL_STATES));
+        dumps.push((libc::AF_INET6 as u8, libc::IPPROTO_UDP as u8, "udp6", ALL_STATES));
     }
-    for (family, protocol, label) in dumps {
-        socket.request(family, protocol)?;
+    for (family, protocol, label, states) in dumps {
+        socket.request(family, protocol, states)?;
         socket.drain(|payload| {
             if let Some(parsed) = parse_diag_message(payload, label) {
                 sockets.push(parsed);
@@ -303,22 +316,38 @@ fn dump_sockets(include_udp: bool) -> std::io::Result<Vec<DiagSocket>> {
 /// Resolve socket inodes to pids by reading /proc/<pid>/fd symlinks.
 /// Two passes: pids already known to own sockets, then a full sweep
 /// only if inodes remain unresolved.
+///
+/// Sockets owned by other users' processes can never resolve (their
+/// fd tables are unreadable), and there are dozens at any moment —
+/// without a memory of that, every sample paid a full sweep of every
+/// process's fds (~60 ms on a 600-process desktop) to learn nothing
+/// new. An inode a full sweep failed to place is not looked for again
+/// until FULL_SWEEP_COOLDOWN has passed; a genuinely new socket still
+/// triggers a sweep immediately.
 struct InodeResolver {
     inode_to_pid: HashMap<u32, i32>,
     socket_pids: HashSet<i32>,
+    unresolvable: HashSet<u32>,
+    last_full_sweep: Option<std::time::Instant>,
 }
+
+const FULL_SWEEP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
+const FULL_SWEEP_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl InodeResolver {
     fn new() -> Self {
         InodeResolver {
             inode_to_pid: HashMap::new(),
             socket_pids: HashSet::new(),
+            unresolvable: HashSet::new(),
+            last_full_sweep: None,
         }
     }
 
     fn resolve(&mut self, wanted: &HashSet<u32>) {
         // Drop mappings for inodes that no longer exist.
         self.inode_to_pid.retain(|inode, _| wanted.contains(inode));
+        self.unresolvable.retain(|inode| wanted.contains(inode));
 
         let mut unresolved: HashSet<u32> = wanted
             .iter()
@@ -326,6 +355,13 @@ impl InodeResolver {
             .copied()
             .collect();
         if unresolved.is_empty() {
+            return;
+        }
+        // Nothing new to place and the unplaceable set isn't due for a
+        // re-check: no fd needs reading this sample.
+        let has_new = unresolved.iter().any(|inode| !self.unresolvable.contains(inode));
+        let since_sweep = self.last_full_sweep.map(|at| at.elapsed());
+        if !has_new && since_sweep.is_some_and(|elapsed| elapsed < FULL_SWEEP_COOLDOWN) {
             return;
         }
 
@@ -340,11 +376,22 @@ impl InodeResolver {
                 self.socket_pids.remove(&pid);
             }
         }
-        if unresolved.is_empty() {
+
+        // Pass 2: full sweep (~30 ms here: every fd of every process).
+        // A new unplaced socket earns one after FULL_SWEEP_MIN_GAP —
+        // its owner usually turns up in pass 1 first, and its rate is
+        // never lost, only attributed a sample or two later; sockets a
+        // sweep already failed to place wait out FULL_SWEEP_COOLDOWN.
+        let has_new = unresolved.iter().any(|inode| !self.unresolvable.contains(inode));
+        let due = match since_sweep {
+            None => true,
+            Some(elapsed) if has_new => elapsed >= FULL_SWEEP_MIN_GAP,
+            Some(elapsed) => elapsed >= FULL_SWEEP_COOLDOWN,
+        };
+        if unresolved.is_empty() || !due {
             return;
         }
-
-        // Pass 2: full sweep.
+        self.last_full_sweep = Some(std::time::Instant::now());
         let Ok(entries) = fs::read_dir("/proc") else {
             return;
         };
@@ -362,6 +409,7 @@ impl InodeResolver {
             };
             self.scan_pid(pid, &mut unresolved);
         }
+        self.unresolvable = unresolved;
     }
 
     /// Scan one pid's fds; true if the pid was readable.
@@ -749,13 +797,20 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
 
-        let sockets = dump_sockets(false).expect("sock_diag dump");
+        let sockets = dump_sockets(true).expect("sock_diag dump");
         let mine = sockets
             .iter()
             .find(|s| s.protocol == "tcp" && s.local.ends_with(&format!(":{port}")))
-            .expect("own listener in dump");
+            .expect("own listener in the full connection table");
         assert_eq!(tcp_state_name(mine.state), "listen");
         assert!(mine.inode > 0);
+        // The rate-only dump asks the kernel for traffic-capable states
+        // and must not pay for listeners (or TIME_WAIT churn).
+        let live = dump_sockets(false).expect("sock_diag live dump");
+        assert!(
+            !live.iter().any(|s| s.local.ends_with(&format!(":{port}"))),
+            "a listener moves no bytes and must not be in the rate dump"
+        );
 
         let mut resolver = InodeResolver::new();
         let wanted: HashSet<u32> = [mine.inode].into_iter().collect();

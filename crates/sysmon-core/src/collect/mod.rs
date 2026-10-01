@@ -61,13 +61,13 @@ impl Sampler {
         Sampler {
             previous_sample_at: None,
             cpu,
-            memory: memory::MemoryCollector,
+            memory: memory::MemoryCollector::new(),
             gpu: gpu::GpuCollector::new(),
             disk: disk::DiskCollector::new(),
             net: net::NetCollector::new(),
             net_process: net_process::NetProcessCollector::new(options.enable_nethogs, 1),
             process: process::ProcessCollector::new(),
-            sensors: sensors::SensorsCollector,
+            sensors: sensors::SensorsCollector::new(),
             boot_ts,
         }
     }
@@ -97,19 +97,24 @@ impl Sampler {
         if wants.system {
             snapshot.system = Some(self.system_info());
         }
-        if wants.sensors || wants.cpu {
-            snapshot.sensors = Some(self.sensors.collect());
+        if wants.sensors {
+            snapshot.sensors = Some(self.sensors.collect(now));
         }
         if wants.cpu {
             let mut cpu = self.cpu.collect(now);
-            cpu.temperature_celsius = snapshot
-                .sensors
-                .as_ref()
-                .and_then(sensors::SensorsCollector::cpu_temperature);
+            // The CPU card's temperature: from the full sweep when it
+            // ran, else read just the CPU chip (a full sweep asks every
+            // drive for SMART data — milliseconds the CPU card never
+            // needed).
+            let temperature = match &snapshot.sensors {
+                Some(sensors) => sensors::SensorsCollector::cpu_temperature(sensors),
+                None => self.sensors.cpu_temperature_only(now),
+            };
+            if let Some((celsius, source)) = temperature {
+                cpu.temperature_celsius = Some(celsius);
+                cpu.temperature_source = Some(source);
+            }
             snapshot.cpu = Some(cpu);
-        }
-        if !wants.sensors {
-            snapshot.sensors = None; // was only borrowed for the cpu temp
         }
         if wants.memory {
             snapshot.memory = Some(self.memory.collect());
@@ -125,12 +130,15 @@ impl Sampler {
         }
         if wants.processes {
             let mut records = self.process.collect(now, self.boot_ts);
-            // Merge per-process GPU usage into the process records.
+            // Merge per-process GPU usage into the process records
+            // (pid → index once, not a linear find per GPU client).
             if let Some(gpu) = &snapshot.gpu {
+                let index: std::collections::HashMap<i32, usize> =
+                    records.iter().enumerate().map(|(i, r)| (r.pid, i)).collect();
                 for usage in &gpu.processes {
-                    if let Some(record) = records.iter_mut().find(|r| r.pid == usage.pid) {
-                        record.gpu_busy_percent = usage.busy_percent;
-                        record.gpu_vram_bytes = usage.vram_bytes;
+                    if let Some(&i) = index.get(&usage.pid) {
+                        records[i].gpu_busy_percent = usage.busy_percent;
+                        records[i].gpu_vram_bytes = usage.vram_bytes;
                     }
                 }
             }

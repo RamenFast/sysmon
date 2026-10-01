@@ -168,7 +168,9 @@ fn own_rss_matches_ps() {
         .expect("own process record");
 
     let ps_rss = ps_rss_kib * 1024;
-    // 8 MiB or 10%: the test allocates while running.
+    // 8 MiB or 10%: the test allocates while running. (Since 3.1 the
+    // value comes from statm, the counter ps itself reads; before, the
+    // approximate stat field ran up to 6 MiB low on busy processes.)
     let tolerance = (ps_rss / 10).max(8 << 20);
     assert!(
         me.memory_rss_bytes.abs_diff(ps_rss) < tolerance,
@@ -408,4 +410,120 @@ fn sensor_channels_match_sysfs_files() {
     assert_eq!(fans, expected_fans, "one FanReading per readable fanN_input");
     assert_eq!(voltages, expected_voltages, "one VoltageReading per readable inN_input");
     assert_eq!(power, expected_power, "one PowerReading per readable power channel");
+
+    // Every reading names itself uniquely: four NVMe channels used to
+    // render as four identical "nvme0n1 · CT2000P3PSSD8" rows.
+    let mut identities: Vec<String> = sensors
+        .chips
+        .iter()
+        .flat_map(|chip| {
+            chip.temps.iter().map(move |t| {
+                format!("{}|{}|{}", chip.name, chip.device.as_deref().unwrap_or(""), t.label)
+            })
+        })
+        .collect();
+    let total = identities.len();
+    identities.sort();
+    identities.dedup();
+    assert_eq!(identities.len(), total, "two temperature readings share one identity");
+
+    // A limit no sensor could reach is a "not set" sentinel, never a
+    // reported threshold (NVMe: 65261.85 °C).
+    for chip in &sensors.chips {
+        for t in &chip.temps {
+            for limit in [t.max_celsius, t.crit_celsius].into_iter().flatten() {
+                assert!(limit < 200.0, "{} {}: absurd limit {limit} °C", chip.name, t.label);
+            }
+            // Plausibility is a pure function of the reading.
+            assert_eq!(t.plausible, sysmon_core::collect::sensors::temperature_is_plausible(t.celsius));
+        }
+    }
+}
+
+/// Installed RAM is the sum of the SMBIOS memory devices (udev's DMI
+/// export), and the hierarchy holds: usable (MemTotal) ≤ what the
+/// firmware hands the OS (memmap "System RAM") ≤ installed.
+#[test]
+fn installed_memory_matches_firmware_tables() {
+    let Ok(dmi) = std::fs::read_to_string("/run/udev/data/+dmi:id") else {
+        eprintln!("no udev DMI database here (VM/container) — skipping");
+        return;
+    };
+    let expected: u64 = dmi
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("E:MEMORY_DEVICE_")?;
+            let (key, value) = rest.split_once('=')?;
+            key.ends_with("_SIZE")
+                .then(|| key.split('_').nth(1) == Some("SIZE"))
+                .filter(|is_size| *is_size)
+                .and_then(|_| value.parse::<u64>().ok())
+        })
+        .sum();
+    let mut wants = Wants::none();
+    wants.memory = true;
+    let memory = sampled(wants, 0).memory.expect("memory");
+    if expected == 0 {
+        assert_eq!(memory.installed_bytes, None, "no modules listed → no claim");
+        return;
+    }
+    assert_eq!(memory.installed_bytes, Some(expected), "installed = Σ module sizes");
+
+    let mut system_ram = 0u64;
+    for entry in std::fs::read_dir("/sys/firmware/memmap").expect("memmap").flatten() {
+        let read = |file: &str| std::fs::read_to_string(entry.path().join(file)).unwrap();
+        if read("type").trim() == "System RAM" {
+            let start = u64::from_str_radix(read("start").trim().trim_start_matches("0x"), 16).unwrap();
+            let end = u64::from_str_radix(read("end").trim().trim_start_matches("0x"), 16).unwrap();
+            system_ram += end - start + 1;
+        }
+    }
+    assert!(memory.total_bytes <= system_ram, "usable {} > firmware RAM {system_ram}", memory.total_bytes);
+    assert!(system_ram <= expected, "firmware RAM {system_ram} > installed {expected}");
+}
+
+/// The card is never named by a bare PCI id ("Device 7551" — what a
+/// pci.ids older than the card says).
+#[test]
+fn gpu_has_a_real_name() {
+    let mut wants = Wants::none();
+    wants.gpu = true;
+    let gpu = sampled(wants, 0).gpu.expect("gpu");
+    if !gpu.available {
+        return;
+    }
+    let name = gpu.device_name.as_str();
+    let bare_id = name
+        .strip_prefix("Device ")
+        .is_some_and(|id| id.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!bare_id && !name.is_empty(), "GPU named by a bare id: {name:?}");
+}
+
+/// Busy + iowait ≤ 100, and iowait matches the kernel's own split
+/// over the same window, read independently.
+#[test]
+fn cpu_iowait_is_reported_apart_from_busy() {
+    let read = || -> (u64, u64) {
+        let stat = std::fs::read_to_string("/proc/stat").unwrap();
+        let fields: Vec<u64> = stat.lines().next().unwrap().split_ascii_whitespace().skip(1)
+            .map(|f| f.parse().unwrap()).collect();
+        (fields.iter().take(8).sum(), fields[4])
+    };
+    let mut wants = Wants::none();
+    wants.cpu = true;
+    let mut sampler = Sampler::new();
+    let _ = sampler.sample(wants);
+    let (total_before, iowait_before) = read();
+    std::thread::sleep(Duration::from_millis(800));
+    let cpu = sampler.sample(wants).cpu.expect("cpu");
+    let (total_after, iowait_after) = read();
+    let independent = (iowait_after - iowait_before) as f32 / (total_after - total_before).max(1) as f32 * 100.0;
+    assert!(cpu.overall_percent + cpu.iowait_percent <= 100.5);
+    // Adjacent, not identical windows: a disk-bound desktop moves
+    // iowait a few points between reads.
+    assert!(
+        (cpu.iowait_percent - independent).abs() < 10.0,
+        "iowait ours {} vs /proc/stat {independent}",
+        cpu.iowait_percent
+    );
 }

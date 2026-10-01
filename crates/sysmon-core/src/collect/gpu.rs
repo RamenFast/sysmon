@@ -155,7 +155,7 @@ impl GpuCollector {
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                     .unwrap_or_default();
                 self.hwmon_path = find_hwmon(&device);
-                self.device_name = query_marketing_name(&self.pci_address);
+                self.device_name = query_marketing_name(&self.pci_address, &device);
                 self.device_path = Some(device);
                 return;
             }
@@ -180,10 +180,27 @@ impl GpuCollector {
         snapshot.gtt_total_bytes = read_u64(device.join("mem_info_gtt_total")).unwrap_or(0);
 
         if let Some(hwmon) = &self.hwmon_path {
+            // Temperatures by their driver label: the channel order
+            // is not an ABI (an APU has only "edge"; some boards
+            // expose junction first).
             let milli = |name: &str| read_u64(hwmon.join(name)).map(|v| v as f32 / 1000.0);
-            snapshot.temperature_edge_celsius = milli("temp1_input");
-            snapshot.temperature_junction_celsius = milli("temp2_input");
-            snapshot.temperature_memory_celsius = milli("temp3_input");
+            let by_label = |wanted: &str, fallback: &str| {
+                (1..=8)
+                    .find(|index| {
+                        read_trimmed(hwmon.join(format!("temp{index}_label"))).as_deref()
+                            == Some(wanted)
+                    })
+                    .map(|index| format!("temp{index}_input"))
+                    .or_else(|| {
+                        // No labels at all (old kernels): the
+                        // documented amdgpu order.
+                        (!hwmon.join("temp1_label").exists()).then(|| fallback.to_string())
+                    })
+                    .and_then(|file| milli(&file))
+            };
+            snapshot.temperature_edge_celsius = by_label("edge", "temp1_input");
+            snapshot.temperature_junction_celsius = by_label("junction", "temp2_input");
+            snapshot.temperature_memory_celsius = by_label("mem", "temp3_input");
             let micro = |name: &str| read_u64(hwmon.join(name)).map(|v| v as f32 / 1e6);
             snapshot.power_draw_watts = micro("power1_average").or_else(|| micro("power1_input"));
             snapshot.power_cap_watts = micro("power1_cap");
@@ -323,35 +340,78 @@ fn find_hwmon(device: &Path) -> Option<PathBuf> {
     entries.into_iter().next()
 }
 
-/// lspci's human name for the card ("Radeon RX 6700/6700 XT/…"), or
-/// a generic fallback. Runs once at discovery.
-fn query_marketing_name(pci_address: &str) -> String {
-    let Some(slot) = pci_address.split_once(':').map(|(_, rest)| rest) else {
-        return "AMD GPU".to_string();
-    };
-    let output = Command::new("lspci").args(["-mm", "-s", slot]).output();
-    if let Ok(output) = output {
-        let text = String::from_utf8_lossy(&output.stdout);
-        // split('"') alternates unquoted/quoted — quoted fields are
-        // the odd indices: class, vendor, device, subvendor, …
-        let quoted: Vec<&str> = text
-            .split('"')
-            .skip(1)
-            .step_by(2)
-            .collect();
-        // Device is the 3rd quoted field; prefer the bracketed
-        // marketing name inside it.
-        if quoted.len() >= 3 {
-            let device_field = quoted[2];
-            if let (Some(open), Some(close)) = (device_field.find('['), device_field.rfind(']'))
-                && open < close
-            {
-                return device_field[open + 1..close].to_string();
-            }
-            return device_field.trim().to_string();
-        }
+/// The card's marketing name, best source first:
+///   1. lspci's pci.ids name ("Navi 48 [Radeon AI PRO R9700]" →
+///      the bracketed part) — skipped when pci.ids predates the card
+///      and lspci can only say "Device 7551";
+///   2. libdrm's amdgpu.ids (device id + revision → name), which the
+///      Mesa stack updates on its own schedule;
+///   3. "AMD GPU 1002:7551" — honest about what is known.
+///
+/// Runs once at discovery.
+fn query_marketing_name(pci_address: &str, device: &Path) -> String {
+    if let Some(name) = lspci_name(pci_address) {
+        return name;
     }
-    "AMD GPU".to_string()
+    let device_id = read_trimmed(device.join("device")).unwrap_or_default();
+    let revision = read_trimmed(device.join("revision")).unwrap_or_default();
+    if let Some(name) = fs::read_to_string(AMDGPU_IDS)
+        .ok()
+        .and_then(|ids| amdgpu_ids_name(&ids, &device_id, &revision))
+    {
+        return name;
+    }
+    let id = device_id.trim_start_matches("0x");
+    if id.is_empty() {
+        "AMD GPU".to_string()
+    } else {
+        format!("AMD GPU 1002:{id}")
+    }
+}
+
+const AMDGPU_IDS: &str = "/usr/share/libdrm/amdgpu.ids";
+
+fn lspci_name(pci_address: &str) -> Option<String> {
+    let slot = pci_address.split_once(':').map(|(_, rest)| rest)?;
+    let output = Command::new("lspci").args(["-mm", "-s", slot]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // split('"') alternates unquoted/quoted — quoted fields are the
+    // odd indices: class, vendor, device, subvendor, …
+    let device_field = text.split('"').skip(1).step_by(2).nth(2)?;
+    let name = match (device_field.find('['), device_field.rfind(']')) {
+        (Some(open), Some(close)) if open < close => &device_field[open + 1..close],
+        _ => device_field.trim(),
+    };
+    // A stale pci.ids knows the vendor but not the card.
+    let unknown = name.is_empty()
+        || name
+            .strip_prefix("Device ")
+            .is_some_and(|id| id.chars().all(|c| c.is_ascii_hexdigit()));
+    (!unknown).then(|| name.to_string())
+}
+
+/// amdgpu.ids rows: `7550,\tC0,\tAMD Radeon RX 9070 XT`. Exact
+/// device+revision first, else the first row for the device.
+pub fn amdgpu_ids_name(ids: &str, device_id: &str, revision: &str) -> Option<String> {
+    let device = device_id.trim_start_matches("0x").to_ascii_uppercase();
+    let revision = revision.trim_start_matches("0x").to_ascii_uppercase();
+    let rows: Vec<(String, String, String)> = ids
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut fields = line.split(',').map(str::trim);
+            Some((
+                fields.next()?.to_ascii_uppercase(),
+                fields.next()?.to_ascii_uppercase(),
+                fields.next()?.to_string(),
+            ))
+        })
+        .filter(|(id, _, _)| *id == device)
+        .collect();
+    rows.iter()
+        .find(|(_, rev, _)| *rev == revision)
+        .or_else(|| rows.first())
+        .map(|(_, _, name)| name.clone())
 }
 
 #[cfg(test)]
@@ -388,5 +448,16 @@ drm-engine-compute:	23456789 ns
         assert!(drm_usage_from_fdinfo(FDINFO_FIXTURE, "0000:09:00.0", &mut seen).is_some());
         // Same client id again — a dup'd fd must not double count.
         assert!(drm_usage_from_fdinfo(FDINFO_FIXTURE, "0000:09:00.0", &mut seen).is_none());
+    }
+
+    #[test]
+    fn amdgpu_ids_match_device_and_revision() {
+        let ids = "# List of AMDGPU IDs\n1.0.0\n7550,\tC0,\tAMD Radeon RX 9070 XT\n\
+                   7550,\tC3,\tAMD Radeon RX 9070\n7551,\tC0,\tAMD Radeon AI PRO R9700\n";
+        assert_eq!(amdgpu_ids_name(ids, "0x7550", "0xc3").as_deref(), Some("AMD Radeon RX 9070"));
+        assert_eq!(amdgpu_ids_name(ids, "0x7551", "0xc0").as_deref(), Some("AMD Radeon AI PRO R9700"));
+        // Unknown revision: the device's first row beats nothing.
+        assert_eq!(amdgpu_ids_name(ids, "0x7550", "0xff").as_deref(), Some("AMD Radeon RX 9070 XT"));
+        assert_eq!(amdgpu_ids_name(ids, "0x1234", "0x00"), None);
     }
 }
