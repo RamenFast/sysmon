@@ -195,7 +195,7 @@ Wayland path on a private headless sway). For any change to a number,
 `scripts/accuracy-audit.sh target/release/sysmon audit-out/<name>`
 compares every shown figure to `free`/`turbostat`/`mpstat`/`sensors`/
 `df`/DMI/`iostat`/`pidstat`, idle, under load and under a known disk
-writer (64 checks; 0 fail is the bar). List the
+writer (66 checks; 0 fail is the bar). List the
 ways a number could lie in `docs/dev/FAILURE-MODES.md` *before*
 writing its test. `docs/SERIOUS-TODOS.md` is the honest-uncertainty
 ledger and `FEEDBACK.md` is the session ledger Ben mines: append,

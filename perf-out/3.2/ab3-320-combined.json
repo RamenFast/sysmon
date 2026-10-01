@@ -1,19 +1,19 @@
 {
-  "version": "sysmon 3.1.0 (v3)",
+  "version": "sysmon 3.2.0 (v3)",
   "window_seconds": 20,
-  "processes_on_machine": 627,
+  "processes_on_machine": 645,
   "sampler": {
     "cpu_percent_of_one_core": 5.90,
-    "pss_kb": 6888,
-    "rss_kb": 10212
+    "pss_kb": 6962,
+    "rss_kb": 10400
   },
   "gui": {
-    "cpu_percent_of_one_core": 9.70,
-    "pss_kb": 93080,
-    "rss_kb": 154720,
+    "cpu_percent_of_one_core": 10.50,
+    "pss_kb": 93837,
+    "rss_kb": 155420,
     "renderer": "llvmpipe (LLVM 20.1.2, 256 bits) · Vulkan",
     "page": "performance",
     "cpu_graph": "combined"
   },
-  "probe_all_wall_ms_median": 1230
+  "probe_all_wall_ms_median": 1225
 }
