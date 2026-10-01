@@ -110,8 +110,13 @@ pub fn run_probe(arguments: &[String]) -> i32 {
                 enable_nethogs: false,
             });
             let _prime = sampler.sample(wants);
-            std::thread::sleep(Duration::from_millis(250));
-            match serde_json::to_value(sampler.sample(wants)) {
+            // Per-process CPU comes from 10 ms clock ticks, so the
+            // window sets the step size: 0.25 s moved in 4% jumps
+            // (3.1 audit F12). A full second makes one tick 1%; the
+            // system-wide sections are fine on the short window.
+            let window = if wants.processes { 1000 } else { 250 };
+            std::thread::sleep(Duration::from_millis(window));
+            match sampler.sample(wants).to_json_value() {
                 Ok(value) => (value, "direct"),
                 Err(serialize_error) => {
                     return envelope::fail(
@@ -184,11 +189,8 @@ pub fn run_tap(arguments: &[String]) -> i32 {
             let reader = BufReader::new(stream);
             for line in reader.lines() {
                 match line {
-                    Ok(line) => {
-                        if println_checked(&line).is_err() {
-                            return EXIT_OK; // consumer closed the pipe
-                        }
-                    }
+                    // A closed consumer ends the process with 0.
+                    Ok(line) => envelope::print_line(&line),
                     Err(_) => break,
                 }
             }
@@ -201,48 +203,14 @@ pub fn run_tap(arguments: &[String]) -> i32 {
     let _prime = sampler.sample(wants);
     loop {
         std::thread::sleep(Duration::from_secs_f64(interval));
-        let snapshot = sampler.sample(wants);
         // The same line shape either way — a consumer cannot tell
         // (and must not care) whether a live instance or this
-        // process sampled it. `event` per ruling R3.
-        //
-        // Spliced into the serialized text rather than round-tripped
-        // through serde_json::Value: going through Value re-types
-        // every f32 as f64, so `0.825` came back out as
-        // `0.824999988079071`. That is the same number, but it is not
-        // the same *bytes*, and this stream's numbers were exact
-        // before. A field added for self-identification has no
-        // business rewriting the readings.
-        let line = serde_json::to_string(&snapshot).map(|serialized| {
-            match serialized.strip_prefix('{') {
-                Some(rest) => format!(
-                    "{{\"event\":\"{}\",{rest}",
-                    control::SNAPSHOT_EVENT
-                ),
-                // A snapshot always serializes as an object; if that
-                // ever stops being true, emit it untouched rather
-                // than corrupt it.
-                None => serialized,
-            }
-        });
-        match line {
-            Ok(line) => {
-                if println_checked(&line).is_err() {
-                    return EXIT_OK;
-                }
-            }
+        // process sampled it.
+        match control::stream_line(sampler.sample(wants).to_json_value()) {
+            Ok(line) => envelope::print_line(&line),
             Err(_) => return EXIT_RUNTIME,
         }
     }
-}
-
-/// println! panics on EPIPE; a closed consumer is a normal way for a
-/// tap to end.
-fn println_checked(line: &str) -> std::io::Result<()> {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    writeln!(lock, "{line}")?;
-    lock.flush()
 }
 
 // -------------------------------------------------------------------- ctl
@@ -314,8 +282,8 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
         envelope::emit(&reply);
     } else if ok {
         match serde_json::to_string_pretty(&reply["result"]) {
-            Ok(pretty) => println!("{pretty}"),
-            Err(_) => println!("{}", reply["result"]),
+            Ok(pretty) => out!("{pretty}"),
+            Err(_) => out!("{}", reply["result"]),
         }
     } else {
         eprintln!("sysmon: {}", reply["error"].as_str().unwrap_or("error"));
@@ -340,8 +308,8 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
 pub fn run_schema(_arguments: &[String]) -> i32 {
     let schema = build_schema();
     match serde_json::to_string_pretty(&schema) {
-        Ok(pretty) => println!("{pretty}"),
-        Err(_) => println!("{schema}"),
+        Ok(pretty) => out!("{pretty}"),
+        Err(_) => out!("{schema}"),
     }
     EXIT_OK
 }
@@ -606,10 +574,10 @@ fn value_u64(value: &Value) -> u64 {
 /// ran `sysmon probe` without a pipe.
 fn render_human(snapshot: &Value, via: &str) {
     let units = Units::Decimal;
-    let line = |label: &str, value: String| println!("  {label:<14} {value}");
+    let line = |label: &str, value: String| out!("  {label:<14} {value}");
 
     if let Some(system) = snapshot.get("system").filter(|s| !s.is_null()) {
-        println!("system");
+        out!("system");
         line("hostname", system["hostname"].as_str().unwrap_or("?").to_string());
         line("kernel", system["kernel"].as_str().unwrap_or("?").to_string());
         line(
@@ -618,7 +586,7 @@ fn render_human(snapshot: &Value, via: &str) {
         );
     }
     if let Some(cpu) = snapshot.get("cpu").filter(|s| !s.is_null()) {
-        println!("cpu");
+        out!("cpu");
         let mut headline = format!(
             "{} across {} threads",
             units::format_percent(value_f64(&cpu["overall_percent"]) as f32),
@@ -643,7 +611,7 @@ fn render_human(snapshot: &Value, via: &str) {
         line("tasks", format!("{}", value_u64(&cpu["tasks_total"])));
     }
     if let Some(memory) = snapshot.get("memory").filter(|s| !s.is_null()) {
-        println!("memory");
+        out!("memory");
         line(
             "used",
             format!(
@@ -663,7 +631,7 @@ fn render_human(snapshot: &Value, via: &str) {
         );
     }
     if let Some(gpu) = snapshot.get("gpu").filter(|s| !s.is_null()) {
-        println!("gpu");
+        out!("gpu");
         if gpu["available"].as_bool() == Some(true) {
             line("device", gpu["device_name"].as_str().unwrap_or("?").to_string());
             let mut busy = units::format_percent(value_f64(&gpu["busy_percent"]) as f32);
@@ -687,7 +655,7 @@ fn render_human(snapshot: &Value, via: &str) {
         }
     }
     if let Some(network) = snapshot.get("network").filter(|s| !s.is_null()) {
-        println!("network");
+        out!("network");
         line(
             "rates",
             format!(
@@ -718,7 +686,7 @@ fn render_human(snapshot: &Value, via: &str) {
         }
     }
     if let Some(disks) = snapshot.get("disks").and_then(|d| d.as_array()) {
-        println!("disks");
+        out!("disks");
         for disk in disks {
             line(
                 disk["display_name"].as_str().unwrap_or("?"),
@@ -734,7 +702,7 @@ fn render_human(snapshot: &Value, via: &str) {
         }
     }
     if let Some(processes) = snapshot.get("processes").and_then(|p| p.as_array()) {
-        println!("processes ({} — top 5 by cpu)", processes.len());
+        out!("processes ({} — top 5 by cpu)", processes.len());
         let mut sorted: Vec<&Value> = processes.iter().collect();
         sorted.sort_by(|a, b| {
             value_f64(&b["cpu_percent"])
@@ -754,7 +722,7 @@ fn render_human(snapshot: &Value, via: &str) {
         }
     }
     if let Some(connections) = snapshot.get("connections").and_then(|c| c.as_array()) {
-        println!("connections ({})", connections.len());
+        out!("connections ({})", connections.len());
     }
-    println!("(window {:.2}s · via {via})", value_f64(&snapshot["interval_seconds"]));
+    out!("(window {:.2}s · via {via})", value_f64(&snapshot["interval_seconds"]));
 }

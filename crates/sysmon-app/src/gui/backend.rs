@@ -45,7 +45,7 @@ impl GuiBackend {
 
     fn filtered_snapshot(&self, wants: Wants) -> Value {
         let snapshot: Arc<SystemSnapshot> = self.shared.latest.read().unwrap().clone();
-        let mut value = serde_json::to_value(snapshot.as_ref()).unwrap_or_else(|_| json!({}));
+        let mut value = snapshot.to_json_value().unwrap_or_else(|_| json!({}));
         if let Some(object) = value.as_object_mut() {
             let keep = |name: &str, wanted: bool, object: &mut serde_json::Map<String, Value>| {
                 if !wanted {

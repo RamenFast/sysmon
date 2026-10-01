@@ -6,6 +6,13 @@
 //! `--background` (GUI on a private Xvfb display). All agent-grade:
 //! JSON envelopes, errors that carry a `fix`, exit codes 0/2/3/4.
 
+/// `println!` for the CLI's stdout: same formatting, but a closed pipe
+/// is a clean exit 0 instead of a panic (see `envelope::print_line`).
+macro_rules! out {
+    () => { $crate::envelope::print_line("") };
+    ($($arg:tt)*) => { $crate::envelope::print_line(&format!($($arg)*)) };
+}
+
 pub mod agent;
 pub mod control;
 pub mod envelope;
@@ -19,7 +26,7 @@ pub fn run_cli() -> i32 {
     let first = arguments.first().map(String::as_str);
     match first {
         Some("--version") | Some("-V") => {
-            println!("sysmon {} (v3)", sysmon_core::VERSION);
+            out!("sysmon {} (v3)", sysmon_core::VERSION);
             0
         }
         Some("--help") | Some("-h") | Some("help") => {
@@ -84,7 +91,7 @@ fn run_background(arguments: &[String]) -> i32 {
 }
 
 fn print_help() {
-    println!(
+    out!(
         "sysmon {} — compact system monitor with an agent-drivable API
 
 USAGE

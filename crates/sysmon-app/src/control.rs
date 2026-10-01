@@ -29,6 +29,21 @@ use crate::envelope;
 /// stream can never disagree about what a line calls itself.
 pub const SNAPSHOT_EVENT: &str = "snapshot";
 
+/// One NDJSON stream line from a snapshot value, the same for the
+/// socket's `subscribe` and a local `tap`. Every line self-identifies
+/// with `event` first (standard ruling R3); additive, so the
+/// snapshot's own fields are untouched. The value must come from
+/// `SystemSnapshot::to_json_value` so f32 readings keep their bytes.
+pub fn stream_line(snapshot: serde_json::Result<Value>) -> serde_json::Result<String> {
+    let snapshot = snapshot?;
+    let mut line = serde_json::Map::new();
+    line.insert("event".to_string(), json!(SNAPSHOT_EVENT));
+    if let Value::Object(fields) = snapshot {
+        line.extend(fields);
+    }
+    serde_json::to_string(&Value::Object(line))
+}
+
 /// Every backend error teaches the caller the way out *and* names
 /// which exit code it means. The socket has no process to exit, so
 /// the code rides on the wire (`exit`) and `sysmon ctl` returns it —
@@ -292,14 +307,9 @@ fn run_subscription(
             return;
         }
         match backend.snapshot(wants) {
-            Ok(mut snapshot) => {
-                // Every stream line self-identifies (standard ruling
-                // R3). Additive: the snapshot's own fields are
-                // untouched, so existing consumers never notice.
-                if let Some(object) = snapshot.as_object_mut() {
-                    object.insert("event".to_string(), json!(SNAPSHOT_EVENT));
-                }
-                if writeln!(writer, "{snapshot}").is_err() {
+            Ok(snapshot) => {
+                let Ok(line) = stream_line(Ok(snapshot)) else { return };
+                if writeln!(writer, "{line}").is_err() {
                     return; // client gone
                 }
             }

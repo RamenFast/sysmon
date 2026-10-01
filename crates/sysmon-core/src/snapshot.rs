@@ -436,6 +436,18 @@ pub struct ConnectionRecord {
 }
 
 impl SystemSnapshot {
+    /// The one way a snapshot becomes JSON, for every producer (probe,
+    /// the socket's snapshot and subscribe, serve, the GUI backend).
+    ///
+    /// Through the typed serializer to text first, then parsed: going
+    /// straight through `serde_json::to_value` widens every f32 to f64,
+    /// so a reading of `1.5370705` came out as `1.5370705127716064`
+    /// (3.1 audit F19). Parsing the shortest f32 text back as an f64
+    /// re-prints the same digits, so every reading keeps its bytes.
+    pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
+        serde_json::from_str(&serde_json::to_string(self)?)
+    }
+
     /// The busiest processes by a key, ready for the top-3 lists.
     pub fn top_processes_by<F>(&self, count: usize, minimum: f64, value: F) -> Vec<&ProcessRecord>
     where

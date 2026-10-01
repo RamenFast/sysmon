@@ -599,7 +599,14 @@ impl NetProcessCollector {
             previous_socket_bytes: HashMap::new(),
             resolver: InodeResolver::new(),
             nethogs: None,
-            nethogs_hint: None,
+            // A one-shot can't run a capture long enough to measure,
+            // so its coverage is TCP-only by design — say so, and
+            // where the full picture lives (3.1 audit F21).
+            nethogs_hint: (!enable_nethogs).then(|| {
+                "one-shot probe: TCP sockets only (UDP/QUIC not counted) — \
+                 `sysmon serve` or the GUI add nethogs for full coverage"
+                    .to_string()
+            }),
             nethogs_wanted: enable_nethogs,
             nethogs_refresh_seconds: refresh_seconds,
             comm_cache: HashMap::new(),

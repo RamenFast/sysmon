@@ -363,3 +363,140 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
          the f32 readings were widened by a Value round-trip: {output}"
     );
 }
+
+/// Numbers in a JSON line that are f32 readings printed at f64
+/// precision: exactly representable as an f32, yet longer than that
+/// f32's shortest form ("0.6909999847412109" is f32 0.691 widened).
+/// Values computed in f64 are almost never exactly f32-representable,
+/// so they don't trip this — no length heuristic, no allowance.
+fn widened_numbers(line: &str) -> Vec<String> {
+    line.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == 'E'))
+        .filter(|token| token.contains('.'))
+        .filter(|token| {
+            let Ok(value) = token.parse::<f64>() else { return false };
+            let narrow = value as f32;
+            // `{:?}` is f32's shortest round-trip form with the ".0"
+            // kept ("8.0", "0.691"), the same shape serde prints.
+            // (Display drops it — "8" — which flagged every integer.)
+            narrow as f64 == value && format!("{narrow:?}").len() < token.len()
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// F19 (3.1 audit): `probe` printed `"overall_percent":1.6357687711715698`
+/// for a reading `tap` printed as `1.5370705`. Every producer must emit
+/// the typed serializer's bytes — direct probe, and through a live
+/// instance's socket (snapshot and subscribe alike).
+#[test]
+fn every_producer_prints_f32_readings_exactly() {
+    let sandbox = Sandbox::new();
+    let direct = Command::new(binary())
+        .args(["probe", "cpu", "sensors", "--json"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .output()
+        .expect("probe runs");
+    let direct = String::from_utf8_lossy(&direct.stdout).to_string();
+    assert_eq!(widened_numbers(&direct), Vec::<String>::new(), "direct probe widened f32s");
+
+    // Through a live `serve` on the sandbox socket.
+    let mut daemon = Command::new(binary())
+        .arg("serve")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("serve starts");
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let via_socket = Command::new(binary())
+        .args(["probe", "cpu", "sensors", "--json"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .output()
+        .expect("probe via socket runs");
+    let via_socket = String::from_utf8_lossy(&via_socket.stdout).to_string();
+    let tapped = {
+        use std::io::{BufRead, BufReader};
+        let mut child = Command::new(binary())
+            .args(["tap", "cpu", "sensors", "--interval", "0.3"])
+            .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("tap via socket runs");
+        let mut line = String::new();
+        let _ = BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+        let _ = child.kill();
+        let _ = child.wait();
+        line
+    };
+    let _ = Command::new(binary())
+        .args(["ctl", "quit"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .output();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    let parsed: Value = serde_json::from_str(via_socket.trim()).expect("socket probe is JSON");
+    assert_eq!(parsed["result"]["via"], "socket", "the second probe really rode the socket");
+    assert_eq!(widened_numbers(&via_socket), Vec::<String>::new(), "socket probe widened f32s");
+    assert!(tapped.contains("\"event\""), "the socket tap produced a stream line: {tapped}");
+    assert_eq!(widened_numbers(&tapped), Vec::<String>::new(), "socket tap widened f32s");
+}
+
+/// F20: a consumer that closes the pipe early is normal (`| head`).
+/// The CLI law allows exits 0/2/3/4 — never a panic's 101.
+#[test]
+fn a_closed_pipe_is_a_clean_exit() {
+    let sandbox = Sandbox::new();
+    for arguments in [&["probe", "cpu", "--json"][..], &["schema"][..], &["probe", "cpu"][..]] {
+        let mut child = Command::new(binary())
+            .args(arguments)
+            .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        drop(child.stdout.take()); // the reader is gone before a byte is written
+        let output = child.wait_with_output().expect("wait");
+        let code = output.status.code().unwrap_or(-1);
+        assert!(
+            [0, 2, 3, 4].contains(&code),
+            "`sysmon {}` exited {code} on a closed pipe: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// F12: per-process CPU% from a 0.25 s window moved in 4% steps
+/// (one 10 ms tick / 0.25 s). The one-shot window must be long enough
+/// that one tick is ≤ 1% — i.e. ≥ 1 s.
+#[test]
+fn probe_processes_samples_over_a_full_second() {
+    let (reply, code) = Sandbox::new().run(&["probe", "processes", "--json"]);
+    assert_eq!(code, 0);
+    let window = reply["result"]["interval_seconds"].as_f64().expect("interval_seconds");
+    assert!(window >= 0.95, "processes window was {window:.3} s — CPU% quantized to {:.1}% steps", 1.0 / window);
+}
+
+/// F21: a one-shot probe can't run nethogs (it needs a long-lived
+/// capture), so per-process UDP/QUIC is missing — and it must say so.
+#[test]
+fn a_one_shot_probe_discloses_its_network_coverage() {
+    let (reply, code) = Sandbox::new().run(&["probe", "network", "--json"]);
+    assert_eq!(code, 0);
+    let network = &reply["result"]["network"];
+    if network["process_source"] == "tcp_diag" {
+        let hint = network["process_source_hint"].as_str().unwrap_or("");
+        assert!(hint.contains("serve"), "tcp_diag-only probe must point at `sysmon serve`, got {hint:?}");
+    }
+}

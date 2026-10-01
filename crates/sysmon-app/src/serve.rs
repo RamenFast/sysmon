@@ -43,7 +43,7 @@ impl Backend for ServeBackend {
                 "restart the daemon: sysmon ctl quit && sysmon serve",
             )
         })?;
-        serde_json::to_value(sampler.sample(wants)).map_err(|serialize_error| {
+        sampler.sample(wants).to_json_value().map_err(|serialize_error| {
             VerbError::runtime(
                 format!("snapshot serialization failed: {serialize_error}"),
                 "this is a sysmon bug — please report it",
@@ -118,7 +118,7 @@ pub fn run(_arguments: &[String]) -> i32 {
             "pid": std::process::id(),
         })));
     } else {
-        println!(
+        out!(
             "sysmon serve — answering on {} (ctrl-c to stop; costs nothing while idle)",
             socket_path().display()
         );
