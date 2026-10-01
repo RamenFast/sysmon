@@ -553,9 +553,25 @@ fn truncate_to_width(text: &str, width: f32, per_char: f32) -> String {
     }
 }
 
+/// What a right-click menu acts on, captured the moment it opens.
+#[derive(Clone)]
+struct MenuTarget {
+    pid: i32,
+    name: String,
+    nice: i32,
+    /// The multi-selection at open time, when the target is part of it.
+    combined: Option<Vec<i32>>,
+}
+
 /// The shared right-click menu (top-3 rows, the process table, and
 /// the combined-details blocks). `in_process_table` hides the "Open
 /// in process viewer" jump when the row already lives there.
+///
+/// egui keys a context menu to the widget that opened it, and the
+/// overview's rows are *slots* re-ranked every sample: without a
+/// latch, a busier process taking the slot while the menu is open
+/// inherits the menu (End process included). The process is latched
+/// on the right-click and every item acts on the latch.
 pub fn process_context_menu(
     response: &egui::Response,
     actions: &mut Vec<AppAction>,
@@ -563,11 +579,32 @@ pub fn process_context_menu(
     selected: &[i32],
     in_process_table: bool,
 ) {
-    let pid = record.pid;
-    let name = record.name.clone();
-    let nice = record.nice;
-    let combined: Option<Vec<i32>> = (selected.len() >= 2 && selected.contains(&pid))
-        .then(|| selected.to_vec());
+    let latch_id = egui::Popup::default_response_id(response).with("menu_target");
+    if response.secondary_clicked() {
+        let target = MenuTarget {
+            pid: record.pid,
+            name: record.name.clone(),
+            nice: record.nice,
+            combined: (selected.len() >= 2 && selected.contains(&record.pid))
+                .then(|| selected.to_vec()),
+        };
+        response.ctx.data_mut(|data| data.insert_temp(latch_id, target));
+    }
+    let target = response
+        .ctx
+        .data(|data| data.get_temp::<MenuTarget>(latch_id))
+        .unwrap_or_else(|| MenuTarget {
+            pid: record.pid,
+            name: record.name.clone(),
+            nice: record.nice,
+            combined: None,
+        });
+    let MenuTarget {
+        pid,
+        name,
+        nice,
+        combined,
+    } = target;
     response.context_menu(|ui| {
         ui.label(
             RichText::new(format!("{name}  (PID {pid})"))
@@ -623,6 +660,9 @@ pub fn process_context_menu(
             ui.close();
         }
     });
+    if !response.context_menu_opened() {
+        response.ctx.data_mut(|data| data.remove::<MenuTarget>(latch_id));
+    }
 }
 
 fn top_processes_by<F>(snapshot: &SystemSnapshot, minimum: f64, value: F) -> Vec<&ProcessRecord>
