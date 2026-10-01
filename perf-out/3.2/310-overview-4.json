@@ -1,0 +1,19 @@
+{
+  "version": "sysmon 3.1.0 (v3)",
+  "window_seconds": 20,
+  "processes_on_machine": 639,
+  "sampler": {
+    "cpu_percent_of_one_core": 5.60,
+    "pss_kb": 5212,
+    "rss_kb": 8644
+  },
+  "gui": {
+    "cpu_percent_of_one_core": 11.10,
+    "pss_kb": 94059,
+    "rss_kb": 155704,
+    "renderer": "llvmpipe (LLVM 20.1.2, 256 bits) · Vulkan",
+    "page": "overview",
+    "cpu_graph": "auto"
+  },
+  "probe_all_wall_ms_median": 1237
+}

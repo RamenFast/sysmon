@@ -178,38 +178,43 @@ pub fn scope_graph(ui: &mut Ui, palette: &Palette, series: &[&History], config: 
     // Graticule: horizontal quarters, vertical lines that ride the
     // samples. One shape each, hairline, accent at low alpha.
     let grid = Stroke::new(1.0, palette.graticule());
-    for fraction in [0.25f32, 0.5, 0.75] {
+    // A mini graph keeps only the midline and every other vertical:
+    // 32 of them on one page (V8) must stay cheap, and at 28 px the
+    // quarters would be noise anyway.
+    let fractions: &[f32] = if config.mini { &[0.5] } else { &[0.25, 0.5, 0.75] };
+    for fraction in fractions {
         let y = drawable.top() + drawable.height() * fraction;
         painter.line_segment([pos2(drawable.left(), y), pos2(drawable.right(), y)], grid);
     }
     let pushed = series.iter().map(|s| s.pushed()).max().unwrap_or(0);
     let offset = graticule_offset(pushed, super::theme::prefers_reduced_motion());
+    let pitch = if config.mini { GRATICULE_PITCH * 2 } else { GRATICULE_PITCH };
     let mut from_newest = offset;
     while from_newest < HISTORY_LENGTH {
         let x = drawable.right() - from_newest as f32 * step;
         painter.line_segment([pos2(x, drawable.top()), pos2(x, drawable.bottom())], grid);
-        from_newest += GRATICULE_PITCH;
+        from_newest += pitch;
     }
 
     let maximum = scope_ceiling(series, config.fixed_maximum, config.minimum_autoscale);
     if maximum > 0.0 {
+        // One exact-capacity points buffer per series, handed to egui
+        // by value (Shape::line owns it): one allocation per trace,
+        // none per point.
         for (series_index, history) in series.iter().enumerate() {
             if history.is_empty() {
                 continue;
             }
             let color = config.colors.get(series_index).copied().unwrap_or(palette.accent);
             let count = history.len();
-            let points: Vec<Pos2> = history
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let from_newest = (count - 1 - index) as f32;
-                    let x = drawable.right() - from_newest * step;
-                    let y = drawable.bottom() - ((value / maximum).min(1.0) as f32) * drawable.height();
-                    pos2(x, y)
-                })
-                .collect();
-            if series_index == 0 {
+            let mut points: Vec<Pos2> = Vec::with_capacity(count);
+            points.extend(history.iter().enumerate().map(|(index, value)| {
+                let from_newest = (count - 1 - index) as f32;
+                let x = drawable.right() - from_newest * step;
+                let y = drawable.bottom() - ((value / maximum).min(1.0) as f32) * drawable.height();
+                pos2(x, y)
+            }));
+            if series_index == 0 && !config.mini {
                 // Soft fill under the first trace, one trapezoid per
                 // segment (a single concave polygon tessellates into
                 // stripes).
