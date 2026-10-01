@@ -95,9 +95,140 @@ struct PreviousProcess {
     io_write_bytes: u64,
 }
 
+/// What a process doesn't change between samples: its command line,
+/// executable and the name we show. Re-read when the process instance
+/// changes (pid reuse → new starttime), when it execs (new comm), or
+/// after STATIC_REFRESH (setproctitle rewrites argv in place).
+#[derive(Clone)]
+struct ProcessStatics {
+    starttime_ticks: u64,
+    comm: String,
+    read_at: std::time::Instant,
+    command_line: String,
+    exe_basename: Option<String>,
+    display_name: String,
+}
+
+const STATIC_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// comm is cut at 15 bytes (TASK_COMM_LEN − 1).
+const COMM_MAX: usize = 15;
+
+/// Thread names that runtimes give their main thread — they name the
+/// thread, never the program.
+const THREAD_NAMES: [&str; 4] = ["MainThread", "Main Thread", "GMainThread", "main"];
+
+/// A runtime that runs other people's programs (python3.12, node, bash):
+/// its executable name says nothing about which program it is.
+pub fn is_interpreter(name: &str) -> bool {
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    matches!(
+        base,
+        "python" | "pypy" | "node" | "nodejs" | "bun" | "deno" | "ruby" | "perl" | "php"
+            | "lua" | "luajit" | "java" | "sh" | "bash" | "dash" | "zsh" | "fish" | "Rscript"
+            | "osascript" | "tclsh" | "wish" | "guile" | "racket" | "elixir" | "erl"
+    )
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Interpreter flags that consume the next argument.
+const FLAGS_WITH_VALUE: [&str; 8] =
+    ["-W", "-X", "-r", "--require", "--import", "--loader", "-cp", "-classpath"];
+
+/// Script stems too generic to name a program alone; they keep their
+/// folder ("server/index.ts", not "index.ts").
+const GENERIC_STEMS: [&str; 7] = ["index", "main", "server", "app", "cli", "run", "__main__"];
+
+fn script_label(path: &str) -> String {
+    let file = basename(path);
+    let stem = file.split('.').next().unwrap_or(file);
+    if GENERIC_STEMS.contains(&stem) {
+        let mut parts = path.rsplit('/').skip(1);
+        if let Some(folder) = parts.find(|part| !part.is_empty() && *part != "src" && *part != "bin") {
+            return format!("{folder}/{file}");
+        }
+    }
+    file.to_string()
+}
+
+/// The script an interpreter is running: the first argument that
+/// isn't a flag. Inline code (`-c`, `-e`, `--eval`) has no name.
+/// `-m module` names the module.
+fn script_name(argv: &[&str]) -> Option<String> {
+    let mut arguments = argv.iter().skip(1);
+    while let Some(argument) = arguments.next() {
+        match *argument {
+            "-c" | "-e" | "--eval" | "-p" | "--print" | "-E" => return None,
+            "-m" => return arguments.next().map(|module| module.to_string()),
+            "-jar" => return arguments.next().map(|jar| basename(jar).to_string()),
+            flag if FLAGS_WITH_VALUE.contains(&flag) => {
+                arguments.next();
+            }
+            // A short-flag cluster carrying -c or -e (`bash -lc`, `sh -ec`,
+            // `python3 -Bc`): the next argument is inline code.
+            flag if flag.len() > 2
+                && !flag.starts_with("--")
+                && flag[1..].bytes().all(|b| b.is_ascii_alphabetic())
+                && flag[1..].contains(['c', 'e']) =>
+            {
+                return None;
+            }
+            flag if flag.starts_with('-') => {}
+            // `bun run src/server/index.ts`, `deno run x.ts`
+            "run" | "exec" => {}
+            script => return Some(script_label(script)),
+        }
+    }
+    None
+}
+
+/// What a person calls this process. comm is what the kernel calls
+/// it, and it lies in three ways a human notices:
+///   * truncated at 15 bytes ("xdg-desktop-por" for xdg-desktop-portal-gtk)
+///   * renamed by a runtime to its thread's name ("MainThread" for node)
+///   * a bare interpreter ("python3" for a dozen different programs)
+///
+/// `argv` is the NUL-split /proc/pid/cmdline (paths with spaces stay
+/// whole); empty for kernel threads.
+pub fn display_name(comm: &str, argv: &[&str], exe_basename: Option<&str>) -> String {
+    let Some(first) = argv.first() else {
+        return comm.to_string(); // kernel thread: comm is the truth
+    };
+    let argv0 = basename(first);
+
+    // A runtime's thread name: name the executable, or its script.
+    if THREAD_NAMES.contains(&comm) {
+        let program = exe_basename.unwrap_or(argv0);
+        if (is_interpreter(program) || is_interpreter(argv0))
+            && let Some(script) = script_name(argv)
+        {
+            return script;
+        }
+        return program.to_string();
+    }
+    // An interpreter: name the script it runs.
+    if is_interpreter(comm) {
+        return script_name(argv).unwrap_or_else(|| comm.to_string());
+    }
+    // Truncated comm: the full executable name when it's a longer
+    // spelling of the same name.
+    if comm.len() >= COMM_MAX {
+        for candidate in [exe_basename.unwrap_or(""), argv0] {
+            if candidate.len() > comm.len() && candidate.starts_with(comm) {
+                return candidate.to_string();
+            }
+        }
+    }
+    comm.to_string()
+}
+
 pub struct ProcessCollector {
     window: SelfInterval,
     previous: HashMap<i32, PreviousProcess>,
+    statics: HashMap<i32, ProcessStatics>,
     users: UserCache,
     clk_tck: f64,
     page_size: u64,
@@ -115,6 +246,7 @@ impl ProcessCollector {
         ProcessCollector {
             window: SelfInterval::default(),
             previous: HashMap::new(),
+            statics: HashMap::new(),
             users: UserCache::new(),
             clk_tck: unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64,
             page_size: unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64,
@@ -128,6 +260,45 @@ impl ProcessCollector {
         let mut file = fs::File::open(path).ok()?;
         file.read_to_string(&mut self.read_buffer).ok()?;
         Some(self.read_buffer.as_str())
+    }
+
+    /// The cached command line / exe / display name for this process
+    /// instance, re-read when stale.
+    fn statics_for(
+        &mut self,
+        pid: i32,
+        comm: &str,
+        starttime_ticks: u64,
+        now: std::time::Instant,
+    ) -> ProcessStatics {
+        if let Some(cached) = self.statics.get(&pid)
+            && cached.starttime_ticks == starttime_ticks
+            && cached.comm == comm
+            && now.duration_since(cached.read_at) < STATIC_REFRESH
+        {
+            return cached.clone();
+        }
+        let raw = self
+            .read_proc(&format!("/proc/{pid}/cmdline"))
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let argv: Vec<&str> = raw.split('\0').filter(|a| !a.is_empty()).collect();
+        let exe_basename = fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().trim_end_matches(" (deleted)").to_string())
+            });
+        let statics = ProcessStatics {
+            starttime_ticks,
+            comm: comm.to_string(),
+            read_at: now,
+            command_line: argv.join(" "),
+            display_name: display_name(comm, &argv, exe_basename.as_deref()),
+            exe_basename,
+        };
+        self.statics.insert(pid, statics.clone());
+        statics
     }
 
     pub fn collect(&mut self, now: std::time::Instant, boot_ts: f64) -> Vec<ProcessRecord> {
@@ -167,23 +338,27 @@ impl ProcessCollector {
             let uid = entry.metadata().map(|m| m.uid()).unwrap_or(u32::MAX);
             let user = self.users.name_for(uid);
 
-            let mut command_line = String::new();
-            if let Some(raw) = self.read_proc(&format!("/proc/{pid}/cmdline")) {
-                command_line = raw.replace('\0', " ").trim().to_string();
-            }
-            let is_kernel_thread = command_line.is_empty();
+            let statics = self.statics_for(pid, &comm, stat.starttime_ticks, now);
+            let is_kernel_thread = statics.command_line.is_empty();
 
             let io = self
                 .read_proc(&format!("/proc/{pid}/io"))
                 .map(parse_io);
 
-            let exe_basename = fs::read_link(format!("/proc/{pid}/exe"))
-                .ok()
-                .and_then(|path| {
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().trim_end_matches(" (deleted)").to_string())
-                });
+            // RSS from statm (field 2, pages): the kernel sums its
+            // per-CPU RSS counters exactly for statm/status — what ps
+            // and top print — but only approximately for stat, which
+            // runs a few MiB low on busy processes.
+            let rss_pages = self
+                .read_proc(&format!("/proc/{pid}/statm"))
+                .and_then(|statm| statm.split_ascii_whitespace().nth(1)?.parse::<u64>().ok())
+                .unwrap_or(stat.rss_pages.max(0) as u64);
 
+            // CPU time: utime+stime in clock ticks (10 ms). The kernel
+            // sums every thread's runtime for these, so they cover the
+            // whole process; the cost is resolution — one tick over a
+            // window of W seconds is a 1/(100·W) step, which is why
+            // `probe processes` samples over a full second.
             // Deltas — only valid when this is the same process
             // instance we saw last tick.
             let mut cpu_percent = 0.0f32;
@@ -193,8 +368,8 @@ impl ProcessCollector {
                 && let Some(previous) = self.previous.get(&pid)
                 && previous.starttime_ticks == stat.starttime_ticks
             {
-                let tick_delta = stat.cpu_ticks.saturating_sub(previous.cpu_ticks) as f64;
-                cpu_percent = ((tick_delta / self.clk_tck) / interval_seconds * 100.0) as f32;
+                let busy_seconds = stat.cpu_ticks.saturating_sub(previous.cpu_ticks) as f64 / self.clk_tck;
+                cpu_percent = (busy_seconds / interval_seconds * 100.0) as f32;
                 cpu_percent = cpu_percent.clamp(0.0, core_count * 100.0);
                 if let Some((read_bytes, write_bytes)) = io {
                     disk_read_bps = Some(
@@ -225,12 +400,13 @@ impl ProcessCollector {
                 pid,
                 ppid: stat.ppid,
                 name: comm,
+                display_name: statics.display_name,
                 user,
                 state: stat.state.to_string(),
                 state_word: state_word(stat.state).to_string(),
                 is_kernel_thread,
                 cpu_percent,
-                memory_rss_bytes: stat.rss_pages.max(0) as u64 * self.page_size,
+                memory_rss_bytes: rss_pages * self.page_size,
                 memory_virtual_bytes: stat.vsize_bytes,
                 threads: stat.threads,
                 nice: stat.nice,
@@ -242,11 +418,12 @@ impl ProcessCollector {
                 gpu_vram_bytes: 0,
                 net_rx_bps: None, // merged in by the net-process source
                 net_tx_bps: None,
-                command_line,
-                exe_basename,
+                command_line: statics.command_line,
+                exe_basename: statics.exe_basename,
             });
         }
 
+        self.statics.retain(|pid, _| next_previous.contains_key(pid));
         self.previous = next_previous;
         records
     }
@@ -330,5 +507,50 @@ mod tests {
         assert_eq!(state_word('D'), "disk sleep");
         assert_eq!(state_word('I'), "idle");
         assert_eq!(state_word('?'), "unknown");
+    }
+
+    /// The real offenders on Ben's machine, 2026-09-30.
+    #[test]
+    fn display_names_say_what_a_person_would() {
+        let name = |comm: &str, argv: &[&str], exe: Option<&str>| display_name(comm, argv, exe);
+        // node renames its main thread.
+        assert_eq!(
+            name("MainThread", &["node", "/home/ben/.nvm/versions/node/v24/bin/dsh", "web", "--no-open"], Some("node")),
+            "dsh"
+        );
+        // A bare interpreter names its script.
+        assert_eq!(
+            name("python3", &["/usr/bin/python3", "/usr/share/shiori/tray.py"], Some("python3.12")),
+            "tray.py"
+        );
+        // Paths with spaces and emoji stay whole (NUL-split argv).
+        assert_eq!(
+            name("python3", &["/usr/bin/python3", "/home/ben/Nexus/🛠️ Workshop/serve_cast_glass.py", "--host"], None),
+            "serve_cast_glass.py"
+        );
+        // Generic script names keep their folder.
+        assert_eq!(
+            name("bun", &["/home/ben/.bun/bin/bun", "run", "src/server/index.ts"], Some("bun")),
+            "server/index.ts"
+        );
+        // `python -m module`.
+        assert_eq!(name("python3", &["python3", "-m", "http.server"], None), "http.server");
+        // Inline code has no better name than the interpreter.
+        assert_eq!(name("sh", &["sh", "-c", "exec mako"], Some("dash")), "sh");
+        // ...also when the flag is clustered (Reviewer B #5: the code
+        // became the name, "Dev && cargo build --release").
+        assert_eq!(name("bash", &["bash", "-lc", "cd /home/ben/Dev && cargo build --release"], None), "bash");
+        assert_eq!(name("bash", &["/bin/bash", "-ec", "eval \"$X\"; status=$?"], None), "bash");
+        assert_eq!(name("python3", &["python3", "-Bc", "print(1)"], None), "python3");
+        // A cluster without c/e is just flags.
+        assert_eq!(name("python3", &["python3", "-uB", "x.py"], None), "x.py");
+        // comm truncated at 15 bytes.
+        assert_eq!(
+            name("xdg-desktop-por", &["/usr/libexec/xdg-desktop-portal-gtk"], Some("xdg-desktop-portal-gtk")),
+            "xdg-desktop-portal-gtk"
+        );
+        // An ordinary program and a kernel thread are left alone.
+        assert_eq!(name("sway", &["sway"], Some("sway")), "sway");
+        assert_eq!(name("kworker/3:1", &[], None), "kworker/3:1");
     }
 }

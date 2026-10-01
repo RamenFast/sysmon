@@ -19,3 +19,6 @@ dist/
 
 # live receipt runs (scripts/e2e.sh output; curated shots live in docs/)
 e2e-out/
+
+# live accuracy audit receipts (scripts/accuracy-audit.sh; curated copy lives in docs/dev/)
+audit-out/

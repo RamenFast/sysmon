@@ -11,11 +11,15 @@ pub mod app;
 pub mod backend;
 pub mod cards;
 pub mod details;
+pub mod glyphs;
 pub mod graphs;
 pub mod icons;
+pub mod inspector;
 pub mod processes;
+pub mod sensors_view;
 pub mod settings;
 pub mod theme;
+pub mod widgets;
 
 use std::sync::Arc;
 
@@ -63,11 +67,11 @@ fn negotiate_socket(backend: Arc<backend::GuiBackend>) -> Result<Option<ControlS
                     status["result"]["version"].as_str().unwrap_or("?").to_string();
                 if owner_mode == "gui" && owner_version == sysmon_core::VERSION {
                     let _ = control::request(&json!({"verb": "raise"}));
-                    println!("sysmon: raised the running instance");
+                    out!("sysmon: raised the running instance");
                     return Err(EXIT_OK);
                 }
                 if owner_mode == "gui" && attempt == 0 {
-                    println!(
+                    out!(
                         "sysmon: replacing the running {owner_version} instance \
                          with {}",
                         sysmon_core::VERSION

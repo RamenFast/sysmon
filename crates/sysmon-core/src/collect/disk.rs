@@ -255,7 +255,7 @@ impl DiskCollector {
                     .unwrap_or(device_basename),
                 device: mount.device.clone(),
                 mount_point: mount.mount_point.clone(),
-                fs_type: mount.fs_type.clone(),
+                fs_type: real_fs_type(&mount.fs_type, &real_device),
                 read_bps,
                 write_bps,
                 used_bytes,
@@ -267,6 +267,26 @@ impl DiskCollector {
         disks.sort_by(|a, b| a.mount_point.cmp(&b.mount_point));
         disks
     }
+}
+
+/// A FUSE block mount (ntfs-3g, exfat-fuse) reports itself as
+/// "fuseblk"; udev's probe of the device names the real filesystem
+/// ("ntfs"). Everything else is already true.
+fn real_fs_type(mount_fs_type: &str, real_device: &str) -> String {
+    if mount_fs_type != "fuseblk" {
+        return mount_fs_type.to_string();
+    }
+    let probed = fs::metadata(real_device).ok().and_then(|metadata| {
+        use std::os::unix::fs::MetadataExt;
+        let rdev = metadata.rdev();
+        let database = format!("/run/udev/data/b{}:{}", libc::major(rdev), libc::minor(rdev));
+        fs::read_to_string(database).ok()?.lines().find_map(|line| {
+            line.strip_prefix("E:ID_FS_TYPE=")
+                .filter(|kind| !kind.is_empty())
+                .map(str::to_string)
+        })
+    });
+    probed.unwrap_or_else(|| mount_fs_type.to_string())
 }
 
 #[cfg(test)]

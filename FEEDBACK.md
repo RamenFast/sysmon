@@ -29,3 +29,17 @@ Rules:
 - 2026-08-01 [claim] GPT-5.6 subagents invent problems when they find none — no finding is acted on without a reproducing command
 - 2026-08-01 [ask] leave the ~/Dev/ClaudeWorkspaces symlink surface alone for now
 - 2026-09-05 [ask] Compress this project's agent context without information loss. Exclude Nexus's home and exclusive files.
+- 2026-10-01 [ask] complete statistics accuracy check: "idk if I can fully trust the statistics"
+- 2026-10-01 [claim] it says weird things about RAM usage
+- 2026-10-01 [feature] temperatures in °F and °C, togglable, with both at once as an option; turn both on for Ben
+- 2026-10-01 [correction] GB not GiB ("big memory psyop"); decimal everywhere, honest usable vs installed labels, hover note OK
+- 2026-10-01 [ui] make the sensors section easier to read
+- 2026-10-01 [feature] deeper inspection of processes
+- 2026-10-01 [ui] nice integration between the Overview and the Processes tab
+- 2026-10-01 [bugfix] right-click a process on the main page: the submenu's actions must act on the entry that was right-clicked
+- 2026-10-01 [ui] cute custom symbols for the relevant parts of the app ("chef's touch")
+- 2026-10-01 [ask] reduce code complexity
+- 2026-10-01 [ask] take care of GitHub, make it look and sound good; test the application; fully autonomous tonight, root available
+- 2026-10-01 [ask] up to 2 subagents at high reasoning (Opus 5.5 recommended)
+- 2026-10-01 [ask] if hardware sensors need a boot flag or reboot, install what's possible and leave the rest documented for the next instance
+- 2026-10-01 [claim] "if this application needs 100 dependencies to gather the correct hardware information, that's what we do"

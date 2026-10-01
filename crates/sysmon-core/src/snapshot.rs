@@ -56,13 +56,31 @@ pub struct SystemInfo {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CpuSnapshot {
-    /// Mean of the per-core busy percentages, 0–100.
+    /// Busy share of the window, 0–100: every tick except idle and
+    /// iowait (htop's identity — iowait is waiting, not working).
     pub overall_percent: f32,
+    /// Share of the window spent idle *waiting on storage*, 0–100.
+    /// mpstat's %iowait; reported apart so "100 − busy" isn't a
+    /// mystery when a disk is slow.
+    #[serde(default)]
+    pub iowait_percent: f32,
     pub per_core_percent: Vec<f32>,
     pub core_count: usize,
-    /// Mean of the per-core current frequencies.
+    /// Mean of the per-core current frequencies, idle cores included
+    /// (cpufreq reports a parked core at its last requested clock).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_mhz: Option<f64>,
+    /// The clock the *working* cores run at: per-core frequencies
+    /// weighted by each core's busy share over the window. The number
+    /// to compare with turbostat's Bzy_MHz; None until a window exists
+    /// or when every core idled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_busy_mhz: Option<f64>,
+    /// How the busy clock was measured: "delivered over the window"
+    /// (ACPI CPPC counters, the APERF/MPERF ratio turbostat reads) or
+    /// "instant read" (scaling_cur_freq; no CPPC, or the first window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_busy_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_min_mhz: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,12 +96,17 @@ pub struct CpuSnapshot {
     /// hwmon chip exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature_celsius: Option<f32>,
+    /// Which sensor fed `temperature_celsius` ("k10temp Tctl").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_source: Option<String>,
     /// Context switches per second across the machine.
     pub context_switches_per_second: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MemorySnapshot {
+    /// MemTotal: what the kernel can hand out — installed RAM minus
+    /// firmware reservations and the kernel's own image.
     pub total_bytes: u64,
     /// `total - available` — the figure that answers "how much is my
     /// RAM actually committed" (psutil/v1 definition, NOT htop's).
@@ -101,6 +124,33 @@ pub struct MemorySnapshot {
     pub swap_total_bytes: u64,
     pub swap_used_bytes: u64,
     pub swap_cached_bytes: u64,
+    /// Sum of the installed memory modules (SMBIOS via udev) — the
+    /// number on the box, in bytes. None when firmware tables are
+    /// unreadable (VMs, containers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_bytes: Option<u64>,
+    /// One entry per populated slot, from the same SMBIOS tables.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub modules: Vec<MemoryModule>,
+}
+
+/// One installed memory stick (SMBIOS type 17, via udev's DMI data).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryModule {
+    /// Slot name the board prints ("DIMM 0").
+    pub locator: String,
+    pub size_bytes: u64,
+    /// "DDR4", "DDR5", …
+    pub kind: String,
+    /// The speed the module is running at right now, MT/s.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_speed_mts: Option<u32>,
+    /// The fastest speed the module advertises to firmware, MT/s
+    /// (JEDEC; an XMP/EXPO profile can exceed it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rated_speed_mts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_number: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -129,6 +179,19 @@ pub struct GpuSnapshot {
     pub core_clock_mhz: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_clock_mhz: Option<f64>,
+    /// How the clocks were measured: "mean of N reads" (sampled across
+    /// the window — the honest figure for a clock that moves every few
+    /// ms) or "instant read" (one read; the window's first sample).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_source: Option<String>,
+    /// Voltage-regulator temperatures (graphics, SoC, memory rails),
+    /// from gpu_metrics; hwmon doesn't expose them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_vrm_gfx_celsius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_vrm_soc_celsius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_vrm_mem_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fan_rpm: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,6 +295,11 @@ pub struct ProcessRecord {
     /// comm — kernel-truncated to 15 chars; `command_line` has the
     /// full story for user processes.
     pub name: String,
+    /// What a person calls this process. Usually `name`; when comm is
+    /// a thread name ("MainThread") or a bare interpreter ("python3",
+    /// "node") it names the program instead ("dsh", "tray.py").
+    #[serde(default)]
+    pub display_name: String,
     pub user: String,
     /// Single-letter kernel state plus the word ("S", "sleeping").
     pub state: String,
@@ -275,6 +343,9 @@ pub struct SensorsSnapshot {
 pub struct SensorChip {
     /// hwmon driver name (k10temp, nvme, amdgpu, …).
     pub name: String,
+    /// What the chip watches: cpu | gpu | drive | board | other.
+    #[serde(default)]
+    pub kind: SensorKind,
     /// Block device the chip measures (drivetemp/nvme chips), e.g.
     /// "sda" — without it, four SATA drives all read "drivetemp".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,14 +363,36 @@ pub struct SensorChip {
     pub power: Vec<PowerReading>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensorKind {
+    Cpu,
+    Gpu,
+    Drive,
+    Board,
+    #[default]
+    Other,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TempReading {
+    /// The driver's label, or `tempN` when it gives none.
     pub label: String,
     pub celsius: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crit_celsius: Option<f32>,
+    /// False for readings no working sensor produces: an unconnected
+    /// thermistor input (−62 °C), a channel the board wires to nothing
+    /// (exactly 0 °C), or past 150 °C. Kept on the wire, so nothing is
+    /// hidden; left out of headlines and "hottest".
+    #[serde(default = "default_true")]
+    pub plausible: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -309,6 +402,12 @@ pub struct FanReading {
     /// The fan's rated maximum, when the driver states one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rpm: Option<u32>,
+    /// What the board is driving the header at (pwmN, 0–100 %), when
+    /// it exposes one. 0 rpm at a non-zero duty means a header with
+    /// no tachometer signal — unplugged, a pump on a fan header, or a
+    /// fan that has stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duty_percent: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -355,6 +454,18 @@ pub struct ConnectionRecord {
 }
 
 impl SystemSnapshot {
+    /// The one way a snapshot becomes JSON, for every producer (probe,
+    /// the socket's snapshot and subscribe, serve, the GUI backend).
+    ///
+    /// Through the typed serializer to text first, then parsed: going
+    /// straight through `serde_json::to_value` widens every f32 to f64,
+    /// so a reading of `1.5370705` came out as `1.5370705127716064`
+    /// (3.1 audit F19). Parsing the shortest f32 text back as an f64
+    /// re-prints the same digits, so every reading keeps its bytes.
+    pub fn to_json_value(&self) -> serde_json::Result<serde_json::Value> {
+        serde_json::from_str(&serde_json::to_string(self)?)
+    }
+
     /// The busiest processes by a key, ready for the top-3 lists.
     pub fn top_processes_by<F>(&self, count: usize, minimum: f64, value: F) -> Vec<&ProcessRecord>
     where
@@ -418,10 +529,7 @@ impl Wants {
         let mut wants = Wants::none();
         match name {
             "system" => wants.system = true,
-            "cpu" => {
-                wants.cpu = true;
-                wants.sensors = true; // cpu card shows its temperature
-            }
+            "cpu" => wants.cpu = true, // its temperature reads the CPU chip alone
             "memory" => wants.memory = true,
             "gpu" => wants.gpu = true,
             "network" => {

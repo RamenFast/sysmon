@@ -105,7 +105,34 @@ pub fn json_wanted(force_json: bool) -> bool {
 
 /// Print one envelope as a single NDJSON line.
 pub fn emit(envelope: &Value) {
-    println!("{envelope}");
+    print_line(&envelope.to_string());
+}
+
+/// Every stdout line the CLI writes goes through here. `println!`
+/// panics when the reader has gone (`sysmon probe | head -c 0`), and a
+/// panic exits 101, which no caller can classify (3.1 audit F20). A
+/// closed pipe is a normal way for a consumer to say "enough", so it
+/// ends the process with 0. Any other write failure (a full disk, an
+/// I/O error) lost the answer: runtime failure, 4, with the fix on
+/// stderr, never a silent success.
+pub fn print_line(line: &str) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    if let Err(write_error) = writeln!(lock, "{line}").and_then(|()| lock.flush()) {
+        if write_error.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(EXIT_OK);
+        }
+        eprintln!(
+            "{}",
+            error_coded(
+                format!("could not write the answer to stdout: {write_error}"),
+                "check where stdout goes (a full disk or a broken device) and run again",
+                EXIT_RUNTIME,
+            )
+        );
+        std::process::exit(EXIT_RUNTIME);
+    }
 }
 
 /// Emit an error envelope (stderr gets the human reading when

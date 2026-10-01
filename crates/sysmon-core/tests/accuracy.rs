@@ -168,7 +168,9 @@ fn own_rss_matches_ps() {
         .expect("own process record");
 
     let ps_rss = ps_rss_kib * 1024;
-    // 8 MiB or 10%: the test allocates while running.
+    // 8 MiB or 10%: the test allocates while running. (Since 3.1 the
+    // value comes from statm, the counter ps itself reads; before, the
+    // approximate stat field ran up to 6 MiB low on busy processes.)
     let tolerance = (ps_rss / 10).max(8 << 20);
     assert!(
         me.memory_rss_bytes.abs_diff(ps_rss) < tolerance,
@@ -408,4 +410,307 @@ fn sensor_channels_match_sysfs_files() {
     assert_eq!(fans, expected_fans, "one FanReading per readable fanN_input");
     assert_eq!(voltages, expected_voltages, "one VoltageReading per readable inN_input");
     assert_eq!(power, expected_power, "one PowerReading per readable power channel");
+
+    // Every reading names itself uniquely: four NVMe channels used to
+    // render as four identical "nvme0n1 · CT2000P3PSSD8" rows.
+    let mut identities: Vec<String> = sensors
+        .chips
+        .iter()
+        .flat_map(|chip| {
+            chip.temps.iter().map(move |t| {
+                format!("{}|{}|{}", chip.name, chip.device.as_deref().unwrap_or(""), t.label)
+            })
+        })
+        .collect();
+    let total = identities.len();
+    identities.sort();
+    identities.dedup();
+    assert_eq!(identities.len(), total, "two temperature readings share one identity");
+
+    // A limit no sensor could reach is a "not set" sentinel, never a
+    // reported threshold (NVMe: 65261.85 °C).
+    for chip in &sensors.chips {
+        for t in &chip.temps {
+            for limit in [t.max_celsius, t.crit_celsius].into_iter().flatten() {
+                assert!(limit < 200.0, "{} {}: absurd limit {limit} °C", chip.name, t.label);
+            }
+            // Plausibility is a pure function of the reading.
+            assert_eq!(t.plausible, sysmon_core::collect::sensors::temperature_is_plausible(t.celsius));
+        }
+    }
+}
+
+/// Installed RAM is the sum of the SMBIOS memory devices (udev's DMI
+/// export), and the hierarchy holds: usable (MemTotal) ≤ what the
+/// firmware hands the OS (memmap "System RAM") ≤ installed.
+#[test]
+fn installed_memory_matches_firmware_tables() {
+    let Ok(dmi) = std::fs::read_to_string("/run/udev/data/+dmi:id") else {
+        eprintln!("no udev DMI database here (VM/container) — skipping");
+        return;
+    };
+    let expected: u64 = dmi
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("E:MEMORY_DEVICE_")?;
+            let (key, value) = rest.split_once('=')?;
+            key.ends_with("_SIZE")
+                .then(|| key.split('_').nth(1) == Some("SIZE"))
+                .filter(|is_size| *is_size)
+                .and_then(|_| value.parse::<u64>().ok())
+        })
+        .sum();
+    let mut wants = Wants::none();
+    wants.memory = true;
+    let memory = sampled(wants, 0).memory.expect("memory");
+    if expected == 0 {
+        assert_eq!(memory.installed_bytes, None, "no modules listed → no claim");
+        return;
+    }
+    assert_eq!(memory.installed_bytes, Some(expected), "installed = Σ module sizes");
+
+    let mut system_ram = 0u64;
+    for entry in std::fs::read_dir("/sys/firmware/memmap").expect("memmap").flatten() {
+        let read = |file: &str| std::fs::read_to_string(entry.path().join(file)).unwrap();
+        if read("type").trim() == "System RAM" {
+            let start = u64::from_str_radix(read("start").trim().trim_start_matches("0x"), 16).unwrap();
+            let end = u64::from_str_radix(read("end").trim().trim_start_matches("0x"), 16).unwrap();
+            system_ram += end - start + 1;
+        }
+    }
+    assert!(memory.total_bytes <= system_ram, "usable {} > firmware RAM {system_ram}", memory.total_bytes);
+    assert!(system_ram <= expected, "firmware RAM {system_ram} > installed {expected}");
+}
+
+/// The card is never named by a bare PCI id ("Device 7551" — what a
+/// pci.ids older than the card says).
+#[test]
+fn gpu_has_a_real_name() {
+    let mut wants = Wants::none();
+    wants.gpu = true;
+    let gpu = sampled(wants, 0).gpu.expect("gpu");
+    if !gpu.available {
+        return;
+    }
+    let name = gpu.device_name.as_str();
+    let bare_id = name
+        .strip_prefix("Device ")
+        .is_some_and(|id| id.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!bare_id && !name.is_empty(), "GPU named by a bare id: {name:?}");
+}
+
+/// Busy + iowait ≤ 100, and iowait matches the kernel's own split
+/// over the same window, read independently.
+#[test]
+fn cpu_iowait_is_reported_apart_from_busy() {
+    let read = || -> (u64, u64) {
+        let stat = std::fs::read_to_string("/proc/stat").unwrap();
+        let fields: Vec<u64> = stat.lines().next().unwrap().split_ascii_whitespace().skip(1)
+            .map(|f| f.parse().unwrap()).collect();
+        (fields.iter().take(8).sum(), fields[4])
+    };
+    let mut wants = Wants::none();
+    wants.cpu = true;
+    let mut sampler = Sampler::new();
+    let _ = sampler.sample(wants);
+    let (total_before, iowait_before) = read();
+    std::thread::sleep(Duration::from_millis(800));
+    let cpu = sampler.sample(wants).cpu.expect("cpu");
+    let (total_after, iowait_after) = read();
+    let independent = (iowait_after - iowait_before) as f32 / (total_after - total_before).max(1) as f32 * 100.0;
+    assert!(cpu.overall_percent + cpu.iowait_percent <= 100.5);
+    // Adjacent, not identical windows: a disk-bound desktop moves
+    // iowait a few points between reads.
+    assert!(
+        (cpu.iowait_percent - independent).abs() < 10.0,
+        "iowait ours {} vs /proc/stat {independent}",
+        cpu.iowait_percent
+    );
+}
+
+/// F15 / G8: the GPU clock is the mean across the sample window, not
+/// one instantaneous read. The authority is an independent 100 Hz poll
+/// of the same `gpu_metrics` field over the same windows, run here.
+///
+/// The statistic: over six 2 s windows (the GUI's default interval),
+/// the root-mean-square of (ours − independent mean) ÷ σ. With 10 of
+/// our reads against ~200 independent ones, a true window mean is off
+/// by about σ·√(1/10 + 1/200) ≈ 0.32σ; a single read is off by about σ
+/// (the signal's own spread). The bar is 0.6σ: ≈ 1.9× the honest
+/// estimator's expected RMS, ≈ 0.6× the cheat's. Idle-gated windows
+/// (σ = 0, nothing to estimate) are skipped.
+#[test]
+fn gpu_clock_is_the_window_mean_not_one_read() {
+    let Some(card) = std::fs::read_dir("/sys/class/drm").ok().and_then(|entries| {
+        entries.flatten().map(|e| e.path().join("device")).find(|d| {
+            std::fs::read_to_string(d.join("vendor")).is_ok_and(|v| v.trim() == "0x1002")
+                && d.join("gpu_metrics").exists()
+        })
+    }) else {
+        eprintln!("no amdgpu gpu_metrics here — skipping");
+        return;
+    };
+    let read_gfx = |card: &std::path::Path| -> Option<f64> {
+        let blob = std::fs::read(card.join("gpu_metrics")).ok()?;
+        let layout = blob.get(2..4)?;
+        (layout[0] == 1 && (1..=3).contains(&layout[1]))
+            .then(|| u16::from_le_bytes([blob[0x28], blob[0x29]]))
+            .filter(|v| *v != u16::MAX)
+            .map(f64::from)
+    };
+    if read_gfx(&card).is_none() {
+        eprintln!("gpu_metrics layout not v1.1–v1.3 — skipping");
+        return;
+    }
+
+    let mut wants = Wants::none();
+    wants.gpu = true;
+    let mut sampler = Sampler::new();
+    let _prime = sampler.sample(wants);
+    let mut z_squares = Vec::new();
+    let mut report = Vec::new();
+    for _ in 0..6 {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poll = {
+            let (stop, card) = (stop.clone(), card.clone());
+            std::thread::spawn(move || {
+                let mut reads = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    reads.extend(read_gfx(&card));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                reads
+            })
+        };
+        std::thread::sleep(Duration::from_millis(2000));
+        let ours = sampler.sample(wants).gpu.expect("gpu section");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let reads = poll.join().unwrap();
+
+        let source = ours.clock_source.clone().unwrap_or_default();
+        assert!(source.starts_with("mean of "), "clock_source should be a window mean, got {source:?}");
+        let n = reads.len() as f64;
+        let mean = reads.iter().sum::<f64>() / n;
+        let sigma = (reads.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+        let core = ours.core_clock_mhz.expect("core clock");
+        report.push(format!("{core:.0} vs {mean:.0}±σ{sigma:.0}"));
+        if sigma >= 5.0 {
+            z_squares.push(((core - mean) / sigma).powi(2));
+        }
+    }
+    if z_squares.len() < 3 {
+        eprintln!("GPU clock-gated (σ≈0) in most windows, nothing to estimate — skipping: {report:?}");
+        return;
+    }
+    let rms = (z_squares.iter().sum::<f64>() / z_squares.len() as f64).sqrt();
+    assert!(rms <= 0.6, "RMS error {rms:.2}σ — that's a single read, not a window mean: {report:?}");
+}
+
+/// C1a: the busy clock is what the busy cores actually delivered over
+/// the window, not one instant read per core (which caught idle cores
+/// at their idle clock and ran 0.6–2.1 GHz low on this machine).
+///
+/// Authority: ACPI CPPC feedback counters (delivered/reference, the
+/// APERF/MPERF ratio turbostat reads), sampled by this test at the
+/// window's edges and busy-weighted from /proc/stat over the same
+/// window. Tolerance 150 MHz: the two windows' edges differ by the
+/// few ms it takes to read 32 cores' counters (~0.6 ms each).
+#[test]
+fn cpu_busy_clock_is_what_the_busy_cores_delivered() {
+    let cppc = |core: usize| -> Option<(u64, u64)> {
+        let text = std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{core}/acpi_cppc/feedback_ctrs")).ok()?;
+        let mut fields = text.split_whitespace();
+        let reference = fields.next()?.strip_prefix("ref:")?.parse().ok()?;
+        let delivered = fields.next()?.strip_prefix("del:")?.parse().ok()?;
+        Some((reference, delivered))
+    };
+    let Some(nominal_mhz) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+    else {
+        eprintln!("no ACPI CPPC here — skipping");
+        return;
+    };
+    let busy_ticks = || -> Vec<(u64, u64)> {
+        std::fs::read_to_string("/proc/stat")
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("cpu") && l.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
+            .map(|l| {
+                let v: Vec<u64> = l.split_whitespace().skip(1).map(|f| f.parse().unwrap()).collect();
+                let total: u64 = v.iter().sum();
+                (total, total - v[3] - v[4])
+            })
+            .collect()
+    };
+
+    // The load changes between consecutive windows (C1c): half the
+    // cores, then one, then half, then one. A clock that answers with
+    // the previous window's delivery is caught on every switch; under
+    // constant load it would look right. Each window's truth is read
+    // at the same edges the sampler uses (right after each sample).
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let spin = |count: usize| {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let threads: Vec<_> = (0..count)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::hint::black_box(1u64.wrapping_mul(3));
+                    }
+                })
+            })
+            .collect();
+        move || {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        }
+    };
+
+    let mut wants = Wants::none();
+    wants.cpu = true;
+    let mut sampler = Sampler::new();
+    let mut results = Vec::new();
+    let mut stop = spin(cores / 2);
+    std::thread::sleep(Duration::from_millis(300));
+    let _prime = sampler.sample(wants);
+    let mut ticks_0 = busy_ticks();
+    let mut cppc_0: Vec<_> = (0..cores).map(cppc).collect();
+    for window in 0..4 {
+        std::thread::sleep(Duration::from_millis(1500));
+        let ours = sampler.sample(wants).cpu.expect("cpu");
+        let ticks_1 = busy_ticks();
+        let cppc_1: Vec<_> = (0..cores).map(cppc).collect();
+        // Switch the load for the next window.
+        stop();
+        stop = spin(if window % 2 == 0 { 1 } else { cores / 2 });
+
+        let (mut weight, mut sum) = (0.0, 0.0);
+        for core in 0..cores {
+            let (Some(a), Some(b)) = (cppc_0[core], cppc_1[core]) else { continue };
+            let (t0, b0) = ticks_0[core];
+            let (t1, b1) = ticks_1[core];
+            if b.0 <= a.0 || t1 <= t0 {
+                continue;
+            }
+            let busy = (b1 - b0) as f64 / (t1 - t0) as f64;
+            let delivered = nominal_mhz * (b.1 - a.1) as f64 / (b.0 - a.0) as f64;
+            weight += busy;
+            sum += busy * delivered;
+        }
+        let truth = sum / weight;
+        let busy_clock = ours.frequency_busy_mhz.expect("frequency_busy_mhz");
+        results.push((window, busy_clock, truth, ours.frequency_busy_source.clone()));
+        (ticks_0, cppc_0) = (busy_ticks(), (0..cores).map(cppc).collect());
+    }
+    stop();
+    for (window, ours, truth, source) in &results {
+        assert!(
+            (ours - truth).abs() <= 150.0,
+            "window {window}: busy clock {ours:.0} MHz ({source:?}) vs CPPC delivered {truth:.0} MHz over the same window: {results:?}"
+        );
+    }
 }

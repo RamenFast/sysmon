@@ -6,6 +6,13 @@
 //! `--background` (GUI on a private Xvfb display). All agent-grade:
 //! JSON envelopes, errors that carry a `fix`, exit codes 0/2/3/4.
 
+/// `println!` for the CLI's stdout: same formatting, but a closed pipe
+/// is a clean exit 0 instead of a panic (see `envelope::print_line`).
+macro_rules! out {
+    () => { $crate::envelope::print_line("") };
+    ($($arg:tt)*) => { $crate::envelope::print_line(&format!($($arg)*)) };
+}
+
 pub mod agent;
 pub mod control;
 pub mod envelope;
@@ -19,7 +26,7 @@ pub fn run_cli() -> i32 {
     let first = arguments.first().map(String::as_str);
     match first {
         Some("--version") | Some("-V") => {
-            println!("sysmon {} (v3)", sysmon_core::VERSION);
+            out!("sysmon {} (v3)", sysmon_core::VERSION);
             0
         }
         Some("--help") | Some("-h") | Some("help") => {
@@ -70,6 +77,11 @@ fn run_background(arguments: &[String]) -> i32 {
     };
     let rest: Vec<&String> = arguments.iter().filter(|a| a.as_str() != "--background").collect();
     use std::os::unix::process::CommandExt;
+    // The virtual display is X11 and nothing else. From a Wayland
+    // session the inherited WAYLAND_DISPLAY makes winit dial a
+    // compositor instead (and fail: exit 4), and a custom compositor's
+    // LD_LIBRARY_PATH (swayfx ships its own libxkbcommon) mixes two
+    // xkbcommon builds into the process, which segfaulted on quit.
     let error = std::process::Command::new("xvfb-run")
         .arg("-a")
         .args(["-s", "-screen 0 1280x900x24"])
@@ -77,6 +89,10 @@ fn run_background(arguments: &[String]) -> i32 {
         .arg("--background")
         .args(rest)
         .env("SYSMON_BACKGROUND", "1")
+        .env("XDG_SESSION_TYPE", "x11")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .env_remove("LD_LIBRARY_PATH")
         .exec();
     eprintln!("sysmon --background: could not launch xvfb-run: {error}");
     eprintln!("fix: install it (sudo apt install xvfb), or run sysmon on your display normally");
@@ -84,7 +100,7 @@ fn run_background(arguments: &[String]) -> i32 {
 }
 
 fn print_help() {
-    println!(
+    out!(
         "sysmon {} — compact system monitor with an agent-drivable API
 
 USAGE

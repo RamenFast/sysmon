@@ -45,7 +45,7 @@ impl GuiBackend {
 
     fn filtered_snapshot(&self, wants: Wants) -> Value {
         let snapshot: Arc<SystemSnapshot> = self.shared.latest.read().unwrap().clone();
-        let mut value = serde_json::to_value(snapshot.as_ref()).unwrap_or_else(|_| json!({}));
+        let mut value = snapshot.to_json_value().unwrap_or_else(|_| json!({}));
         if let Some(object) = value.as_object_mut() {
             let keep = |name: &str, wanted: bool, object: &mut serde_json::Map<String, Value>| {
                 if !wanted {
@@ -171,6 +171,12 @@ impl Backend for GuiBackend {
     }
 
     fn request_quit(&self) {
+        // The socket is bound before the window exists, so a `quit`
+        // can arrive while the GUI is still starting. Remember it: the
+        // app checks the flag on its first frame. (It was dropped
+        // before, and the window lived on after a `quit` that had
+        // replied "quitting": true.)
+        self.shared.quit_requested.store(true, Ordering::SeqCst);
         if let Some(ctx) = self.ctx.get() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             ctx.request_repaint();

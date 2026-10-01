@@ -23,6 +23,10 @@ struct ServeBackend {
     quit: Arc<AtomicBool>,
 }
 
+/// A window longer than the slowest subscriber cadence (60 s) is no
+/// client's cadence: it's leftover from a client that went away.
+const STALE_WINDOW_SECONDS: f64 = 61.0;
+
 impl Backend for ServeBackend {
     fn mode(&self) -> &'static str {
         "serve"
@@ -43,7 +47,22 @@ impl Backend for ServeBackend {
                 "restart the daemon: sysmon ctl quit && sysmon serve",
             )
         })?;
-        serde_json::to_value(sampler.sample(wants)).map_err(|serialize_error| {
+        // On-demand sampling, shared by every client: the sections this
+        // client wants may never have been sampled (every rate a false
+        // 0), or were last sampled by other clients at other times (one
+        // stale, one fresh: an 8 s average under a 0.3 s label). Unless
+        // they share one recent window, open a fresh common window, the
+        // same short one a direct probe takes.
+        let window_ok = sampler
+            .common_window(wants)
+            .is_some_and(|window| (0.2..=STALE_WINDOW_SECONDS).contains(&window));
+        if !window_ok {
+            let _prime = sampler.sample(wants);
+            let window = if wants.processes { 1000 } else { 250 };
+            std::thread::sleep(Duration::from_millis(window));
+        }
+        let snapshot = sampler.sample(wants);
+        snapshot.to_json_value().map_err(|serialize_error| {
             VerbError::runtime(
                 format!("snapshot serialization failed: {serialize_error}"),
                 "this is a sysmon bug — please report it",
@@ -118,7 +137,7 @@ pub fn run(_arguments: &[String]) -> i32 {
             "pid": std::process::id(),
         })));
     } else {
-        println!(
+        out!(
             "sysmon serve — answering on {} (ctrl-c to stop; costs nothing while idle)",
             socket_path().display()
         );

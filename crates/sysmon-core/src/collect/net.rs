@@ -160,8 +160,7 @@ impl NetCollector {
             snapshot.interfaces.push(InterfaceSnapshot {
                 name: name.clone(),
                 kind,
-                is_up: read_trimmed(format!("/sys/class/net/{name}/operstate")).as_deref()
-                    == Some("up"),
+                is_up: interface_is_up(name),
                 ipv4,
                 ipv6,
                 rx_bps,
@@ -174,6 +173,24 @@ impl NetCollector {
 
         self.previous = counters;
         snapshot
+    }
+}
+
+/// `ip link`'s notion of up. operstate says "unknown" for drivers
+/// that don't report link state (lo, tun/wireguard/tailscale) even
+/// while they pass traffic; for those, administratively up (IFF_UP)
+/// with a carrier is up.
+fn interface_is_up(name: &str) -> bool {
+    match read_trimmed(format!("/sys/class/net/{name}/operstate")).as_deref() {
+        Some("up") => true,
+        Some("unknown") => {
+            let flags = read_trimmed(format!("/sys/class/net/{name}/flags"))
+                .and_then(|hex| u32::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+            let carrier = read_trimmed(format!("/sys/class/net/{name}/carrier")).as_deref() == Some("1");
+            flags & libc::IFF_UP as u32 != 0 && carrier
+        }
+        _ => false,
     }
 }
 

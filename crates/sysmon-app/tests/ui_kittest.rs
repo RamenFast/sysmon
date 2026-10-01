@@ -265,15 +265,29 @@ fn ui_interactions_end_to_end() {
     // ---- units through the menu -------------------------------------
     harness.get_by_label("Display options").click();
     harness.run_steps(8);
-    harness.get_by_label("Binary (GiB)").click();
+    harness.get_by_label("GiB (binary)").click();
     harness.run_steps(8);
     assert!(harness.state().settings.use_binary_units, "binary units applied");
     // Menu items close the popup on click — reopen per interaction.
     harness.get_by_label("Display options").click();
     harness.run_steps(8);
-    harness.get_by_label("Decimal (GB)").click();
+    harness.get_by_label("GB (decimal)").click();
     harness.run_steps(8);
     assert!(!harness.state().settings.use_binary_units, "decimal units restored");
+
+    // ---- temperature scale through the menu ----------------------------
+    use sysmon_core::units::TemperatureScale;
+    for (label, scale) in [
+        ("°F + °C", TemperatureScale::Both),
+        ("°F", TemperatureScale::Fahrenheit),
+        ("°C", TemperatureScale::Celsius),
+    ] {
+        harness.get_by_label("Display options").click();
+        harness.run_steps(8);
+        harness.get_by_label(label).click();
+        harness.run_steps(8);
+        assert_eq!(harness.state().settings.display().temperature, scale, "{label} chip applies");
+    }
 
     // ---- compact mode through the menu -------------------------------
     harness.get_by_label("Display options").click();

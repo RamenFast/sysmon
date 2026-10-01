@@ -235,6 +235,23 @@ fn published_enums_match_the_code_that_enforces_them() {
             "schema publishes pop-out section `{section}`, which does not exist"
         );
     }
+
+    // Temperature scale: every published id parses, and every scale
+    // the code has is published (a scale the GUI offers but the
+    // schema hides is one an agent can't set).
+    use sysmon_core::units::TemperatureScale;
+    let scales: Vec<&str> = ctl["temperature"]["value"]["enum"]
+        .as_array()
+        .expect("temperature enum")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for id in &scales {
+        assert!(TemperatureScale::from_id(id).is_some(), "schema publishes scale `{id}`, which doesn't parse");
+    }
+    for scale in [TemperatureScale::Celsius, TemperatureScale::Fahrenheit, TemperatureScale::Both] {
+        assert!(scales.contains(&scale.id()), "scale `{}` exists but isn't published", scale.id());
+    }
 }
 
 /// Every section the schema names must be probeable, and answer.
@@ -323,7 +340,7 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
+        .map(|mut child| {
             use std::io::{BufRead, BufReader};
             let stdout = child.stdout.take().expect("piped stdout");
             let mut reader = BufReader::new(stdout);
@@ -336,7 +353,7 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
             }
             let _ = child.kill();
             let _ = child.wait();
-            Ok(line)
+            line
         })
         .expect("tap produced a line");
 
@@ -362,4 +379,418 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
         "stream line shows {long_tailed} over-precise numbers — \
          the f32 readings were widened by a Value round-trip: {output}"
     );
+}
+
+/// Numbers in a JSON line that are f32 readings printed at f64
+/// precision: exactly representable as an f32, yet longer than that
+/// f32's shortest form ("0.6909999847412109" is f32 0.691 widened).
+/// Values computed in f64 are almost never exactly f32-representable,
+/// so they don't trip this — no length heuristic, no allowance.
+fn widened_numbers(line: &str) -> Vec<String> {
+    line.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == 'E'))
+        .filter(|token| token.contains('.'))
+        .filter(|token| {
+            let Ok(value) = token.parse::<f64>() else { return false };
+            let narrow = value as f32;
+            // `{:?}` is f32's shortest round-trip form with the ".0"
+            // kept ("8.0", "0.691"), the same shape serde prints.
+            // (Display drops it — "8" — which flagged every integer.)
+            narrow as f64 == value && format!("{narrow:?}").len() < token.len()
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// F19 (3.1 audit): `probe` printed `"overall_percent":1.6357687711715698`
+/// for a reading `tap` printed as `1.5370705`. Every producer must emit
+/// the typed serializer's bytes — direct probe, and through a live
+/// instance's socket (snapshot and subscribe alike).
+#[test]
+fn every_producer_prints_f32_readings_exactly() {
+    let sandbox = Sandbox::new();
+    let direct = Command::new(binary())
+        .args(["probe", "cpu", "sensors", "--json"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .output()
+        .expect("probe runs");
+    let direct = String::from_utf8_lossy(&direct.stdout).to_string();
+    assert_eq!(widened_numbers(&direct), Vec::<String>::new(), "direct probe widened f32s");
+
+    // Through a live `serve` on the sandbox socket.
+    let mut daemon = Command::new(binary())
+        .arg("serve")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("serve starts");
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let via_socket = Command::new(binary())
+        .args(["probe", "cpu", "sensors", "--json"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .output()
+        .expect("probe via socket runs");
+    let via_socket = String::from_utf8_lossy(&via_socket.stdout).to_string();
+    let tapped = {
+        use std::io::{BufRead, BufReader};
+        let mut child = Command::new(binary())
+            .args(["tap", "cpu", "sensors", "--interval", "0.3"])
+            .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("tap via socket runs");
+        let mut line = String::new();
+        let _ = BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+        let _ = child.kill();
+        let _ = child.wait();
+        line
+    };
+    let _ = Command::new(binary())
+        .args(["ctl", "quit"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .output();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    let parsed: Value = serde_json::from_str(via_socket.trim()).expect("socket probe is JSON");
+    assert_eq!(parsed["result"]["via"], "socket", "the second probe really rode the socket");
+    assert_eq!(widened_numbers(&via_socket), Vec::<String>::new(), "socket probe widened f32s");
+    assert!(tapped.contains("\"event\""), "the socket tap produced a stream line: {tapped}");
+    assert_eq!(widened_numbers(&tapped), Vec::<String>::new(), "socket tap widened f32s");
+}
+
+#[test]
+fn a_full_disk_is_not_a_clean_exit() {
+    // Reviewer B #4: only a closed pipe means "enough". ENOSPC on
+    // stdout lost the whole answer, and exit 0 told the caller it
+    // arrived. It must be a runtime failure (4) with a fix on stderr.
+    let sandbox = Sandbox::new();
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").expect("/dev/full");
+    let output = Command::new(binary())
+        .args(["probe", "memory", "--json"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(full)
+        .output()
+        .expect("probe runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "stdout write failed with ENOSPC; stderr: {stderr}");
+    assert!(stderr.contains("fix"), "the failure names its fix: {stderr}");
+}
+
+/// F20: a consumer that closes the pipe early is normal (`| head`).
+/// The CLI law allows exits 0/2/3/4 — never a panic's 101.
+#[test]
+fn a_closed_pipe_is_a_clean_exit() {
+    let sandbox = Sandbox::new();
+    for arguments in [&["probe", "cpu", "--json"][..], &["schema"][..], &["probe", "cpu"][..]] {
+        let mut child = Command::new(binary())
+            .args(arguments)
+            .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        drop(child.stdout.take()); // the reader is gone before a byte is written
+        let output = child.wait_with_output().expect("wait");
+        let code = output.status.code().unwrap_or(-1);
+        assert!(
+            [0, 2, 3, 4].contains(&code),
+            "`sysmon {}` exited {code} on a closed pipe: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// F12: per-process CPU% from a 0.25 s window moved in 4% steps
+/// (one 10 ms tick / 0.25 s). The one-shot window must be long enough
+/// that one tick is ≤ 1% — i.e. ≥ 1 s.
+#[test]
+fn probe_processes_samples_over_a_full_second() {
+    let (reply, code) = Sandbox::new().run(&["probe", "processes", "--json"]);
+    assert_eq!(code, 0);
+    let window = reply["result"]["interval_seconds"].as_f64().expect("interval_seconds");
+    assert!(window >= 0.95, "processes window was {window:.3} s — CPU% quantized to {:.1}% steps", 1.0 / window);
+}
+
+/// F21: a one-shot probe can't run nethogs (it needs a long-lived
+/// capture), so per-process UDP/QUIC is missing — and it must say so.
+#[test]
+fn a_one_shot_probe_discloses_its_network_coverage() {
+    let (reply, code) = Sandbox::new().run(&["probe", "network", "--json"]);
+    assert_eq!(code, 0);
+    let network = &reply["result"]["network"];
+    if network["process_source"] == "tcp_diag" {
+        let hint = network["process_source_hint"].as_str().unwrap_or("");
+        assert!(hint.contains("serve"), "tcp_diag-only probe must point at `sysmon serve`, got {hint:?}");
+    }
+}
+
+/// A freshly started `serve` answered its first snapshot with a 0 s
+/// window, so every rate in it (CPU %, network, disk) was a false
+/// zero. The first answer must carry a real window, like a direct
+/// probe's.
+#[test]
+fn a_fresh_serve_never_answers_with_an_empty_window() {
+    let sandbox = Sandbox::new();
+    let mut daemon = Command::new(binary())
+        .arg("serve")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("serve starts");
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (reply, code) = sandbox.run(&["probe", "cpu", "--json"]);
+    let _ = sandbox.run(&["ctl", "quit", "--json"]);
+    let _ = daemon.wait();
+    assert_eq!(code, 0);
+    assert_eq!(reply["result"]["via"], "socket", "rode the fresh serve");
+    let window = reply["result"]["interval_seconds"].as_f64().unwrap_or(0.0);
+    assert!(window >= 0.2, "first answer from serve spans {window} s — its rates are all zero");
+}
+
+/// Serve kept warm by one client (a `tap network`) must still give a
+/// second client's first ask for *other* sections a real window, and a
+/// section last read long ago must not answer with that long average
+/// under a short label (Reviewer B, P1). The check: a spinning `sh`
+/// started just before the ask shows as busy, and overall CPU is not 0.
+#[test]
+fn a_warm_serve_measures_each_section_over_its_own_window() {
+    let sandbox = Sandbox::new();
+    let env = |command: &mut Command| {
+        command
+            .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    };
+    let mut serve = Command::new(binary());
+    serve.arg("serve");
+    env(&mut serve);
+    let daemon = GroupGuard::spawn(serve);
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut tap = Command::new(binary());
+    tap.args(["tap", "network", "-i", "0.3"]);
+    env(&mut tap);
+    let warm = GroupGuard::spawn(tap);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let mut spin_command = Command::new("sh");
+    spin_command.args(["-c", "while :; do :; done"]);
+    let spinner = GroupGuard::spawn(spin_command);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (reply, code) = sandbox.run(&["probe", "cpu", "processes", "--json"]);
+    let spinner_pid = spinner.pid();
+    drop(spinner);
+    drop(warm);
+    let _ = sandbox.run(&["ctl", "quit", "--json"]);
+    drop(daemon);
+
+    assert_eq!(code, 0);
+    assert_eq!(reply["result"]["via"], "socket", "rode the warm serve");
+    let overall = reply["result"]["cpu"]["overall_percent"].as_f64().unwrap_or(0.0);
+    let spinner_cpu = reply["result"]["processes"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["pid"].as_i64() == Some(spinner_pid as i64)))
+        .and_then(|row| row["cpu_percent"].as_f64());
+    assert!(
+        overall > 0.5 && spinner_cpu.is_some_and(|cpu| cpu > 50.0),
+        "first cpu+processes ask on a warm serve: overall {overall}%, spinner {spinner_cpu:?}% \
+         (window {})",
+        reply["result"]["interval_seconds"]
+    );
+}
+
+/// Every field a real probe emits is named in `schema.sections`. A
+/// field an agent can see but can't look up is a field it will guess
+/// about (3.1 added a dozen; this keeps the map from drifting again).
+#[test]
+fn every_live_field_is_documented_in_the_schema() {
+    let schema = schema();
+    let sections = &schema["sections"];
+    let documented = |section: &str| -> String { sections[section].to_string() };
+    let (probe, code) = Sandbox::new().run(&["probe", "all", "--json"]);
+    assert_eq!(code, 0);
+    let result = &probe["result"];
+    let mut missing = Vec::new();
+    let mut check = |section: &str, object: &Value| {
+        let text = documented(section);
+        if let Some(fields) = object.as_object() {
+            for key in fields.keys() {
+                if !text.contains(key.as_str()) {
+                    missing.push(format!("{section}.{key}"));
+                }
+            }
+        }
+    };
+    for section in ["system", "cpu", "memory", "gpu", "network"] {
+        check(section, &result[section]);
+    }
+    check("memory", &result["memory"]["modules"][0]);
+    check("network", &result["network"]["interfaces"][0]);
+    check("disks", &result["disks"][0]);
+    check("processes", &result["processes"][0]);
+    if let Some(chips) = result["sensors"]["chips"].as_array() {
+        for chip in chips {
+            check("sensors", chip);
+            for list in ["temps", "fans", "voltages", "power"] {
+                if let Some(first) = chip[list].get(0) {
+                    check("sensors", first);
+                }
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(missing.is_empty(), "live fields the schema never names: {missing:?}");
+}
+
+/// `--background` runs the GUI on a private Xvfb display. It must work
+/// when launched from a Wayland session (the inherited WAYLAND_DISPLAY
+/// made winit dial a compositor that isn't there and exit 4), and it
+/// must quit cleanly (an inherited LD_LIBRARY_PATH from a custom
+/// compositor build mixed two libxkbcommons and segfaulted on exit).
+#[test]
+fn background_mode_starts_and_quits_cleanly_from_a_wayland_session() {
+    if Command::new("xvfb-run").arg("--help").output().is_err() {
+        eprintln!("xvfb-run not installed — skipping");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let mut command = Command::new(binary());
+    command
+        .arg("--background")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        // What a launcher in a Wayland session hands down.
+        .env("WAYLAND_DISPLAY", "wayland-1")
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env("LD_LIBRARY_PATH", "/opt/swayfx-ux/lib/x86_64-linux-gnu:/opt/swayfx-ux/lib")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut gui = GroupGuard::spawn(command);
+    let gui = &mut gui.child;
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        if let Ok(Some(status)) = gui.try_wait() {
+            let mut stderr = String::new();
+            use std::io::Read;
+            let _ = gui.stderr.take().unwrap().read_to_string(&mut stderr);
+            panic!("--background exited {status} before serving: {stderr}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (status, code) = sandbox.run(&["ctl", "status", "--json"]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["result"]["mode"], "gui");
+    let (_, code) = sandbox.run(&["ctl", "quit", "--json"]);
+    assert_eq!(code, 0);
+    let status = gui.wait().expect("wait");
+    let mut stderr = String::new();
+    if let Some(mut pipe) = gui.stderr.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(
+        status.success(),
+        "--background exited {status:?} on quit: {stderr}"
+    );
+}
+
+/// `--background` forks xvfb-run → Xvfb + the GUI. A failing test that
+/// only killed its direct child left both orphaned to init. The guard
+/// starts the tree in its own process group and kills the group on
+/// drop — pass, fail or panic.
+struct GroupGuard {
+    child: std::process::Child,
+}
+
+impl GroupGuard {
+    fn spawn(mut command: Command) -> GroupGuard {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        GroupGuard {
+            child: command.spawn().expect("spawn --background"),
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        let group = self.child.id() as i32;
+        // Only signal a group that still exists (a clean quit already
+        // reaped it).
+        unsafe {
+            if libc::kill(-group, 0) == 0 {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+        let _ = self.child.wait();
+    }
+}
+
+/// The GUI binds the socket before its window exists. A `quit` sent in
+/// that gap replied `"quitting": true` and was then dropped: the window
+/// lived on (found as orphaned test GUIs). A quit is a quit.
+#[test]
+fn a_quit_during_gui_startup_is_honored() {
+    if Command::new("xvfb-run").arg("--help").output().is_err() {
+        eprintln!("xvfb-run not installed — skipping");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let mut command = Command::new(binary());
+    command
+        .arg("--background")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut guard = GroupGuard::spawn(command);
+    let gui = &mut guard.child;
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The instant the socket exists: no waiting for the window.
+    let (_, code) = sandbox.run(&["ctl", "quit", "--json"]);
+    assert_eq!(code, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(status) = gui.try_wait().expect("try_wait") {
+            assert!(status.success(), "GUI exited {status} after an early quit");
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("GUI still running 20 s after `quit` was acknowledged");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }

@@ -15,7 +15,10 @@ use super::read::{SelfInterval, read_trimmed, read_u64};
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CpuTicks {
     pub total: u64,
+    /// idle + iowait: neither is work.
     pub idle: u64,
+    /// The iowait share of `idle`, kept apart so it can be reported.
+    pub iowait: u64,
 }
 
 /// Parse a `cpu…` line from /proc/stat (either the aggregate `cpu`
@@ -38,6 +41,7 @@ pub fn parse_cpu_line(line: &str) -> Option<CpuTicks> {
     Some(CpuTicks {
         total: counted,
         idle,
+        iowait: values[4],
     })
 }
 
@@ -80,6 +84,34 @@ fn busy_percent(previous: CpuTicks, current: CpuTicks) -> f32 {
     (busy * 100.0).clamp(0.0, 100.0) as f32
 }
 
+fn iowait_percent(previous: CpuTicks, current: CpuTicks) -> f32 {
+    let total_delta = current.total.saturating_sub(previous.total);
+    if total_delta == 0 {
+        return 0.0;
+    }
+    let iowait_delta = current.iowait.saturating_sub(previous.iowait);
+    (iowait_delta as f64 / total_delta as f64 * 100.0).clamp(0.0, 100.0) as f32
+}
+
+/// The clock the working cores ran at: each core's current frequency
+/// weighted by how busy it was over the window. A parked core keeps
+/// reporting its last requested clock to cpufreq, so the plain mean
+/// across 32 threads mostly measures idle cores; this answers "how
+/// fast is the work running" (turbostat's Bzy_MHz). None when nothing
+/// was busy enough to weigh (< 0.5% of one core in total).
+pub fn busy_weighted_mhz(per_core_percent: &[f32], per_core_khz: &[Option<u64>]) -> Option<f64> {
+    let mut weight = 0.0f64;
+    let mut sum = 0.0f64;
+    for (busy, khz) in per_core_percent.iter().zip(per_core_khz) {
+        if let Some(khz) = khz {
+            let w = f64::from(*busy);
+            weight += w;
+            sum += w * (*khz as f64 / 1000.0);
+        }
+    }
+    (weight >= 0.5).then(|| sum / weight)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LoadAvg {
     pub load_1m: f64,
@@ -108,8 +140,91 @@ pub fn parse_loadavg(content: &str) -> LoadAvg {
 pub struct CpuCollector {
     window: SelfInterval,
     previous: Option<ProcStat>,
-    /// (cur, min, max) sysfs paths per core, discovered once.
-    cpufreq_paths: Vec<(String, String, String)>,
+    /// scaling_cur_freq per core, discovered once.
+    cpufreq_paths: Vec<String>,
+    /// Hardware clock limits (cpuinfo_min/max_freq): static, read once.
+    frequency_range_mhz: (Option<f64>, Option<f64>),
+    cppc: Option<CppcReader>,
+}
+
+/// The clock each core actually *delivered* across the window, from
+/// ACPI CPPC feedback counters: (delivered − delivered₀)/(reference −
+/// reference₀) × nominal_freq, the APERF/MPERF ratio turbostat reads,
+/// counted only while the core runs (C1a).
+///
+/// Each `feedback_ctrs` read is a firmware mailbox round-trip
+/// (≈0.7 ms wall, ≈0.3 ms CPU; 32 cores ≈ 21 ms wall, 10 ms CPU). The
+/// sweep happens in the sample that uses it, right after /proc/stat,
+/// so both edges of the window are this sample's edges (C1c: an
+/// earlier background-thread version answered with the previous
+/// window). The wait lands on the sampler's own thread, never a UI one.
+struct CppcReader {
+    nominal_mhz: f64,
+    paths: Vec<String>,
+    previous: Option<CppcSweep>,
+}
+
+/// One (reference, delivered) reading per core, None where unreadable.
+type CppcSweep = Vec<Option<(u64, u64)>>;
+
+impl CppcReader {
+    fn new(cores: &[String]) -> Option<CppcReader> {
+        let nominal_mhz = read_u64(format!("/sys/devices/system/cpu/{}/acpi_cppc/nominal_freq", cores.first()?))? as f64;
+        let paths: Vec<String> =
+            cores.iter().map(|core| format!("/sys/devices/system/cpu/{core}/acpi_cppc/feedback_ctrs")).collect();
+        parse_feedback_ctrs(&fs::read_to_string(&paths[0]).ok()?)?;
+        Some(CppcReader {
+            nominal_mhz,
+            paths,
+            previous: None,
+        })
+    }
+
+    /// Per-core delivered MHz since the last call (None per core when
+    /// unreadable or wrapped); None on the first call, which only sets
+    /// the window's opening edge.
+    fn take(&mut self) -> Option<Vec<Option<f64>>> {
+        let current: CppcSweep = self
+            .paths
+            .iter()
+            .map(|path| fs::read_to_string(path).ok().as_deref().and_then(parse_feedback_ctrs))
+            .collect();
+        let window = self.previous.as_ref().map(|previous| delivered_mhz(self.nominal_mhz, previous, &current));
+        self.previous = Some(current);
+        window
+    }
+}
+
+/// Per-core delivered MHz between two sweeps. A wrap or reset shows as
+/// a counter going backwards: that core drops out of the window.
+fn delivered_mhz(nominal_mhz: f64, before: &CppcSweep, after: &CppcSweep) -> Vec<Option<f64>> {
+    before
+        .iter()
+        .zip(after)
+        .map(|(before, after)| {
+            let ((r0, d0), (r1, d1)) = ((*before)?, (*after)?);
+            let (reference, delivered) = (r1.checked_sub(r0)?, d1.checked_sub(d0)?);
+            (reference > 0).then(|| nominal_mhz * delivered as f64 / reference as f64)
+        })
+        .collect()
+}
+
+/// "cpuN" names in the same order as `cpufreq_paths` (which is the
+/// /proc/stat order), so CPPC results line up with per-core busy %.
+fn cores_for_cppc(cpufreq_paths: &[String]) -> Option<Vec<String>> {
+    let cores: Vec<String> = cpufreq_paths
+        .iter()
+        .filter_map(|path| path.strip_prefix("/sys/devices/system/cpu/")?.split('/').next().map(str::to_string))
+        .collect();
+    (!cores.is_empty()).then_some(cores)
+}
+
+/// "ref:1691286126842 del:1944026549165" → (reference, delivered).
+pub fn parse_feedback_ctrs(text: &str) -> Option<(u64, u64)> {
+    let mut fields = text.split_whitespace();
+    let reference = fields.next()?.strip_prefix("ref:")?.parse().ok()?;
+    let delivered = fields.next()?.strip_prefix("del:")?.parse().ok()?;
+    Some((reference, delivered))
 }
 
 impl Default for CpuCollector {
@@ -121,6 +236,7 @@ impl Default for CpuCollector {
 impl CpuCollector {
     pub fn new() -> Self {
         let mut cpufreq_paths = Vec::new();
+        let mut frequency_range_mhz = (None, None);
         if let Ok(entries) = fs::read_dir("/sys/devices/system/cpu") {
             let mut cores: Vec<String> = entries
                 .flatten()
@@ -131,19 +247,24 @@ impl CpuCollector {
                 })
                 .collect();
             cores.sort_by_key(|name| name[3..].parse::<u32>().unwrap_or(u32::MAX));
-            for core in cores {
-                let base = format!("/sys/devices/system/cpu/{core}/cpufreq");
-                cpufreq_paths.push((
-                    format!("{base}/scaling_cur_freq"),
-                    format!("{base}/cpuinfo_min_freq"),
-                    format!("{base}/cpuinfo_max_freq"),
-                ));
+            for core in &cores {
+                cpufreq_paths.push(format!("/sys/devices/system/cpu/{core}/cpufreq/scaling_cur_freq"));
+            }
+            if let Some(first) = cores.first() {
+                let mhz = |file: &str| {
+                    read_u64(format!("/sys/devices/system/cpu/{first}/cpufreq/{file}"))
+                        .map(|khz| khz as f64 / 1000.0)
+                };
+                frequency_range_mhz = (mhz("cpuinfo_min_freq"), mhz("cpuinfo_max_freq"));
             }
         }
+        let cppc = cores_for_cppc(&cpufreq_paths).and_then(|cores| CppcReader::new(&cores));
         CpuCollector {
             window: SelfInterval::default(),
             previous: None,
             cpufreq_paths,
+            frequency_range_mhz,
+            cppc,
         }
     }
 
@@ -167,6 +288,8 @@ impl CpuCollector {
         let current = fs::read_to_string("/proc/stat")
             .map(|content| parse_proc_stat(&content))
             .unwrap_or_default();
+        // The CPPC edge right beside the /proc/stat edge: one window.
+        let delivered = self.cppc.as_mut().and_then(CppcReader::take);
 
         if let Some(previous) = &self.previous {
             snapshot.per_core_percent = current
@@ -176,6 +299,7 @@ impl CpuCollector {
                 .map(|(cur, prev)| busy_percent(*prev, *cur))
                 .collect();
             snapshot.overall_percent = busy_percent(previous.aggregate, current.aggregate);
+            snapshot.iowait_percent = iowait_percent(previous.aggregate, current.aggregate);
             if interval_seconds > 0.0 {
                 snapshot.context_switches_per_second = current
                     .context_switches
@@ -198,26 +322,27 @@ impl CpuCollector {
         snapshot.tasks_running = load.tasks_running;
         snapshot.tasks_total = load.tasks_total;
 
-        let mut current_khz = Vec::with_capacity(self.cpufreq_paths.len());
-        let mut min_khz: Option<u64> = None;
-        let mut max_khz: Option<u64> = None;
-        for (cur_path, min_path, max_path) in &self.cpufreq_paths {
-            if let Some(khz) = read_u64(cur_path) {
-                current_khz.push(khz);
-            }
-            if min_khz.is_none() {
-                min_khz = read_u64(min_path);
-            }
-            if max_khz.is_none() {
-                max_khz = read_u64(max_path);
-            }
-        }
-        if !current_khz.is_empty() {
-            let mean_khz = current_khz.iter().sum::<u64>() as f64 / current_khz.len() as f64;
+        let per_core_khz: Vec<Option<u64>> =
+            self.cpufreq_paths.iter().map(read_u64).collect();
+        let known: Vec<u64> = per_core_khz.iter().flatten().copied().collect();
+        if !known.is_empty() {
+            let mean_khz = known.iter().sum::<u64>() as f64 / known.len() as f64;
             snapshot.frequency_mhz = Some(mean_khz / 1000.0);
         }
-        snapshot.frequency_min_mhz = min_khz.map(|khz| khz as f64 / 1000.0);
-        snapshot.frequency_max_mhz = max_khz.map(|khz| khz as f64 / 1000.0);
+        // The busy clock: what the busy cores delivered over the window
+        // (CPPC) when we have a window of it; else the instant read.
+        let delivered_mhz = delivered.as_deref().and_then(|cores| {
+            let as_khz: Vec<Option<u64>> = cores.iter().map(|mhz| mhz.map(|m| (m * 1000.0) as u64)).collect();
+            busy_weighted_mhz(&snapshot.per_core_percent, &as_khz)
+        });
+        (snapshot.frequency_busy_mhz, snapshot.frequency_busy_source) = match delivered_mhz {
+            Some(mhz) => (Some(mhz), Some("delivered over the window".to_string())),
+            None => {
+                let instant = busy_weighted_mhz(&snapshot.per_core_percent, &per_core_khz);
+                (instant, instant.map(|_| "instant read".to_string()))
+            }
+        };
+        (snapshot.frequency_min_mhz, snapshot.frequency_max_mhz) = self.frequency_range_mhz;
 
         snapshot
     }
@@ -226,6 +351,27 @@ impl CpuCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_ctrs_parse_and_refuse_junk() {
+        assert_eq!(parse_feedback_ctrs("ref:1691286126842 del:1944026549165\n"), Some((1_691_286_126_842, 1_944_026_549_165)));
+        assert_eq!(parse_feedback_ctrs("del:1 ref:2"), None, "field order is the ABI");
+        assert_eq!(parse_feedback_ctrs("ref:x del:1"), None);
+        assert_eq!(parse_feedback_ctrs(""), None);
+    }
+
+    #[test]
+    fn a_wrapped_or_idle_core_drops_out_of_the_window() {
+        // C1b: going backwards (wrap/reset) or a zero reference delta
+        // must yield None for that core, never a huge or infinite MHz.
+        let before = vec![Some((1000, 1000)), Some((1000, 5000)), Some((1000, 1000)), None];
+        let after = vec![Some((2000, 2200)), Some((2000, 100)), Some((1000, 1500)), Some((5, 5))];
+        let window = delivered_mhz(3400.0, &before, &after);
+        assert_eq!(window[0], Some(3400.0 * 1.2));
+        assert_eq!(window[1], None, "delivered went backwards");
+        assert_eq!(window[2], None, "no reference ticks");
+        assert_eq!(window[3], None, "no previous edge");
+    }
 
     const STAT_FIXTURE: &str = "\
 cpu  100 20 50 800 30 5 5 0 0 0
@@ -253,13 +399,28 @@ procs_blocked 0
         let previous = CpuTicks {
             total: 1000,
             idle: 800,
+            iowait: 100,
         };
         let current = CpuTicks {
             total: 2000,
             idle: 1400,
+            iowait: 250,
         };
-        // 1000 new ticks, 600 idle → 40% busy.
+        // 1000 new ticks, 600 idle → 40% busy; 150 of the idle ticks
+        // were iowait → 15% iowait (counted idle, reported apart).
         assert_eq!(busy_percent(previous, current), 40.0);
+        assert_eq!(iowait_percent(previous, current), 15.0);
+    }
+
+    #[test]
+    fn busy_clock_ignores_parked_cores() {
+        // One core working at 4.6 GHz, three parked at 0.6 GHz: the
+        // plain mean says 1.6 GHz, the work runs at 4.6.
+        let busy = [100.0, 0.0, 0.0, 0.0];
+        let khz = [Some(4_600_000), Some(600_000), Some(600_000), Some(600_000)];
+        assert_eq!(busy_weighted_mhz(&busy, &khz), Some(4600.0));
+        // Nothing busy → no claim.
+        assert_eq!(busy_weighted_mhz(&[0.0; 4], &khz), None);
     }
 
     #[test]
