@@ -294,7 +294,18 @@ pub fn sparkline(ui: &mut Ui, palette: &Palette, values: &[f64], height: f32, co
     }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, palette.surface_2.gamma_multiply(0.6));
-    let top = maximum.unwrap_or_else(|| values.iter().copied().fold(0.0, f64::max) * 1.15).max(1e-9);
+    // With a given maximum (a percentage), scale 0..max. Without one,
+    // scale the series' own min..max: an RSS that moves 2 MB on 240 MB
+    // is otherwise a flat line pinned to the top.
+    let (floor, top) = match maximum {
+        Some(maximum) => (0.0, maximum.max(1e-9)),
+        None => {
+            let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+            let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let pad = ((high - low) * 0.15).max(high.abs() * 0.002).max(1e-9);
+            ((low - pad).max(0.0), high + pad)
+        }
+    };
     let step = rect.width() / (HISTORY_LENGTH.saturating_sub(1)) as f32;
     let count = values.len();
     let points: Vec<Pos2> = values
@@ -302,7 +313,8 @@ pub fn sparkline(ui: &mut Ui, palette: &Palette, values: &[f64], height: f32, co
         .enumerate()
         .map(|(index, value)| {
             let x = rect.right() - (count - 1 - index) as f32 * step;
-            let y = rect.bottom() - ((value / top).min(1.0) as f32) * (rect.height() - 2.0) - 1.0;
+            let share = ((value - floor) / (top - floor)).clamp(0.0, 1.0) as f32;
+            let y = rect.bottom() - share * (rect.height() - 2.0) - 1.0;
             pos2(x, y)
         })
         .collect();

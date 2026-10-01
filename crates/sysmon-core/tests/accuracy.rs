@@ -532,12 +532,13 @@ fn cpu_iowait_is_reported_apart_from_busy() {
 /// one instantaneous read. The authority is an independent 100 Hz poll
 /// of the same `gpu_metrics` field over the same windows, run here.
 ///
-/// The statistic: over six 1 s windows, the root-mean-square of
-/// (ours − independent mean) ÷ σ. A true window mean differs from the
-/// independent one by about σ·√(1/n₁+1/n₂) ≈ 0.25σ; a single read
-/// differs by about σ (the signal's own spread). The bar is 0.6σ:
-/// ≈ 2.4× the honest estimator's expected RMS, ≈ 0.6× the cheat's.
-/// Idle-gated windows (σ = 0, nothing to estimate) are skipped.
+/// The statistic: over six 2 s windows (the GUI's default interval),
+/// the root-mean-square of (ours − independent mean) ÷ σ. With 10 of
+/// our reads against ~200 independent ones, a true window mean is off
+/// by about σ·√(1/10 + 1/200) ≈ 0.32σ; a single read is off by about σ
+/// (the signal's own spread). The bar is 0.6σ: ≈ 1.9× the honest
+/// estimator's expected RMS, ≈ 0.6× the cheat's. Idle-gated windows
+/// (σ = 0, nothing to estimate) are skipped.
 #[test]
 fn gpu_clock_is_the_window_mean_not_one_read() {
     let Some(card) = std::fs::read_dir("/sys/class/drm").ok().and_then(|entries| {
@@ -581,7 +582,7 @@ fn gpu_clock_is_the_window_mean_not_one_read() {
                 reads
             })
         };
-        std::thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(2000));
         let ours = sampler.sample(wants).gpu.expect("gpu section");
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let reads = poll.join().unwrap();

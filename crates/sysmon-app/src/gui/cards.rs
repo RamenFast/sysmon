@@ -1038,11 +1038,16 @@ fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
         return;
     };
     let groups = sensors_view::group_sensors(&sensors);
-    // Headline: the hottest plausible reading, and where it is.
+    // Headline: the hottest plausible reading, and where it is. On a
+    // tie the earlier group wins: the CPU's own Tctl before the board's
+    // TSI mirror of the same die (max_by would pick the last).
     let hottest = groups
         .iter()
         .filter_map(|group| group.hottest().map(|(c, name)| (c, format!("{} · {name}", group.title))))
-        .max_by(|a, b| a.0.total_cmp(&b.0));
+        .fold(None, |best: Option<(f32, String)>, candidate| match best {
+            Some(best) if best.0 >= candidate.0 => Some(best),
+            _ => Some(candidate),
+        });
     let headline = hottest.as_ref().map(|(c, _)| cx.temperature(*c)).unwrap_or("—".into());
     let subtitle = hottest.map(|(_, at)| format!("hottest: {at}")).unwrap_or_default();
     card_header(ui, cx, "sensors", "Sensors", &subtitle, &headline);

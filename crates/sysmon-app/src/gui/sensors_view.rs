@@ -69,7 +69,8 @@ pub struct Group {
 }
 
 impl Group {
-    /// The hottest plausible temperature in the group.
+    /// The hottest plausible temperature in the group; on a tie the
+    /// first listed reading wins (Iterator::max_by would take the last).
     pub fn hottest(&self) -> Option<(f32, &str)> {
         self.readings
             .iter()
@@ -77,7 +78,10 @@ impl Group {
                 Reading::Temperature { name, celsius, .. } => Some((*celsius, name.as_str())),
                 _ => None,
             })
-            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .fold(None, |best: Option<(f32, &str)>, candidate| match best {
+                Some(best) if best.0 >= candidate.0 => Some(best),
+                _ => Some(candidate),
+            })
     }
 }
 
@@ -547,6 +551,17 @@ mod tests {
             .collect();
         assert_eq!(names, ["Die (Tctl)", "Chiplet 1", "Chiplet 2"]);
         assert_eq!(cpu.hottest().map(|(c, _)| c), Some(90.0));
+
+        // A tie names the first reading, not the last: the board's TSI
+        // mirror of the die must never outrank the CPU's own Tctl.
+        let tied = Group {
+            readings: vec![
+                Reading::Temperature { name: "Die (Tctl)".into(), raw: String::new(), celsius: 86.0, limit: 95.0, limit_is_reported: false },
+                Reading::Temperature { name: "CPU via board (TSI)".into(), raw: String::new(), celsius: 86.0, limit: 95.0, limit_is_reported: false },
+            ],
+            ..cpu.clone()
+        };
+        assert_eq!(tied.hottest().map(|(_, name)| name), Some("Die (Tctl)"));
 
         // Four NVMe channels → four distinct names, not four "nvme0n1".
         let nvme_names: Vec<String> = groups[1]

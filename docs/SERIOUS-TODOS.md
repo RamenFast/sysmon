@@ -107,3 +107,46 @@ not confident about?" — each answer lands here as a real TODO.*
   `scripts/install-skill.sh` installs or verifies the mirrors. C16
   fails the release gate on drift (mutation-proven). The Hermes mirror
   is deliberately left to Ben's manual ping.
+
+## From the v3.1 accuracy round (2026-10-01)
+
+- **[test] Per-process CPU, disk IO and disk util% have no scripted
+  authority.** The audit compares system-wide CPU to `mpstat` but not
+  per-process CPU to `pidstat -u`, per-process IO to `pidstat -d`, or
+  disk util% to `iostat -x`. 3.1 fixed the CPU window (F12) and Worker
+  A checked pidstat by hand; nobody checked the other two. Add three
+  audit rows (sysstat is installed).
+- **[watch] GPU negative cache (G14/G15).** A process that starts
+  using the GPU stays invisible for up to 5 samples (10 s at 2 s), and
+  the cache is keyed by pid, not (pid, starttime). Bounded and rare,
+  but there's no live test, because a faithful one needs real GPU work.
+- **[watch] CPPC cost.** The busy clock reads ACPI CPPC counters, and
+  each read is a firmware mailbox (~0.6 ms; 32 cores ≈ 20 ms wall,
+  ≈ 11 ms CPU per sample, on a background thread). The sampler still
+  costs 44% less CPU than 3.0.3 overall, but on a 128-thread box this
+  sweep scales linearly. If it matters: sample only the cores carrying
+  90% of the busy weight (measured within 28 MHz of all-cores here).
+- **[watch] Sampler PSS +1.2 MB vs 3.0.3** (5.8 → 7.0 MB): the two
+  poller threads (CPPC, GPU clock) and the larger snapshot. Smaller
+  thread stacks were tried and made no difference (stacks aren't
+  touched); a glibc arena cap saved 0.1 MB. Accepted for now.
+- **[env] An X11 launch that inherits swayfx's LD_LIBRARY_PATH
+  segfaults on quit.** Bisected to swayfx's own libxkbcommon shadowing
+  the system copy while libxkbcommon-x11 is loaded. `--background` and
+  the e2e scrub it; a plain `DISPLAY=… sysmon` from a sway terminal
+  would still crash on exit (the native Wayland path is fine, e2e
+  stage). The root fix belongs in the swayfx launcher (don't export
+  its library path to clients), not here.
+- **[hardware] nct6798 fan1 is driven (pwm 52%) but reads 0 rpm.**
+  SysMon reports it honestly (`duty_percent` 53, `rpm` 0). Either a
+  pump on a fan header without a tach line, or a fan not seated after
+  the 2026-09-30 cooler swap. With CPU Tctl near 90 °C at light load,
+  Ben should check this physically.
+- **[hardware] RAM runs at 2133 MT/s; the kit is rated 3200 (XMP).**
+  DMI reports 2133 for both rated and configured speed, so the XMP
+  profile isn't enabled. That's a BIOS toggle, not something SysMon
+  can change. The Memory card's hover note says so.
+- **[decision] `probe processes` takes 1 s** (was 0.25 s) so
+  per-process CPU moves in 1% steps instead of 4%. `probe all` went
+  from 0.48 s to 1.2 s. Callers wanting speed can probe the sections
+  they need or ask a running instance (instant).

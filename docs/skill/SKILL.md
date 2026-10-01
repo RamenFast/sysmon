@@ -1,13 +1,11 @@
 ---
 name: sysmon
-description: "Drive SysMon (Ben's Rust + egui system monitor, a station node) without pixels: one-shot CPU/GPU/memory/network/disks/sensors/processes/connections state (probe), desktop-bar NDJSON streams (tap), running-window control (ctl: page/theme/palette/popout/shot/interval), headless (serve) or private Xvfb (--background). Use for live system numbers on this machine, per-process network attribution, monitor screenshots, or running-instance control. Carries the prior-failure isolation law (XDG_RUNTIME_DIR *and* XDG_CONFIG_HOME) and honest limits of each per-process data source."
+description: "Drive SysMon by CLI: probe CPU/GPU/memory/network/processes, tap streams, ctl the window. Isolate test instances."
 ---
 
-> **Submits to [[ben-context-standards]].** That skill is the authority on Ben's coding
-> spirit and on every word that enters a model's attention. Read it first. Where this
-> document and that one disagree, that one wins and this one is the defect to fix.
-
 # Driving SysMon
+
+Read [[ben-context-standards]] first.
 
 SysMon ≥ 3.0 (`/usr/bin/sysmon`) is fully agent-drivable: one binary,
 JSON everywhere, errors with a way out, no pixels needed. Authoritative
@@ -62,7 +60,24 @@ connections`.
 
 Works with or without a running instance. `result.via` says which:
 `socket` (the live GUI/serve answered — longer, smoother window) or
-`direct` (sampled in-process, twice, 250 ms apart, so rates are real).
+`direct` (sampled in-process twice: 250 ms apart, or 1 s when
+`processes` is asked for, so per-process CPU moves in 1% steps).
+
+Readings to know (`sysmon schema` documents every field; a contract
+test fails if a live field goes undocumented):
+
+- `cpu.frequency_busy_mhz` is what the busy cores *delivered* over the
+  window (ACPI CPPC, turbostat's Bzy_MHz); `frequency_mhz` is the mean
+  of all threads' requested clocks, idle ones included.
+- `memory.installed_bytes` (DMI sticks) vs `total_bytes` (usable);
+  `memory.modules[]` names each stick and its configured speed.
+- `gpu.core_clock_mhz` is a window mean (`clock_source`); the VRM
+  temperatures ride along when the card reports them.
+- Sensor readings carry `plausible: false` for unconnected inputs
+  (−62 °C, 0 °C stubs) and fans carry `duty_percent`: a fan driven at
+  50% that reads 0 rpm is stalled or unplugged.
+- Every temperature in JSON is °C (`*_celsius`); the GUI's °F/°C/both
+  is display only.
 
 ## Stream
 
@@ -91,6 +106,7 @@ sysmon ctl popout gpu          # gpu memory cpu network disks sensors
 sysmon ctl popin gpu
 sysmon ctl compact on          # on|off
 sysmon ctl units binary        # decimal|binary
+sysmon ctl temperature both    # celsius|fahrenheit|both (display; JSON stays °C)
 sysmon ctl interval 2          # seconds, 0.2–60
 sysmon ctl pause / resume / raise / quit
 sysmon ctl shot [/path.png]    # BLOCKS until the PNG exists; path in result.path
@@ -150,13 +166,19 @@ Unresolved sockets show `pid: -1` (that's /proc permissions, not a bug).
 - The GUI holds no inet sockets itself unless serving; `connections`
   covers inet (tcp/udp) only, not unix sockets.
 - `--background` re-execs under `xvfb-run` (`SYSMON_BACKGROUND` guards
-  recursion) and needs the `xvfb` package.
+  recursion) and needs the `xvfb` package. It drops the inherited
+  `WAYLAND_DISPLAY` and `LD_LIBRARY_PATH` (swayfx's libxkbcommon
+  segfaults an X11 quit); do the same for any hand-rolled X11 test.
+- A `quit` sent while the GUI is still starting is honored on its
+  first frame; you don't need to wait for the window.
 - Drive temperatures need `drivetemp` (`modprobe drivetemp`); the card
   says so in-window when they're missing.
+- Motherboard sensors on this ASRock X570 need `nct6775` (loaded and
+  persisted in `/etc/modules-load.d/nct6775.conf`).
 
 ## Changing sysmon's code
 
-`scripts/conformance.sh` is the standard made executable — thirteen
+`scripts/conformance.sh` is the standard made executable: seventeen
 numbered checks against a real binary. **Run it before and after any
 change**, and never let the number go down:
 
@@ -167,6 +189,12 @@ scripts/conformance.sh target/release/sysmon --json # one envelope
 
 Then `cargo test --release` (unit + kittest UI + live accuracy) and
 `scripts/e2e.sh` (private Xvfb: every theme and page, pop-out
-drag-dock, single-instance forward). `docs/SERIOUS-TODOS.md` is the
-honest-uncertainty ledger and `FEEDBACK.md` is the session ledger Ben
-mines — append, never rewrite.
+drag-dock, single-instance forward, quit exit 0; then the native
+Wayland path on a private headless sway). For any change to a number,
+`scripts/accuracy-audit.sh target/release/sysmon audit-out/<name>`
+compares every shown figure to `free`/`turbostat`/`mpstat`/`sensors`/
+`df`/DMI, idle and under load (52 checks; 0 fail is the bar). List the
+ways a number could lie in `docs/dev/FAILURE-MODES.md` *before*
+writing its test. `docs/SERIOUS-TODOS.md` is the honest-uncertainty
+ledger and `FEEDBACK.md` is the session ledger Ben mines: append,
+never rewrite.

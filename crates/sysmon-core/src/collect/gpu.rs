@@ -145,11 +145,16 @@ pub fn parse_gpu_metrics(blob: &[u8]) -> Option<GpuMetrics> {
 /// RDNA4's `gpu_metrics` "average" clock is the current clock, and it
 /// moves every few milliseconds between 0 (gated) and boost, so any
 /// single read, hwmon's included, is a coin toss. A thread reads the
-/// table 20×/s (≈24 µs each, ≈0.05% of a core) and keeps running sums;
-/// `take` hands back the window's mean and how many reads made it (a
-/// 0.25 s probe gets 5, a 2 s GUI tick 40). The thread only runs
-/// while someone samples: no `take` for 5 s and it parks until the
-/// next one, so an idle `sysmon serve` still costs nothing.
+/// table 5×/s and keeps running sums; `take` hands back the window's
+/// mean and how many reads made it (a 2 s GUI tick gets 10).
+///
+/// Why 5/s: every amdgpu sysfs read wakes the SMU firmware once it has
+/// idled, ~0.8 ms each (measured 2026-10-01; 16 µs only when reads come
+/// back to back). Against an independent 100 Hz poll, 20/s reached
+/// 0.09 σ RMS error at 1.6% of a core; 5/s reaches 0.27 σ at 0.4%.
+/// One read alone is ~1 σ off. The thread only runs while someone
+/// samples: no `take` for 5 s and it parks until the next one, so an
+/// idle `sysmon serve` still costs nothing.
 struct ClockPoller {
     shared: std::sync::Arc<(std::sync::Mutex<ClockSums>, std::sync::Condvar)>,
 }
@@ -164,7 +169,7 @@ struct ClockSums {
 }
 
 impl ClockPoller {
-    const PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
+    const PERIOD: std::time::Duration = std::time::Duration::from_millis(200);
     const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
     fn spawn(metrics_path: PathBuf) -> Option<ClockPoller> {

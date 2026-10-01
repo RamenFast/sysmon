@@ -195,19 +195,31 @@ pub fn inspector(
         if record.display_name != record.name && !record.display_name.is_empty() {
             ui.label(RichText::new(format!("kernel name: {}", record.name)).color(palette.muted).size(10.0));
         }
-        ui.add(
-            egui::Label::new(
-                RichText::new(if record.command_line.is_empty() {
-                    "(kernel thread)".to_string()
-                } else {
-                    record.command_line.clone()
-                })
-                .color(palette.ink_2)
-                .monospace()
-                .size(10.0),
-            )
-            .wrap(),
+        // A browser renderer's command line runs 30 lines; three is
+        // enough to recognize it, the rest is a hover (or a click to
+        // copy) away, so the live sections stay above the fold.
+        let command = if record.command_line.is_empty() {
+            "(kernel thread)".to_string()
+        } else {
+            record.command_line.clone()
+        };
+        let mut job = egui::text::LayoutJob::single_section(
+            command.clone(),
+            egui::TextFormat::simple(egui::FontId::monospace(10.0), palette.ink_2),
         );
+        job.wrap = egui::text::TextWrapping {
+            max_width: ui.available_width(),
+            max_rows: 3,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let command_response = ui
+            .add(egui::Label::new(job).sense(Sense::click()).selectable(false))
+            .on_hover_text(format!("{command}\n\n(click to copy)"));
+        if command_response.clicked() {
+            ui.ctx().copy_text(command);
+            actions.push(AppAction::Notify("Command line copied".to_string()));
+        }
         ui.add_space(6.0);
 
         // ── live CPU + memory
@@ -216,7 +228,10 @@ pub fn inspector(
         section(ui, palette, Glyph::Gauge, "Now", |ui| {
             metric(ui, palette, "CPU", format!("{:.1}%", record.cpu_percent));
             let cpu: Vec<f64> = state.cpu.iter().copied().collect();
-            graphs::sparkline(ui, palette, &cpu, 28.0, cpu_color, None);
+            // 0-based so 5% looks like 5%, not like a mountain; the
+            // ceiling follows the peak (multithreaded can pass 100%).
+            let cpu_ceiling = cpu.iter().copied().fold(10.0, f64::max) * 1.15;
+            graphs::sparkline(ui, palette, &cpu, 28.0, cpu_color, Some(cpu_ceiling));
             metric(ui, palette, "Memory (RSS)", size(record.memory_rss_bytes));
             let rss: Vec<f64> = state.rss.iter().copied().collect();
             graphs::sparkline(ui, palette, &rss, 28.0, memory_color, None);

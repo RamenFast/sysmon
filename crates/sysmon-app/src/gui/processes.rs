@@ -361,9 +361,33 @@ fn toolbar(
     show_inspector: bool,
 ) {
     ui.horizontal(|ui| {
+        // The right-hand cluster (count, selection, Compare) is laid
+        // out right-to-left after the filter and the two chips; give
+        // the filter only what's left once that cluster's real width
+        // is reserved, or the cluster runs under the chips.
+        let filter = state.filter.to_lowercase();
+        let visible_count = records.iter().filter(|r| matches_filter(r, &filter)).count();
+        let count_label = if filter.is_empty() {
+            format!("{} processes", records.len())
+        } else {
+            format!("{visible_count} of {} processes", records.len())
+        };
+        let selected_label = (!state.selected_pids.is_empty()).then(|| format!("{} selected ·", state.selected_pids.len()));
+        let text_width = |text: &str| {
+            ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), egui::FontId::proportional(11.0), palette.muted).size().x)
+        };
+        let spacing = ui.spacing().item_spacing.x;
+        let mut right = text_width(&count_label) + spacing;
+        if let Some(label) = &selected_label {
+            right += text_width(label) + spacing;
+        }
+        if state.selected_pids.len() >= 2 {
+            right += 90.0; // the Compare button
+        }
+        let chips = text_width("Grouped by app") + text_width("‹ Inspector") + 4.0 * spacing + 16.0;
         let filter_edit = egui::TextEdit::singleline(&mut state.filter)
             .hint_text("Filter by name, command, user, or PID…")
-            .desired_width((ui.available_width() - 300.0).max(140.0));
+            .desired_width((ui.available_width() - right - chips - 12.0).max(140.0));
         let filter_response = ui.add(filter_edit);
         if state.focus_filter {
             filter_response.request_focus();
@@ -386,14 +410,7 @@ fn toolbar(
             actions.push(AppAction::SetInspector(!show_inspector));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let filter = state.filter.to_lowercase();
-            let visible_count = records.iter().filter(|r| matches_filter(r, &filter)).count();
-            let label = if filter.is_empty() {
-                format!("{} processes", records.len())
-            } else {
-                format!("{visible_count} of {} processes", records.len())
-            };
-            ui.label(RichText::new(label).color(palette.muted).size(11.0));
+            ui.label(RichText::new(count_label).color(palette.muted).size(11.0));
             if state.selected_pids.len() >= 2
                 && ui
                     .button(format!("Compare ({})", state.selected_pids.len()))
@@ -402,13 +419,9 @@ fn toolbar(
             {
                 actions.push(AppAction::OpenCombinedDetails(state.selected_pids.clone()));
             }
-            if !state.selected_pids.is_empty() {
-                ui.label(
-                    RichText::new(format!("{} selected ·", state.selected_pids.len()))
-                        .color(palette.accent)
-                        .size(11.0),
-                )
-                .on_hover_text("Ctrl+click rows to select · Esc clears");
+            if let Some(label) = selected_label {
+                ui.label(RichText::new(label).color(palette.accent).size(11.0))
+                    .on_hover_text("Ctrl+click rows to select · Esc clears");
             }
         });
     });
