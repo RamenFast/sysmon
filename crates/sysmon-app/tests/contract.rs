@@ -547,6 +547,62 @@ fn a_fresh_serve_never_answers_with_an_empty_window() {
     assert!(window >= 0.2, "first answer from serve spans {window} s — its rates are all zero");
 }
 
+/// Serve kept warm by one client (a `tap network`) must still give a
+/// second client's first ask for *other* sections a real window, and a
+/// section last read long ago must not answer with that long average
+/// under a short label (Reviewer B, P1). The check: a spinning `sh`
+/// started just before the ask shows as busy, and overall CPU is not 0.
+#[test]
+fn a_warm_serve_measures_each_section_over_its_own_window() {
+    let sandbox = Sandbox::new();
+    let env = |command: &mut Command| {
+        command
+            .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    };
+    let mut serve = Command::new(binary());
+    serve.arg("serve");
+    env(&mut serve);
+    let daemon = GroupGuard::spawn(serve);
+    let socket = sandbox.runtime_path.join("sysmon/ctl.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut tap = Command::new(binary());
+    tap.args(["tap", "network", "-i", "0.3"]);
+    env(&mut tap);
+    let warm = GroupGuard::spawn(tap);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let mut spin_command = Command::new("sh");
+    spin_command.args(["-c", "while :; do :; done"]);
+    let spinner = GroupGuard::spawn(spin_command);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (reply, code) = sandbox.run(&["probe", "cpu", "processes", "--json"]);
+    let spinner_pid = spinner.pid();
+    drop(spinner);
+    drop(warm);
+    let _ = sandbox.run(&["ctl", "quit", "--json"]);
+    drop(daemon);
+
+    assert_eq!(code, 0);
+    assert_eq!(reply["result"]["via"], "socket", "rode the warm serve");
+    let overall = reply["result"]["cpu"]["overall_percent"].as_f64().unwrap_or(0.0);
+    let spinner_cpu = reply["result"]["processes"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["pid"].as_i64() == Some(spinner_pid as i64)))
+        .and_then(|row| row["cpu_percent"].as_f64());
+    assert!(
+        overall > 0.5 && spinner_cpu.is_some_and(|cpu| cpu > 50.0),
+        "first cpu+processes ask on a warm serve: overall {overall}%, spinner {spinner_cpu:?}% \
+         (window {})",
+        reply["result"]["interval_seconds"]
+    );
+}
+
 /// Every field a real probe emits is named in `schema.sections`. A
 /// field an agent can see but can't look up is a field it will guess
 /// about (3.1 added a dozen; this keeps the map from drifting again).
@@ -659,6 +715,10 @@ impl GroupGuard {
         GroupGuard {
             child: command.spawn().expect("spawn --background"),
         }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 }
 

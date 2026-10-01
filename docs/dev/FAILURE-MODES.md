@@ -105,3 +105,11 @@ and `tests/accuracy.rs` are the checks.*
 |---|---|---|
 | U1 | `probe` (human) shows °C while GUI shows °F | both read the same temperature setting... the CLI human view states °C and °F together |
 | U2 | `tap` through a socket prints 0.800000011920929 for 0.8 | one serializer for every producer + contract test both ways |
+
+## Shared sampler windows (`sysmon serve`)
+
+| # | way it could lie | caught by |
+|---|---|---|
+| W1 | one client keeps the sampler warm (`tap network`), so a second client's first `probe cpu processes` sees a "0.65 s window" and every rate in it is 0 (those collectors had never run) | each section records when it last ran; serve opens a fresh common window unless the wanted sections share one. Contract test `a_warm_serve_measures_each_section_over_its_own_window` (red: overall 0%, spinner 0%) |
+| W2 | a section last asked for 8 s ago answers with its 8 s average under the 0.35 s label of whichever section ran most recently | `interval_seconds` is the oldest wanted section's window, and sections more than 10% apart get a fresh common window |
+| W3 | the GPU clock poller parks after 5 s idle but keeps its sums, so the next window's "mean of N reads" covers only its first 5 s | (see GPU G-rows) |

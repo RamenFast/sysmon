@@ -23,6 +23,10 @@ struct ServeBackend {
     quit: Arc<AtomicBool>,
 }
 
+/// A window longer than the slowest subscriber cadence (60 s) is no
+/// client's cadence: it's leftover from a client that went away.
+const STALE_WINDOW_SECONDS: f64 = 61.0;
+
 impl Backend for ServeBackend {
     fn mode(&self) -> &'static str {
         "serve"
@@ -43,16 +47,21 @@ impl Backend for ServeBackend {
                 "restart the daemon: sysmon ctl quit && sysmon serve",
             )
         })?;
-        // On-demand sampling means the first ask (or the first after
-        // a long quiet, for a section nobody asked for yet) has no
-        // previous sample to diff, so every rate would be a false 0.
-        // Take the same short window a direct probe takes instead.
-        let mut snapshot = sampler.sample(wants);
-        if snapshot.interval_seconds < 0.2 {
+        // On-demand sampling, shared by every client: the sections this
+        // client wants may never have been sampled (every rate a false
+        // 0), or were last sampled by other clients at other times (one
+        // stale, one fresh: an 8 s average under a 0.3 s label). Unless
+        // they share one recent window, open a fresh common window, the
+        // same short one a direct probe takes.
+        let window_ok = sampler
+            .common_window(wants)
+            .is_some_and(|window| (0.2..=STALE_WINDOW_SECONDS).contains(&window));
+        if !window_ok {
+            let _prime = sampler.sample(wants);
             let window = if wants.processes { 1000 } else { 250 };
             std::thread::sleep(Duration::from_millis(window));
-            snapshot = sampler.sample(wants);
         }
+        let snapshot = sampler.sample(wants);
         snapshot.to_json_value().map_err(|serialize_error| {
             VerbError::runtime(
                 format!("snapshot serialization failed: {serialize_error}"),
