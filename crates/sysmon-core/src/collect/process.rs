@@ -90,7 +90,7 @@ pub fn parse_io(content: &str) -> (u64, u64) {
 #[derive(Clone, Copy)]
 struct PreviousProcess {
     starttime_ticks: u64,
-    cpu_ns: u64,
+    cpu_ticks: u64,
     io_read_bytes: u64,
     io_write_bytes: u64,
 }
@@ -118,7 +118,9 @@ const COMM_MAX: usize = 15;
 /// thread, never the program.
 const THREAD_NAMES: [&str; 4] = ["MainThread", "Main Thread", "GMainThread", "main"];
 
-fn is_interpreter(name: &str) -> bool {
+/// A runtime that runs other people's programs (python3.12, node, bash):
+/// its executable name says nothing about which program it is.
+pub fn is_interpreter(name: &str) -> bool {
     let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     matches!(
         base,
@@ -164,6 +166,15 @@ fn script_name(argv: &[&str]) -> Option<String> {
             "-jar" => return arguments.next().map(|jar| basename(jar).to_string()),
             flag if FLAGS_WITH_VALUE.contains(&flag) => {
                 arguments.next();
+            }
+            // A short-flag cluster carrying -c or -e (`bash -lc`, `sh -ec`,
+            // `python3 -Bc`): the next argument is inline code.
+            flag if flag.len() > 2
+                && !flag.starts_with("--")
+                && flag[1..].bytes().all(|b| b.is_ascii_alphabetic())
+                && flag[1..].contains(['c', 'e']) =>
+            {
+                return None;
             }
             flag if flag.starts_with('-') => {}
             // `bun run src/server/index.ts`, `deno run x.ts`
@@ -348,8 +359,6 @@ impl ProcessCollector {
             // whole process; the cost is resolution — one tick over a
             // window of W seconds is a 1/(100·W) step, which is why
             // `probe processes` samples over a full second.
-            let cpu_ns = (stat.cpu_ticks as f64 / self.clk_tck * 1e9) as u64;
-
             // Deltas — only valid when this is the same process
             // instance we saw last tick.
             let mut cpu_percent = 0.0f32;
@@ -359,7 +368,7 @@ impl ProcessCollector {
                 && let Some(previous) = self.previous.get(&pid)
                 && previous.starttime_ticks == stat.starttime_ticks
             {
-                let busy_seconds = cpu_ns.saturating_sub(previous.cpu_ns) as f64 / 1e9;
+                let busy_seconds = stat.cpu_ticks.saturating_sub(previous.cpu_ticks) as f64 / self.clk_tck;
                 cpu_percent = (busy_seconds / interval_seconds * 100.0) as f32;
                 cpu_percent = cpu_percent.clamp(0.0, core_count * 100.0);
                 if let Some((read_bytes, write_bytes)) = io {
@@ -381,7 +390,7 @@ impl ProcessCollector {
                 pid,
                 PreviousProcess {
                     starttime_ticks: stat.starttime_ticks,
-                    cpu_ns,
+                    cpu_ticks: stat.cpu_ticks,
                     io_read_bytes: io.map(|(r, _)| r).unwrap_or(0),
                     io_write_bytes: io.map(|(_, w)| w).unwrap_or(0),
                 },
@@ -528,6 +537,13 @@ mod tests {
         assert_eq!(name("python3", &["python3", "-m", "http.server"], None), "http.server");
         // Inline code has no better name than the interpreter.
         assert_eq!(name("sh", &["sh", "-c", "exec mako"], Some("dash")), "sh");
+        // ...also when the flag is clustered (Reviewer B #5: the code
+        // became the name, "Dev && cargo build --release").
+        assert_eq!(name("bash", &["bash", "-lc", "cd /home/ben/Dev && cargo build --release"], None), "bash");
+        assert_eq!(name("bash", &["/bin/bash", "-ec", "eval \"$X\"; status=$?"], None), "bash");
+        assert_eq!(name("python3", &["python3", "-Bc", "print(1)"], None), "python3");
+        // A cluster without c/e is just flags.
+        assert_eq!(name("python3", &["python3", "-uB", "x.py"], None), "x.py");
         // comm truncated at 15 bytes.
         assert_eq!(
             name("xdg-desktop-por", &["/usr/libexec/xdg-desktop-portal-gtk"], Some("xdg-desktop-portal-gtk")),

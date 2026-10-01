@@ -468,6 +468,25 @@ fn every_producer_prints_f32_readings_exactly() {
     assert_eq!(widened_numbers(&tapped), Vec::<String>::new(), "socket tap widened f32s");
 }
 
+#[test]
+fn a_full_disk_is_not_a_clean_exit() {
+    // Reviewer B #4: only a closed pipe means "enough". ENOSPC on
+    // stdout lost the whole answer, and exit 0 told the caller it
+    // arrived. It must be a runtime failure (4) with a fix on stderr.
+    let sandbox = Sandbox::new();
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").expect("/dev/full");
+    let output = Command::new(binary())
+        .args(["probe", "memory", "--json"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .stdout(full)
+        .output()
+        .expect("probe runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "stdout write failed with ENOSPC; stderr: {stderr}");
+    assert!(stderr.contains("fix"), "the failure names its fix: {stderr}");
+}
+
 /// F20: a consumer that closes the pipe early is normal (`| head`).
 /// The CLI law allows exits 0/2/3/4 — never a panic's 101.
 #[test]

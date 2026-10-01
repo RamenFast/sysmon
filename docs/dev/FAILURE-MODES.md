@@ -91,6 +91,8 @@ and `tests/accuracy.rs` are the checks.*
 | P10 | Inspector breadcrumb loops forever on a reparenting race | unit test `ancestry_survives_a_reparenting_loop` |
 | P11 | the Inspector pane eats the table's click targets at narrow widths | `ui_kittest` header clicks at 430 px (the pane only docks ≥ 760 px) |
 | P12 | group-by / inspector toggles don't survive a restart | `ui_bridge`: settings file read back after toggles |
+| P13 | a clustered inline-code flag (`bash -lc "cd x && cargo build"`, `-ec`, `python3 -Bc`) is read as a script path, so the code becomes the name ("Dev && cargo build --release") | `display_names_say_what_a_person_would`: a short cluster carrying c/e means inline code; `-uB x.py` still names x.py |
+| P14 | group-by-app keys on the executable, so five unrelated python3.12 programs become one "tray.py ×5" row with summed CPU, and End process signals only the root | `unrelated_scripts_on_one_interpreter_stay_apart`: interpreters are keyed by the script they run |
 
 ## Network
 
@@ -105,6 +107,7 @@ and `tests/accuracy.rs` are the checks.*
 |---|---|---|
 | U1 | `probe` (human) shows °C while GUI shows °F | both read the same temperature setting... the CLI human view states °C and °F together |
 | U2 | `tap` through a socket prints 0.800000011920929 for 0.8 | one serializer for every producer + contract test both ways |
+| U3 | a stdout write fails for a reason other than a closed pipe (ENOSPC, EIO), the answer is lost, and the CLI exits 0 as if it arrived | `a_full_disk_is_not_a_clean_exit` (stdout = /dev/full): exit 4 with a fix on stderr; `a_closed_pipe_is_a_clean_exit` keeps EPIPE at 0 |
 
 ## Shared sampler windows (`sysmon serve`)
 

@@ -188,14 +188,20 @@ fn sort_records(records: &mut [&ProcessRecord], column: SortColumn, descending: 
 /// Group-by-app: one synthetic record per application, metrics
 /// summed, `threads` holding the summed thread count, the app's
 /// oldest process (its root) lending its pid, name and command. Keyed
-/// by executable so "thorium ×12" collapses its renderer swarm.
+/// by executable so "thorium ×12" collapses its renderer swarm; an
+/// interpreter's processes are keyed by the script they run instead.
 pub fn group_by_app(records: &[&ProcessRecord]) -> Vec<(ProcessRecord, usize)> {
     let mut groups: HashMap<String, (ProcessRecord, usize)> = HashMap::new();
     for record in records {
         let key = if record.is_kernel_thread {
             "kernel threads".to_string()
         } else {
-            record.exe_basename.clone().unwrap_or_else(|| icons::display_name(record).to_string())
+            match record.exe_basename.as_deref() {
+                // One interpreter runs many unrelated programs: the
+                // script is the app (tray.py and server.py stay apart).
+                Some(exe) if !sysmon_core::collect::process::is_interpreter(exe) => exe.to_string(),
+                _ => icons::display_name(record).to_string(),
+            }
         };
         let entry = groups.entry(key.clone()).or_insert_with(|| {
             let mut first = (*record).clone();
@@ -737,6 +743,31 @@ mod tests {
             command_line: format!("/usr/bin/{exe}"),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn unrelated_scripts_on_one_interpreter_stay_apart() {
+        // Reviewer B #6: five python3.12 programs became one "tray.py ×5"
+        // row, and End process on it signalled only the root.
+        let script = |pid: i32, name: &str| ProcessRecord {
+            display_name: name.into(),
+            ..proc_(pid, "python3.12", 1.0, 100, f64::from(pid))
+        };
+        let records = [
+            script(10, "tray.py"),
+            script(11, "hermes_bridge.py"),
+            script(12, "server.py"),
+            script(13, "server.py"),
+            proc_(20, "thorium", 1.0, 100, 1.0),
+            proc_(21, "thorium", 1.0, 100, 2.0),
+        ];
+        let refs: Vec<&ProcessRecord> = records.iter().collect();
+        let groups = group_by_app(&refs);
+        let count = |name: &str| groups.iter().filter(|(r, _)| r.display_name == name).map(|(_, n)| *n).sum::<usize>();
+        assert_eq!(groups.len(), 4, "tray.py, hermes_bridge.py, server.py ×2, thorium ×2: {groups:?}");
+        assert_eq!(count("server.py"), 2);
+        assert_eq!(count("tray.py"), 1);
+        assert_eq!(count("thorium"), 2);
     }
 
     #[test]
