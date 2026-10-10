@@ -9,6 +9,7 @@
 pub mod apps;
 pub mod collect;
 pub mod snapshot;
+pub mod specs;
 pub mod units;
 
 /// One version string everywhere: workspace == --version == packages.

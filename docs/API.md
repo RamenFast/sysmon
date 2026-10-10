@@ -1,6 +1,6 @@
 # The SysMon API
 
-Everything the window knows, one command away. Three doors, one
+Everything the window knows, one command away. Four doors, one
 contract; `sysmon schema` is the always-current machine map of all of
 it.
 
@@ -79,6 +79,37 @@ A GUI's `status` also names its render adapter
 (`renderer`); if it had to fall back to a CPU rasterizer (no usable
 Vulkan driver), `renderer_hint` appears and names the fix — degraded
 modes are disclosed, never silent.
+
+## Door 4 — `sysmon specs` (what the machine is)
+
+```bash
+sysmon specs                 # the shareable spec sheet, plain text
+sysmon specs graphics        # one section: system cpu memory graphics storage network audio
+sysmon specs --json | jq -j .result.text   # byte-for-byte what the copy button copies
+```
+
+`probe` answers *how busy*; `specs` answers *which hardware, which
+firmware, which driver stack*: CPU topology, base and max clocks,
+caches and instruction sets; every memory module with maker, part
+number and rank; each GPU with its architecture, compute units, the
+PCIe link it actually gets (the slowest hop to the CPU, beside what
+the card supports), power cap, Vulkan/OpenGL driver and compute stack;
+the displays at their running mode; every physical drive, mounted or
+not, with its link and filesystems; network interfaces; the audio
+server and devices.
+
+It is read on demand, needs no running instance, and costs ~0.1–0.2 s.
+sysfs and udev come first; a few optional helpers (`vulkaninfo`,
+`glxinfo`, `swaymsg`, `pactl`) fill in what sysfs can't say, each
+under a 3 s deadline. A missing helper leaves its line out. A whole
+section that can't be read is listed in `result.unavailable` with the
+reason, and the sheet prints it as `Missing`.
+
+The JSON carries everything, including the hostname and mount points,
+for local scripts. `result.text` is the sheet meant for sharing: it
+leaves out the hostname, serials, addresses and private mount paths (a
+drive says what it holds, such as system, home, EFI or data, not where
+it is mounted).
 
 ## The socket
 

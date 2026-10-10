@@ -302,11 +302,57 @@ fn errors_are_parseable_and_carry_the_way_out() {
     }
 }
 
+/// `sysmon specs`: the envelope carries every field the schema
+/// requires, `result.text` is the shareable sheet, every published
+/// section scopes it, and a bad section is a fix-bearing exit 3.
+#[test]
+fn specs_answers_whole_and_by_section() {
+    let schema = schema();
+    let verb = &schema["contract"]["verbs"]["specs"];
+    let sandbox = Sandbox::new();
+    let (reply, code) = sandbox.run(&["specs", "--json"]);
+    assert_eq!(code, 0, "{reply}");
+    assert_eq!(reply["status"], "ok");
+    let result = &reply["result"];
+    for field in verb["result"]["required"].as_array().expect("specs publishes its required fields") {
+        let field = field.as_str().unwrap();
+        assert!(result.get(field).is_some(), "specs result lacks required `{field}`");
+    }
+    let published: Vec<&str> = verb["result"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for key in result.as_object().unwrap().keys() {
+        assert!(published.contains(&key.as_str()), "specs returns `{key}`, which the schema does not publish");
+    }
+    let whole = result["text"].as_str().expect("text");
+    assert!(whole.contains("system specs") && whole.contains("CPU "), "{whole}");
+
+    let sections = verb["arguments"]["section"]["enum"].as_array().expect("section enum");
+    for section in sections {
+        let section = section.as_str().unwrap();
+        assert!(sysmon_core::specs::SPEC_SECTIONS.contains(&section));
+        let (reply, code) = sandbox.run(&["specs", section, "--json"]);
+        assert_eq!(code, 0, "specs {section}: {reply}");
+        assert_eq!(reply["result"]["section"], section);
+        let text = reply["result"]["text"].as_str().unwrap();
+        assert!(whole.contains(text.trim_end()), "specs {section} is not a slice of the whole sheet:\n{text}");
+    }
+
+    for (arguments, expected) in [(vec!["specs", "nonsuch"], 3), (vec!["specs", "cpu", "memory"], 3), (vec!["specs", "--nope"], 3)] {
+        let (reply, code) = sandbox.run(&arguments);
+        assert_eq!(code, expected, "{arguments:?} → {reply}");
+        assert!(!reply["fix"].as_str().unwrap_or("").is_empty(), "{arguments:?} carried no fix");
+    }
+}
+
 /// The exits each verb publishes must be the ones it can produce.
 #[test]
 fn every_verb_publishes_its_exit_codes() {
     let schema = schema();
-    for verb in ["probe", "tap", "ctl", "serve", "schema"] {
+    for verb in ["probe", "tap", "ctl", "serve", "schema", "specs"] {
         let exits = schema["contract"]["verbs"][verb]["exits"]
             .as_array()
             .unwrap_or_else(|| panic!("`{verb}` does not publish its exits"));

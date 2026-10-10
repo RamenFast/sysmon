@@ -52,3 +52,5 @@ Rules:
 - 2026-10-09 [claim] "why does it say 135? I have a 128gb kit" — the Usable 135.0 GB (decimal MemTotal) read as more than the sticks
 - 2026-10-09 [feature] add a copy button to SysMon (system specs to the clipboard)
 - 2026-10-09 [feature] copy specs for each pop-out window too ("for individual windows too")
+- 2026-10-09 [claim] the copied spec sheet is too thin to share: "i need more than that to share... please?"
+- 2026-10-09 [feature] yes to SysMon 3.4: a fuller shareable spec sheet (CPU cache and clocks, GPU link and driver stack, display, every physical drive, network, audio)

@@ -37,6 +37,7 @@ pub fn run_cli() -> i32 {
         Some("tap") => agent::run_tap(&arguments[1..]),
         Some("ctl") => agent::run_ctl(&arguments[1..]),
         Some("schema") => agent::run_schema(&arguments[1..]),
+        Some("specs") => agent::run_specs(&arguments[1..]),
         Some("serve") => serve::run(&arguments[1..]),
         None => gui::run(&arguments),
         Some("--background") => run_background(&arguments),
@@ -110,11 +111,15 @@ USAGE
     sysmon tap [sections…] [-i N]   stream NDJSON snapshots (default: network, 1s)
     sysmon ctl <verb> […]           drive the running instance
     sysmon serve                    headless daemon on the control socket
+    sysmon specs [section]          what this machine is: the shareable spec sheet
     sysmon schema                   machine-readable map of all of the above
     sysmon --version                print the version
 
 SECTIONS
     all system cpu memory gpu network disks processes sensors connections
+
+SPEC SECTIONS
+    system cpu memory graphics storage network audio
 
 CTL VERBS
     status quit pause resume interval <s> raise page <p> theme <t>

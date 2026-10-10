@@ -304,6 +304,81 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
     }
 }
 
+// ------------------------------------------------------------------ specs
+
+const SPEC_SECTION_NAMES: &str = "system cpu memory graphics storage network audio";
+
+/// `sysmon specs [section] [--json]`: what this machine *is*. On a
+/// terminal, the same plain-text sheet the copy button copies; piped,
+/// the envelope with every structured field plus `result.text`, so
+/// `sysmon specs --json | jq -j .result.text` is byte-for-byte the
+/// clipboard. Never needs a running instance.
+pub fn run_specs(arguments: &[String]) -> i32 {
+    let mut force_json = false;
+    let mut section: Option<&str> = None;
+    for argument in arguments {
+        match argument.as_str() {
+            "--json" => force_json = true,
+            name if !name.starts_with('-') && section.is_none() => section = Some(name),
+            other => {
+                let message = if other.starts_with('-') {
+                    format!("unknown flag `{other}`")
+                } else {
+                    format!("specs takes one section, got a second: `{other}`")
+                };
+                return envelope::fail_forced(
+                    message,
+                    format!("usage: sysmon specs [section] [--json]; sections: {SPEC_SECTION_NAMES}"),
+                    EXIT_BAD_ARGS,
+                    arguments.iter().any(|a| a == "--json"),
+                );
+            }
+        }
+    }
+    let section = match section {
+        Some(name) => match sysmon_core::specs::SPEC_SECTIONS.iter().find(|s| **s == name) {
+            Some(known) => Some(*known),
+            None => {
+                return envelope::fail_forced(
+                    format!("unknown spec section `{name}`"),
+                    format!("sections: {SPEC_SECTION_NAMES}"),
+                    EXIT_BAD_ARGS,
+                    force_json,
+                );
+            }
+        },
+        None => None,
+    };
+
+    let specs = sysmon_core::specs::collect();
+    let text = match section {
+        Some(section) => sysmon_core::specs::text::section_text(section, &specs),
+        None => sysmon_core::specs::text::specs_text(&specs),
+    };
+    if !envelope::json_wanted(force_json) {
+        for line in text.lines() {
+            out!("{line}");
+        }
+        return EXIT_OK;
+    }
+    let mut result = match specs.to_json_value() {
+        Ok(value) => value,
+        Err(serialize_error) => {
+            return envelope::fail(
+                format!("specs serialization failed: {serialize_error}"),
+                "this is a sysmon bug — please report it",
+                EXIT_RUNTIME,
+            );
+        }
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("section".to_string(), json!(section.unwrap_or("all")));
+        object.insert("text".to_string(), json!(text));
+    }
+    envelope::emit(&envelope::ok(result));
+    EXIT_OK
+}
+
 // ----------------------------------------------------------------- schema
 
 pub fn run_schema(_arguments: &[String]) -> i32 {
@@ -334,6 +409,7 @@ fn build_schema() -> Value {
         .map(|palette| palette.id)
         .collect();
     let popout_enum: Vec<&str> = crate::gui::settings::SECTION_KEYS.to_vec();
+    let spec_section_enum: Vec<&str> = sysmon_core::specs::SPEC_SECTIONS.to_vec();
     json!({
         "status": "ok",
         "tool": envelope::TOOL,
@@ -489,6 +565,36 @@ fn build_schema() -> Value {
                     "description": "this document — always current, generated from the binary",
                     "exits": [0],
                 },
+                "specs": {
+                    "usage": "sysmon specs [section] [--json]",
+                    "kind": "one-shot",
+                    "description": "what this machine IS (hardware, firmware, driver stack), not what it is doing. A terminal gets the plain-text sheet the GUI's copy buttons copy; piped, the envelope. Read on demand from sysfs/udev plus optional helpers (vulkaninfo, glxinfo, swaymsg, pactl) under a 3 s deadline each; needs no running instance. A missing source leaves its field absent, never zero; a section that cannot be read at all is listed in `unavailable`.",
+                    "arguments": {
+                        "section": {"enum": spec_section_enum, "optional": true,
+                                     "description": "scopes `result.text` to one section; the structured fields are always whole"},
+                        "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "result": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["ts", "gpus", "displays", "drives", "network", "unavailable", "section", "text"],
+                        "properties": {
+                            "ts": {"type": "number", "description": "unix seconds the specs were read"},
+                            "section": {"type": "string", "description": "the section `text` covers, or \"all\""},
+                            "text": {"type": "string", "description": "the shareable sheet, exactly what the copy button copies. `sysmon specs --json | jq -j .result.text` reproduces the clipboard. Leaves out the hostname, serials, addresses and mount paths"},
+                            "system": {"type": "object", "description": "os, os_base?, kernel, architecture, hostname (JSON only, never in text), session_type?, desktop?, model?, board?, firmware?, firmware_date? (ISO), boot_mode (UEFI|BIOS), secure_boot?"},
+                            "cpu": {"type": "object", "description": "model?, sockets?, cores? (physical), threads (logical), base_mhz? (ACPI CPPC nominal), max_mhz?, boost_enabled?, cache_l1d_bytes? | cache_l1i_bytes? | cache_l2_bytes? | cache_l3_bytes? (machine totals, shared caches counted once), frequency_driver?, governor?, energy_preference?, features[]"},
+                            "memory": {"type": "object", "description": "modules[] (the memory section's module shape, plus form_factor?, rank?, manufacturer?), slots?, installed_bytes?, usable_bytes (MemTotal), swap_bytes"},
+                            "gpus": {"type": "array", "description": "[{name, pci_id, pci_address, driver?, vram_bytes?, architecture? (e.g. gfx1201), family? (e.g. RDNA 4), compute_units?, pcie_link? {generation, width, device_max_generation?, device_max_width?} (the slowest hop to the CPU), power_cap_watts?, power_cap_max_watts?, vulkan? {version, driver}, opengl? {version, driver}, compute_stack?}] — every PCI display device; software renderers are never listed"},
+                            "displays": {"type": "array", "description": "[{connector, make?, model?, diagonal_inches?, width_px?, height_px?, refresh_hz?, scale?, mode_source: active (the compositor's running mode) | preferred (EDID only — the panel's preference, not necessarily in use)}]"},
+                            "drives": {"type": "array", "description": "[{name, model?, kind (NVMe SSD | SATA SSD | SATA HDD | USB | SD/eMMC), size_bytes, rpm?, link?, removable, filesystems: [{device, fs_type?, mount_points[]}]}] — physical drives, mounted or not"},
+                            "network": {"type": "array", "description": "[{name, kind (Ethernet | Wi-Fi), model?, driver?, link_up, speed_mbps?, duplex?}] — physical interfaces only, no addresses"},
+                            "audio": {"type": "object", "description": "server?, devices[] (ALSA card names)"},
+                            "unavailable": {"type": "array", "description": "[{section, reason}] for sections that could not be read at all"},
+                        },
+                    },
+                    "exits": [0, 3, 4],
+                },
             },
             "socket": {
                 "path": control::socket_path(),
@@ -507,6 +613,7 @@ fn build_schema() -> Value {
             "sysmon ctl <verb> […]": "drive the live instance",
             "sysmon serve": "headless daemon; samples only when asked — idle cost is zero",
             "sysmon schema": "this document",
+            "sysmon specs [section] [--json]": "what this machine is: the shareable spec sheet (the copy button's text), or every field as JSON when piped",
         },
         "sections": {
             "system": {"hostname": "string", "kernel": "string",
@@ -530,7 +637,7 @@ fn build_schema() -> Value {
             "memory": {
                 "total_bytes | free_bytes | available_bytes": "MemTotal / MemFree / MemAvailable",
                 "installed_bytes": "physical RAM fitted (sum of DMI memory devices); total_bytes is what the kernel can use after firmware/GPU reservations",
-                "modules": "[{locator, size_bytes, kind (DDR4…), rated_speed_mts, configured_speed_mts, part_number}] from /run/udev/data/+dmi:id; empty when DMI is unreadable",
+                "modules": "[{locator, size_bytes, kind (DDR4…), rated_speed_mts, configured_speed_mts, part_number, form_factor?, rank?, manufacturer? (the firmware's name, else the maker its JEDEC id belongs to)}] from /run/udev/data/+dmi:id; empty when DMI is unreadable",
                 "used_bytes": "total − available (psutil identity; htop shows a smaller figure by design)",
                 "used_percent": "used / total",
                 "cached_bytes": "Cached + SReclaimable",

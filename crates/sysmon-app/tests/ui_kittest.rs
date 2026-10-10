@@ -229,15 +229,28 @@ fn ui_interactions_end_to_end() {
     );
 
     // ---- the copy button puts the spec sheet on the clipboard -------
+    // The sheet is read off the UI thread (helpers like vulkaninfo
+    // run with a deadline), so the CopyText lands a few frames later.
     harness.get_by_label("Copy system specs").click();
-    harness.step();
-    let copied = harness.output().platform_output.commands.iter().find_map(|command| match command {
-        egui::OutputCommand::CopyText(text) => Some(text.clone()),
-        _ => None,
-    });
-    let copied = copied.expect("clicking Copy system specs sent CopyText");
-    for expected in ["Host ", "Kernel ", "usable "] {
+    let mut copied = None;
+    let waited = std::time::Instant::now();
+    while copied.is_none() && waited.elapsed() < std::time::Duration::from_secs(10) {
+        harness.step();
+        copied = harness.output().platform_output.commands.iter().find_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        });
+        if copied.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    let copied = copied.expect("clicking Copy system specs sent CopyText within 10 s");
+    for expected in ["system specs", "Kernel ", "CPU ", "Memory ", "usable ", "Storage "] {
         assert!(copied.contains(expected), "spec sheet lacks `{expected}`:\n{copied}");
+    }
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    if hostname.trim().len() > 3 {
+        assert!(!copied.contains(hostname.trim()), "the shared sheet carries the hostname:\n{copied}");
     }
     harness.run_steps(8);
 

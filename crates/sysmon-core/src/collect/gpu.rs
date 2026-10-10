@@ -559,7 +559,7 @@ fn find_hwmon(device: &Path) -> Option<PathBuf> {
 ///   3. "AMD GPU 1002:7551" — honest about what is known.
 ///
 /// Runs once at discovery.
-fn query_marketing_name(pci_address: &str, device: &Path) -> String {
+pub(crate) fn query_marketing_name(pci_address: &str, device: &Path) -> String {
     if let Some(name) = lspci_name(pci_address) {
         return name;
     }
@@ -581,7 +581,7 @@ fn query_marketing_name(pci_address: &str, device: &Path) -> String {
 
 const AMDGPU_IDS: &str = "/usr/share/libdrm/amdgpu.ids";
 
-fn lspci_name(pci_address: &str) -> Option<String> {
+pub(crate) fn lspci_name(pci_address: &str) -> Option<String> {
     let slot = pci_address.split_once(':').map(|(_, rest)| rest)?;
     let output = Command::new("lspci").args(["-mm", "-s", slot]).output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);

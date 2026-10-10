@@ -86,13 +86,35 @@ The three new numbers (kernel time, commit charge, kernel memory) are
 audited like everything else: C7 against `mpstat`, M7/M8 against
 `/proc/meminfo`.
 
-The **copy button** (two sheets, top-left) puts a plain-text spec
-sheet on the clipboard: host, OS, kernel, CPU, the RAM sticks with
-installed *and* usable memory in both GB and GiB, swap, GPU and VRAM,
-board, and every mounted disk. Ready to paste into a forum post or a
-bug report. Every pop-out window has its own copy button that copies
-just that section (GPU, memory, CPU, disks, network links without
-addresses, sensors with their readings now).
+The **copy button** (two sheets, top-left) puts a spec sheet on the
+clipboard, ready for a forum post or a bug report. It describes what
+the machine *is*:
+
+```
+OS        Linux Mint 22.3 (Ubuntu 24.04 base)
+Desktop   SwayFX 0.6-c4c8d51b (Sway 1.12.0) · Wayland
+CPU       AMD Ryzen 9 5950X 16-Core Processor
+          16 cores / 32 threads · 3.40 GHz base · up to 5.09 GHz
+          L2 8 MiB · L3 64 MiB
+Memory    4 × 32 GB DDR4-3200 · Corsair CMK128GX4M4E3200C16 · dual-rank
+          installed 137.4 GB (128.0 GiB) · 4 of 4 slots used
+GPU       AMD Radeon AI PRO R9700 · 34.2 GB (31.9 GiB) VRAM
+          RDNA 4 (gfx1201) · 64 CUs · PCIe 4.0 x16 (card supports 5.0) · 300 W cap (max 330 W)
+          Vulkan 1.4.318 · Mesa 25.2.8-0ubuntu0.24.04.2 (RADV)
+Storage   CT2000P3PSSD8 · NVMe SSD · 2.0 TB · PCIe 4.0 x4
+            vfat (EFI) · btrfs (system, home, data)
+…
+```
+
+That covers the OS and its base, the desktop, board and firmware, the
+CPU's topology, clocks, caches and instruction sets, every memory
+stick, each GPU with the PCIe link it actually gets and its driver
+stack, displays at their running mode, every physical drive (mounted
+or not), network and audio. The sheet carries no hostname, serials,
+addresses or mount paths: a drive says what it holds, not where it's
+mounted. Every pop-out has its own copy button for its section; the
+Sensors pop-out copies its current readings, stamped with the time.
+`sysmon specs` prints the same sheet in a terminal.
 
 ### Overview
 
@@ -150,6 +172,7 @@ sysmon probe [section]      # one-shot JSON (works with nothing running)
 sysmon tap network -i 2     # NDJSON stream — the desktop-bar diet
 sysmon ctl shot /tmp/s.png  # drive the window: pages, themes, pop-outs, screenshots
 sysmon serve                # headless daemon; idle = literally zero sampling
+sysmon specs                # what the machine is: the shareable spec sheet
 sysmon schema               # the machine-readable map of everything
 ```
 
@@ -202,10 +225,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.3.0_amd64.deb
+sudo apt install ./sysmon_3.4.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.3.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.4.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -215,7 +238,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.3.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.4.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully. Motherboard fan and voltage

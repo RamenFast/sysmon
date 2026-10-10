@@ -96,6 +96,8 @@ ONE_SHOTS=(
   "probe processes"
   "probe sensors"
   "probe connections"
+  "specs"
+  "specs graphics"
   "schema"
   "ctl status"
 )
@@ -269,7 +271,7 @@ c8() {
   grep -q 'additionalProperties' <<<"${schema}" || bad="${bad} [no-additionalProperties:false]"
 
   # every CLI verb the binary implements must appear in the schema
-  for verb in probe tap ctl serve schema; do
+  for verb in probe tap ctl serve schema specs; do
     grep -q "\"${verb}\"" <<<"${schema}" || bad="${bad} [verb-${verb}-undocumented]"
   done
   # every section the help names must be documented
@@ -280,7 +282,7 @@ c8() {
   jq -e '[.. | objects | select(has("exit_codes"))] | length > 0' >/dev/null 2>&1 <<<"${schema}" \
     || bad="${bad} [exit-codes-undocumented]"
   # every verb must publish which exits it can produce
-  for verb in probe tap ctl serve schema; do
+  for verb in probe tap ctl serve schema specs; do
     jq -e --arg v "${verb}" '.contract.verbs[$v].exits | type == "array"' >/dev/null 2>&1 <<<"${schema}" \
       || bad="${bad} [verb-${verb}-does-not-publish-its-exits]"
   done

@@ -12,6 +12,7 @@ sysmon - compact system monitor with an agent-drivable API
 *sysmon* tap [_sections_...] [--interval _N_]++
 *sysmon* ctl _verb_ [_args_...]++
 *sysmon* serve++
+*sysmon* specs [_section_] [--json]++
 *sysmon* schema
 
 # DESCRIPTION
@@ -66,6 +67,19 @@ networking first — without scraping a UI.
 	Headless sampling daemon on the control socket. Samples only
 	when a client asks — an idle daemon does nothing at all.
 
+*specs* [_section_] [--json]
+	What this machine is, rather than what it is doing: OS, desktop,
+	board and firmware; CPU topology, clocks, caches and instruction
+	sets; memory modules; each GPU with its architecture, PCIe link,
+	power cap and driver stack; displays; every physical drive;
+	network; audio. On a terminal it prints the plain-text sheet the
+	GUI's copy buttons copy, which leaves out the hostname, serials,
+	addresses and mount paths. Piped, the envelope with every field
+	and the sheet as _result.text_. Sections: *system cpu memory
+	graphics storage network audio*. Needs no running instance; the
+	optional helpers it asks (vulkaninfo, glxinfo, swaymsg, pactl)
+	each run under a 3 s deadline.
+
 *schema*
 	The machine-readable map of every command, section, field, and
 	the envelope/exit-code contract — strict, generated from the
@@ -111,6 +125,9 @@ Who is using the network right now:
 
 Screenshot the running window:
 	sysmon ctl shot /tmp/sysmon.png
+
+A spec sheet for a forum post:
+	sysmon specs | wl-copy
 
 # AUTHORS
 

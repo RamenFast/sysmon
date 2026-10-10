@@ -230,6 +230,8 @@ pub struct SysMonApp {
     toast_tx: std::sync::mpsc::Sender<String>,
     toast_rx: std::sync::mpsc::Receiver<String>,
     toasts: Vec<actions::Toast>,
+    /// The copy buttons' off-thread spec reader.
+    specs_copier: specs::SpecsCopier,
     applied_palette_id: String,
     system_palette: &'static Palette,
     system_palette_checked: Instant,
@@ -323,6 +325,7 @@ impl SysMonApp {
             pending_confirm: None,
             toast_tx,
             toast_rx,
+            specs_copier: specs::SpecsCopier::default(),
             toasts: Vec::new(),
             applied_palette_id: String::new(),
             system_palette: theme::palette_for_system(),
@@ -401,10 +404,9 @@ impl SysMonApp {
                         ));
                         self.settings.save();
                     }
-                    if glyph_button(ui, palette, ButtonGlyph::Copy, false, "Copy system specs").clicked() {
-                        let snapshot = self.shared.latest.read().unwrap().clone();
-                        ctx.copy_text(specs::specs_text(&snapshot, &specs::HostFacts::read()));
-                        let _ = self.toast_tx.send("System specs copied".to_string());
+                    let copying = self.specs_copier.is_busy();
+                    if glyph_button(ui, palette, ButtonGlyph::Copy, copying, "Copy system specs").clicked() {
+                        self.specs_copier.request(ctx, None, "System specs".to_string());
                     }
 
                     // Page switcher, centered-ish.
@@ -767,9 +769,20 @@ impl SysMonApp {
                                     }),
                                 );
                             }
-                            if glyph_button(ui, palette, ButtonGlyph::Copy, false, "Copy these specs").clicked() {
-                                ctx.copy_text(specs::section_text(section, &snapshot, &specs::HostFacts::read()));
-                                let _ = self.toast_tx.send(format!("{} specs copied", title.trim_end_matches(" — SysMon")));
+                            let what = title.trim_end_matches(" — SysMon");
+                            match specs::spec_section_for_popout(section) {
+                                Some(spec_section) => {
+                                    let copying = self.specs_copier.is_busy();
+                                    if glyph_button(ui, palette, ButtonGlyph::Copy, copying, "Copy these specs").clicked() {
+                                        self.specs_copier.request(ctx, Some(spec_section), format!("{what} specs"));
+                                    }
+                                }
+                                None => {
+                                    if glyph_button(ui, palette, ButtonGlyph::Copy, false, "Copy these readings").clicked() {
+                                        ctx.copy_text(specs::sensor_readings_text(&snapshot));
+                                        let _ = self.toast_tx.send(format!("{what} readings copied"));
+                                    }
+                                }
                             }
                             ui.label(
                                 RichText::new("drag onto the main window to dock")
@@ -984,6 +997,12 @@ impl SysMonApp {
             self.pending_confirm = None;
         }
 
+        // A finished spec read lands on the clipboard from a frame of
+        // the main viewport (the clipboard belongs to the window).
+        while let Some(copied) = self.specs_copier.poll() {
+            ctx.copy_text(copied.text);
+            let _ = self.toast_tx.send(copied.toast);
+        }
         while let Ok(text) = self.toast_rx.try_recv() {
             self.toasts.push(actions::Toast {
                 text,

@@ -109,6 +109,10 @@ pub fn parse_meminfo(content: &str) -> MemorySnapshot {
 /// SIZE 0 or omit it and are skipped.
 pub fn parse_dmi_memory(content: &str) -> Vec<MemoryModule> {
     let mut slots: std::collections::BTreeMap<u32, MemoryModule> = Default::default();
+    // The JEDEC id names a maker only when the firmware's own name is
+    // missing; it is applied after the pass, so line order can't flip
+    // the precedence.
+    let mut makers_by_id: std::collections::BTreeMap<u32, &'static str> = Default::default();
     for line in content.lines() {
         let Some(rest) = line
             .strip_prefix("E:MEMORY_DEVICE_")
@@ -139,13 +143,59 @@ pub fn parse_dmi_memory(content: &str) -> Vec<MemoryModule> {
                     module.part_number = Some(part.to_string());
                 }
             }
+            "FORM_FACTOR" => {
+                let form = value.trim();
+                if !form.is_empty() && form != "Unknown" && form != "Other" {
+                    module.form_factor = Some(form.to_string());
+                }
+            }
+            "RANK" => module.rank = value.trim().parse().ok().filter(|&rank| rank > 0),
+            "MANUFACTURER" => {
+                let name = value.trim();
+                // Some boards print the raw JEDEC bytes here
+                // ("80CE000080CE"); those are not a name.
+                let raw_id = name.chars().all(|c| c.is_ascii_hexdigit());
+                if !raw_id && !["Unknown", "Not Specified", "Undefined"].contains(&name) {
+                    module.manufacturer = Some(name.to_string());
+                }
+            }
+            "MODULE_MANUFACTURER_ID" => {
+                if let Some(maker) = jedec_maker(value) {
+                    makers_by_id.insert(index, maker);
+                }
+            }
             _ => {}
+        }
+    }
+    for (index, maker) in makers_by_id {
+        if let Some(module) = slots.get_mut(&index) {
+            module.manufacturer.get_or_insert_with(|| maker.to_string());
         }
     }
     slots
         .into_values()
         .filter(|module| module.size_bytes > 0)
         .collect()
+}
+
+/// A JEDEC JEP106 manufacturer ("Bank 3, Hex 0x9E") → the name on the
+/// heatspreader, for the makers people buy from. An id not listed
+/// returns None: a raw id is not a maker.
+pub fn jedec_maker(id: &str) -> Option<&'static str> {
+    let (bank, hex) = id.split_once(',')?;
+    let bank: u32 = bank.trim().strip_prefix("Bank")?.trim().parse().ok()?;
+    let hex = hex.trim().strip_prefix("Hex")?.trim().trim_start_matches("0x");
+    // JEP106 codes carry an odd-parity bit (0x9E = parity + 0x1E).
+    let code = u32::from_str_radix(hex, 16).ok()? & 0x7f;
+    Some(match (bank, code) {
+        (1, 0x2c) => "Micron",
+        (1, 0x4e) => "Samsung",
+        (1, 0x2d) => "SK hynix",
+        (2, 0x18) => "Kingston",
+        (3, 0x1e) => "Corsair",
+        (5, 0x4d) => "G.Skill",
+        _ => return None,
+    })
 }
 
 pub struct MemoryCollector {
@@ -259,5 +309,47 @@ E:MEMORY_DEVICE_2_PART_NUMBER=Unknown
         assert_eq!(modules[0].rated_speed_mts, Some(2133));
         assert_eq!(modules[0].part_number.as_deref(), Some("CMK128GX4M4E3200C16"));
         assert_eq!(modules[1].rated_speed_mts, None);
+    }
+
+    #[test]
+    fn dmi_modules_carry_form_factor_and_rank_when_firmware_names_them() {
+        let content = "\
+E:MEMORY_DEVICE_0_SIZE=34359738368
+E:MEMORY_DEVICE_0_FORM_FACTOR=DIMM
+E:MEMORY_DEVICE_0_RANK=2
+E:MEMORY_DEVICE_1_SIZE=34359738368
+E:MEMORY_DEVICE_1_FORM_FACTOR=Unknown
+E:MEMORY_DEVICE_1_RANK=0
+";
+        let modules = parse_dmi_memory(content);
+        assert_eq!(modules[0].form_factor.as_deref(), Some("DIMM"));
+        assert_eq!(modules[0].rank, Some(2));
+        assert_eq!(modules[1].form_factor, None, "Unknown is not a form factor");
+        assert_eq!(modules[1].rank, None, "rank 0 means unreported");
+    }
+
+    /// This machine's board says MANUFACTURER=Unknown; the JEDEC id
+    /// (bank 3, 0x9E) is Corsair. A firmware name wins over the id in
+    /// either line order; an unlisted id names nobody.
+    #[test]
+    fn module_makers_prefer_the_firmware_name_then_the_jedec_id() {
+        let content = "\
+E:MEMORY_DEVICE_0_SIZE=34359738368
+E:MEMORY_DEVICE_0_MANUFACTURER=Unknown
+E:MEMORY_DEVICE_0_MODULE_MANUFACTURER_ID=Bank 3, Hex 0x9E
+E:MEMORY_DEVICE_1_SIZE=34359738368
+E:MEMORY_DEVICE_1_MODULE_MANUFACTURER_ID=Bank 5, Hex 0xCD
+E:MEMORY_DEVICE_1_MANUFACTURER=G Skill Intl
+E:MEMORY_DEVICE_2_SIZE=34359738368
+E:MEMORY_DEVICE_2_MANUFACTURER=80CE000080CE
+E:MEMORY_DEVICE_2_MODULE_MANUFACTURER_ID=Bank 9, Hex 0x01
+";
+        let modules = parse_dmi_memory(content);
+        assert_eq!(modules[0].manufacturer.as_deref(), Some("Corsair"));
+        assert_eq!(modules[1].manufacturer.as_deref(), Some("G Skill Intl"));
+        assert_eq!(modules[2].manufacturer, None, "raw id bytes and unlisted ids name nobody");
+        assert_eq!(jedec_maker("Bank 1, Hex 0xCE"), Some("Samsung"));
+        assert_eq!(jedec_maker("Bank 2, Hex 0x98"), Some("Kingston"));
+        assert_eq!(jedec_maker("junk"), None);
     }
 }

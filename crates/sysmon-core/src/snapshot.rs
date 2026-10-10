@@ -176,6 +176,16 @@ pub struct MemoryModule {
     pub rated_speed_mts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part_number: Option<String>,
+    /// "DIMM", "SODIMM", … New in 3.4.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub form_factor: Option<String>,
+    /// Ranks on the module (1 = single-rank, 2 = dual-rank). New in 3.4.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rank: Option<u32>,
+    /// Who made the module: the firmware's own name, else the maker
+    /// its JEDEC id belongs to ("Corsair"). New in 3.4.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub manufacturer: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
