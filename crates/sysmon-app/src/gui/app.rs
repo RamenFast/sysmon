@@ -767,6 +767,10 @@ impl SysMonApp {
                                     }),
                                 );
                             }
+                            if glyph_button(ui, palette, ButtonGlyph::Copy, false, "Copy these specs").clicked() {
+                                ctx.copy_text(specs::section_text(section, &snapshot, &specs::HostFacts::read()));
+                                let _ = self.toast_tx.send(format!("{} specs copied", title.trim_end_matches(" — SysMon")));
+                            }
                             ui.label(
                                 RichText::new("drag onto the main window to dock")
                                     .color(palette.muted)

@@ -51,3 +51,4 @@ Rules:
 - 2026-10-01 [ask] full creative and technical authority for the 3.2 round; report at the end
 - 2026-10-09 [claim] "why does it say 135? I have a 128gb kit" — the Usable 135.0 GB (decimal MemTotal) read as more than the sticks
 - 2026-10-09 [feature] add a copy button to SysMon (system specs to the clipboard)
+- 2026-10-09 [feature] copy specs for each pop-out window too ("for individual windows too")

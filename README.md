@@ -90,7 +90,9 @@ The **copy button** (two sheets, top-left) puts a plain-text spec
 sheet on the clipboard: host, OS, kernel, CPU, the RAM sticks with
 installed *and* usable memory in both GB and GiB, swap, GPU and VRAM,
 board, and every mounted disk. Ready to paste into a forum post or a
-bug report.
+bug report. Every pop-out window has its own copy button that copies
+just that section (GPU, memory, CPU, disks, network links without
+addresses, sensors with their readings now).
 
 ### Overview
 
