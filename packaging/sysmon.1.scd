@@ -126,8 +126,8 @@ Who is using the network right now:
 Screenshot the running window:
 	sysmon ctl shot /tmp/sysmon.png
 
-A spec sheet for a forum post:
-	sysmon specs | wl-copy
+A spec sheet for a forum post (piped output is JSON, so take the text):
+	sysmon specs --json | jq -j .result.text | wl-copy
 
 # AUTHORS
 
