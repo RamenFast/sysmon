@@ -86,6 +86,12 @@ The three new numbers (kernel time, commit charge, kernel memory) are
 audited like everything else: C7 against `mpstat`, M7/M8 against
 `/proc/meminfo`.
 
+The **copy button** (two sheets, top-left) puts a plain-text spec
+sheet on the clipboard: host, OS, kernel, CPU, the RAM sticks with
+installed *and* usable memory in both GB and GiB, swap, GPU and VRAM,
+board, and every mounted disk. Ready to paste into a forum post or a
+bug report.
+
 ### Overview
 
 ![overview](docs/screenshot-overview-wide.png)
@@ -194,10 +200,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.2.0_amd64.deb
+sudo apt install ./sysmon_3.3.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.2.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.3.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -207,7 +213,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.2.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.3.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully. Motherboard fan and voltage

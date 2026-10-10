@@ -26,6 +26,7 @@ use super::icons::IconCache;
 use super::performance::{self, PerformanceContext};
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
 use super::settings::{SECTION_KEYS, Settings};
+use super::specs;
 use super::theme::{self, Palette};
 use super::widgets::{ButtonGlyph, glyph_button, menu_check_row, menu_chip, menu_option_row};
 
@@ -399,6 +400,11 @@ impl SysMonApp {
                             },
                         ));
                         self.settings.save();
+                    }
+                    if glyph_button(ui, palette, ButtonGlyph::Copy, false, "Copy system specs").clicked() {
+                        let snapshot = self.shared.latest.read().unwrap().clone();
+                        ctx.copy_text(specs::specs_text(&snapshot, &specs::HostFacts::read()));
+                        let _ = self.toast_tx.send("System specs copied".to_string());
                     }
 
                     // Page switcher, centered-ish.
