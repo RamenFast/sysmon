@@ -17,6 +17,7 @@ pub enum ButtonGlyph {
     Pin,
     Menu,
     PopOut,
+    Copy,
 }
 
 pub fn glyph_button(
@@ -144,6 +145,16 @@ pub fn glyph_button(
                 let back = Rect::from_center_size(pos2(center.x - 1.5, center.y + 1.5), vec2(7.0, 7.0));
                 let front = Rect::from_center_size(pos2(center.x + 2.0, center.y - 2.0), vec2(7.0, 7.0));
                 painter.rect_stroke(back, 0.0, Stroke::new(1.2, stroke_color.gamma_multiply(0.6)), StrokeKind::Inside);
+                painter.rect_stroke(front, 0.0, Stroke::new(1.2, stroke_color), StrokeKind::Inside);
+            }
+            ButtonGlyph::Copy => {
+                // Two sheets, the back one peeking up-left: the
+                // clipboard idiom, drawn apart from PopOut's offset
+                // (which leans the other way) by the solid front.
+                let back = Rect::from_center_size(pos2(center.x - 1.5, center.y - 1.5), vec2(7.0, 8.0));
+                let front = Rect::from_center_size(pos2(center.x + 1.5, center.y + 1.5), vec2(7.0, 8.0));
+                painter.rect_stroke(back, 0.0, Stroke::new(1.2, stroke_color.gamma_multiply(0.6)), StrokeKind::Inside);
+                painter.rect_filled(front, 0.0, face);
                 painter.rect_stroke(front, 0.0, Stroke::new(1.2, stroke_color), StrokeKind::Inside);
             }
         }

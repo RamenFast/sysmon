@@ -19,6 +19,7 @@ pub mod performance;
 pub mod processes;
 pub mod sensors_view;
 pub mod settings;
+pub mod specs;
 pub mod theme;
 pub mod widgets;
 

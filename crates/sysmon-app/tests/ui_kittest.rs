@@ -228,6 +228,19 @@ fn ui_interactions_end_to_end() {
         "`P` unpinned it (phosphor's shortcut)"
     );
 
+    // ---- the copy button puts the spec sheet on the clipboard -------
+    harness.get_by_label("Copy system specs").click();
+    harness.step();
+    let copied = harness.output().platform_output.commands.iter().find_map(|command| match command {
+        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+        _ => None,
+    });
+    let copied = copied.expect("clicking Copy system specs sent CopyText");
+    for expected in ["Host ", "Kernel ", "usable "] {
+        assert!(copied.contains(expected), "spec sheet lacks `{expected}`:\n{copied}");
+    }
+    harness.run_steps(8);
+
     harness.get_by_label("Display options").click();
     harness.run_steps(8);
     harness.get_by_label("Funky Pink").click();
