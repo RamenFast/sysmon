@@ -112,6 +112,8 @@ fn context_menu_keeps_the_process_it_was_opened_on() {
     std::fs::create_dir_all(&runtime).unwrap();
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &config);
+        // History is recorded by the sampler: never into the real one.
+        std::env::set_var("XDG_STATE_HOME", config.join("state"));
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
     }
 

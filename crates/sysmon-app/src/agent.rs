@@ -304,6 +304,260 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
     }
 }
 
+// ------------------------------------------------------------------ specs
+
+const SPEC_SECTION_NAMES: &str = "system cpu memory graphics storage network audio";
+
+/// `sysmon specs [section] [--json]`: what this machine *is*. On a
+/// terminal, the same plain-text sheet the copy button copies; piped,
+/// the envelope with every structured field plus `result.text`, so
+/// `sysmon specs --json | jq -j .result.text` is byte-for-byte the
+/// clipboard. Never needs a running instance.
+pub fn run_specs(arguments: &[String]) -> i32 {
+    let mut force_json = false;
+    let mut section: Option<&str> = None;
+    for argument in arguments {
+        match argument.as_str() {
+            "--json" => force_json = true,
+            name if !name.starts_with('-') && section.is_none() => section = Some(name),
+            other => {
+                let message = if other.starts_with('-') {
+                    format!("unknown flag `{other}`")
+                } else {
+                    format!("specs takes one section, got a second: `{other}`")
+                };
+                return envelope::fail_forced(
+                    message,
+                    format!("usage: sysmon specs [section] [--json]; sections: {SPEC_SECTION_NAMES}"),
+                    EXIT_BAD_ARGS,
+                    arguments.iter().any(|a| a == "--json"),
+                );
+            }
+        }
+    }
+    let section = match section {
+        Some(name) => match sysmon_core::specs::SPEC_SECTIONS.iter().find(|s| **s == name) {
+            Some(known) => Some(*known),
+            None => {
+                return envelope::fail_forced(
+                    format!("unknown spec section `{name}`"),
+                    format!("sections: {SPEC_SECTION_NAMES}"),
+                    EXIT_BAD_ARGS,
+                    force_json,
+                );
+            }
+        },
+        None => None,
+    };
+
+    let specs = sysmon_core::specs::collect();
+    let text = match section {
+        Some(section) => sysmon_core::specs::text::section_text(section, &specs),
+        None => sysmon_core::specs::text::specs_text(&specs),
+    };
+    if !envelope::json_wanted(force_json) {
+        for line in text.lines() {
+            out!("{line}");
+        }
+        return EXIT_OK;
+    }
+    let mut result = match specs.to_json_value() {
+        Ok(value) => value,
+        Err(serialize_error) => {
+            return envelope::fail(
+                format!("specs serialization failed: {serialize_error}"),
+                "this is a sysmon bug — please report it",
+                EXIT_RUNTIME,
+            );
+        }
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("section".to_string(), json!(section.unwrap_or("all")));
+        object.insert("text".to_string(), json!(text));
+    }
+    envelope::emit(&envelope::ok(result));
+    EXIT_OK
+}
+
+// ---------------------------------------------------------------- history
+
+const HISTORY_SECTION_NAMES: &str = "all cpu memory gpu network disks sensors";
+
+/// "90s", "15m", "2h", "7d", a bare number of seconds, or a unix time
+/// (a number above 1e9) → seconds back from `now`.
+fn parse_when(raw: &str, now: f64) -> Option<f64> {
+    let raw = raw.trim();
+    let (number, scale) = match raw.char_indices().find(|(_, c)| c.is_ascii_alphabetic()) {
+        Some((index, _)) => {
+            let scale = match &raw[index..] {
+                "s" | "sec" => 1.0,
+                "m" | "min" => 60.0,
+                "h" => 3_600.0,
+                "d" => 86_400.0,
+                "w" => 604_800.0,
+                _ => return None,
+            };
+            (&raw[..index], scale)
+        }
+        None => (raw, 1.0),
+    };
+    let value = number.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)?;
+    if scale == 1.0 && value > 1e9 {
+        return Some((now - value).max(0.0)); // an absolute unix time
+    }
+    Some(value * scale)
+}
+
+/// `sysmon history [section] [--since D] [--until D] [--specs]
+/// [--records] [--blocks N] [--json]`: the usage history SysMon keeps
+/// on disk, summarized (min/avg/p95/max, a timeline, the GPU's
+/// programs). Reads the files directly: needs no running instance.
+pub fn run_history(arguments: &[String]) -> i32 {
+    let asked_for_json = arguments.iter().any(|a| a == "--json");
+    let usage = format!(
+        "usage: sysmon history [section] [--since 1h] [--until 0s] [--specs] [--records] [--blocks 48] [--json]; \
+         sections: {HISTORY_SECTION_NAMES}; times: 90s 15m 2h 7d, or a unix time"
+    );
+    let bad = |message: String| envelope::fail_forced(message, usage.clone(), EXIT_BAD_ARGS, asked_for_json);
+    let now = envelope::now_ts();
+    let mut section: Option<&str> = None;
+    let mut since = 3_600.0;
+    let mut until = 0.0;
+    let mut with_specs = false;
+    let mut records = false;
+    let mut blocks = sysmon_core::history::summary::TIMELINE_BUCKETS;
+    let mut cursor = arguments.iter();
+    while let Some(argument) = cursor.next() {
+        match argument.as_str() {
+            "--json" => {}
+            "--specs" => with_specs = true,
+            "--records" => records = true,
+            flag @ ("--since" | "--until") => {
+                let Some(value) = cursor.next() else {
+                    return bad(format!("{flag} needs a time, e.g. {flag} 2h"));
+                };
+                let Some(seconds) = parse_when(value, now) else {
+                    return bad(format!("{flag}: can't read `{value}` as a time"));
+                };
+                if flag == "--since" { since = seconds } else { until = seconds }
+            }
+            "--blocks" => {
+                match cursor.next().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=1_000).contains(n)) {
+                    Some(n) => blocks = n,
+                    None => return bad("--blocks needs a whole number from 1 to 1000".to_string()),
+                }
+            }
+            name if !name.starts_with('-') && section.is_none() => section = Some(name),
+            other if other.starts_with('-') => return bad(format!("unknown flag `{other}`")),
+            other => return bad(format!("history takes one section, got a second: `{other}`")),
+        }
+    }
+    let section = section.unwrap_or("all");
+    if section != "all" && !sysmon_core::history::HISTORY_SECTIONS.contains(&section) {
+        return bad(format!("unknown history section `{section}`"));
+    }
+    if with_specs && section == "all" {
+        return bad("--specs needs a section (it copies that section's specs, like its pop-out)".to_string());
+    }
+    if until >= since {
+        return bad(format!("--until ({until:.0} s ago) must be later than --since ({since:.0} s ago)"));
+    }
+    let (from_ts, to_ts) = (now - since, now - until);
+
+    let dir = sysmon_core::history::default_dir();
+    let store = sysmon_core::history::Recording::info(&dir);
+    if store.files == 0 {
+        return envelope::fail_forced(
+            format!("no usage history in {}", dir.display()),
+            "history is recorded while the SysMon window runs (Display options → Usage history), \
+             or by `sysmon serve --record`",
+            EXIT_UNAVAILABLE,
+            asked_for_json,
+        );
+    }
+
+    if records {
+        // NDJSON, one record per line, like `tap`: an agent plots or
+        // filters what the summary condensed.
+        let history_section = if section == "all" { None } else { Some(section) };
+        sysmon_core::history::Recording::for_each(&dir, from_ts, to_ts, |record| {
+            let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                if let Some(keep) = history_section {
+                    let wanted: &[&str] = match keep {
+                        "sensors" => &["temps", "fans"],
+                        other => &[other][..],
+                    };
+                    let wanted: Vec<&str> = wanted.to_vec();
+                    object.retain(|key, _| key == "ts" || key == "interval_seconds" || wanted.contains(&key.as_str()));
+                }
+                object.insert("event".to_string(), json!("history"));
+            }
+            envelope::print_line(&value.to_string());
+        });
+        return EXIT_OK;
+    }
+
+    let summary = sysmon_core::history::summarize(section, from_ts, to_ts, blocks, |sink| {
+        sysmon_core::history::Recording::for_each(&dir, from_ts, to_ts, sink).skipped_lines
+    });
+    let style = sysmon_core::history::text::TextStyle::default();
+    let text = if with_specs {
+        let spec_section = crate::gui::specs::spec_section_for_popout(section);
+        let specs_text = match spec_section {
+            Some(spec_section) => sysmon_core::specs::text::section_text(spec_section, &sysmon_core::specs::collect()),
+            None => {
+                // Sensors: its readings now, as its pop-out copies them.
+                let mut sampler = Sampler::with_options(SamplerOptions { enable_nethogs: false });
+                let mut wants = Wants::none();
+                wants.sensors = true;
+                crate::gui::specs::sensor_readings_text(&sampler.sample(wants))
+            }
+        };
+        sysmon_core::history::text::section_report(
+            crate::gui::specs::section_title(section),
+            Some(&specs_text),
+            &summary,
+            style,
+        )
+    } else {
+        sysmon_core::history::text::summary_text(&summary, style)
+    };
+    if !envelope::json_wanted(asked_for_json) {
+        for line in text.lines() {
+            out!("{line}");
+        }
+        return EXIT_OK;
+    }
+    let mut result = match serde_json::to_value(&summary) {
+        Ok(value) => value,
+        Err(serialize_error) => {
+            return envelope::fail(
+                format!("history serialization failed: {serialize_error}"),
+                "this is a sysmon bug — please report it",
+                EXIT_RUNTIME,
+            );
+        }
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("range_seconds".to_string(), json!(to_ts - from_ts));
+        object.insert("store".to_string(), json!(store));
+        object.insert(
+            "recorder".to_string(),
+            json!(sysmon_core::history::store::current_writer(&dir)),
+        );
+        if summary.samples == 0 {
+            object.insert(
+                "hint".to_string(),
+                json!("nothing was recorded in this range; widen --since, or check `store.newest_ts`"),
+            );
+        }
+        object.insert("text".to_string(), json!(text));
+    }
+    envelope::emit(&envelope::ok(result));
+    EXIT_OK
+}
+
 // ----------------------------------------------------------------- schema
 
 pub fn run_schema(_arguments: &[String]) -> i32 {
@@ -334,6 +588,49 @@ fn build_schema() -> Value {
         .map(|palette| palette.id)
         .collect();
     let popout_enum: Vec<&str> = crate::gui::settings::SECTION_KEYS.to_vec();
+    let spec_section_enum: Vec<&str> = sysmon_core::specs::SPEC_SECTIONS.to_vec();
+    let history_section_enum: Vec<&str> =
+        std::iter::once("all").chain(sysmon_core::history::HISTORY_SECTIONS.iter().copied()).collect();
+    // Its own value: one json! for the whole map passes the macro's
+    // recursion limit.
+    let history_verb = json!({
+                    "usage": "sysmon history [section] [--since D] [--until D] [--specs] [--records] [--blocks N] [--json]",
+                    "kind": "one-shot (NDJSON stream with --records)",
+                    "description": "what the machine DID over a time range, from the usage history on disk (recorded while the GUI runs, or by `sysmon serve --record`). Per reading: min, avg, p95, max, latest and a timeline; for the GPU, every program that held it with peak/avg VRAM and busy share. A terminal gets the plain text a pop-out's copy button copies; piped, the envelope. Needs no running instance.",
+                    "arguments": {
+                        "section": {"enum": history_section_enum, "optional": true, "default": "all"},
+                        "--since": {"type": "string", "default": "1h", "description": "how far back: 90s 15m 2h 7d, plain seconds, or a unix time"},
+                        "--until": {"type": "string", "default": "0s", "description": "the range's end, as far back as --since reads"},
+                        "--specs": {"type": "flag", "description": "put the section's specs above the usage: exactly what its pop-out's copy button copies (needs a section)"},
+                        "--records": {"type": "flag", "description": "instead of a summary, every raw record in the range as NDJSON, one per line, each with `event`: \"history\" (scoped to the section's keys)"},
+                        "--blocks": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 48, "description": "timeline resolution"},
+                        "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "result": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["section", "from_ts", "to_ts", "range_seconds", "samples", "covered_seconds", "timeline_block_seconds", "metrics", "skipped_lines", "store", "recorder", "text"],
+                        "properties": {
+                            "section": {"type": "string"},
+                            "from_ts | to_ts": {"type": "number", "description": "the range asked for, unix seconds"},
+                            "range_seconds": {"type": "number"},
+                            "samples": {"type": "integer", "description": "records in the range"},
+                            "covered_seconds": {"type": "number", "description": "how much of the range the samples cover (each record's window, never more than the gap before it): less than range_seconds means SysMon was not recording part of the time"},
+                            "cadence_seconds": {"type": "number", "description": "median gap between samples"},
+                            "first_ts | last_ts": {"type": "number"},
+                            "timeline_block_seconds": {"type": "number"},
+                            "metrics": {"type": "array", "description": "[{key (`<section>.<reading>_<unit>`, e.g. gpu.vram_used_bytes, sensors.k10temp Tctl_celsius), label, unit (percent|bytes|bps|celsius|watts|mhz|rpm|load), samples, min, avg, p95, max, latest, total_bytes? (rates: bytes moved over the range), ceiling? (100 for a percent, the card/RAM size for memory), timeline: [mean per block | null where nothing was recorded]}]. min/avg/max/latest exact; p95 from a log-bucket sketch, within 0.5% of the exact nearest-rank p95"},
+                            "gpu_processes": {"type": "array", "description": "[{name, pids[], samples, present_percent, vram_avg_bytes, vram_p95_bytes, vram_max_bytes, busy_avg_percent, busy_p95_percent, busy_max_percent, gtt_max_bytes}] — programs grouped by name per sample, biggest peak VRAM first. A buffer two programs share counts in both"},
+                            "skipped_lines": {"type": "integer", "description": "unreadable lines on disk (a torn tail after a crash), reported rather than hidden"},
+                            "store": {"type": "object", "description": "{dir, bytes, files, oldest_ts?, newest_ts?} — the whole history on disk"},
+                            "recorder": {"type": ["string", "null"], "description": "who writes the history right now (\"pid 4242 gui\"), null when nothing records"},
+                            "hint": {"type": "string", "description": "present when the range holds no samples"},
+                            "text": {"type": "string", "description": "the plain-text summary; with --specs, byte-for-byte a pop-out's copy (the clipboard)"},
+                        },
+                    },
+                    "exits": [0, 2, 3, 4],
+                    "exit_2": "no history on disk at all (nothing has recorded yet); the fix names how to start recording",
+                });
     json!({
         "status": "ok",
         "tool": envelope::TOOL,
@@ -452,6 +749,7 @@ fn build_schema() -> Value {
                                                       "pid": {"type": "integer"},
                                                       "version": {"type": "string"},
                                                       "mode": {"enum": ["gui", "serve"]},
+                                                      "history": {"type": "object", "description": "the usage history recorder: {recording, dir, bytes, oldest_ts?, retention_seconds, max_bytes, problem?}. GUI always; serve only with --record"},
                                                       "renderer": {"type": "string", "description": "GUI only: the adapter the window renders on"},
                                                       "renderer_hint": {"type": "string", "description": "present only when degraded to a CPU rasterizer — the fix"},
                                                   }}},
@@ -478,16 +776,51 @@ fn build_schema() -> Value {
                     "exits": [0, 2, 3, 4],
                 },
                 "serve": {
-                    "usage": "sysmon serve",
+                    "usage": "sysmon serve [--record [--interval N]]",
                     "kind": "daemon",
-                    "description": "headless owner of the control socket; samples only when asked — idle cost is zero",
-                    "exits": [0, 2, 4],
+                    "description": "headless owner of the control socket; samples only when asked — idle cost is zero. --record also keeps the usage history on disk (its own sampler at --interval, default the settings' update interval), for `sysmon history` without a window open",
+                    "arguments": {
+                        "--record": {"type": "flag", "description": "write the usage history (one writer at a time: exit 2 if a window or another serve already records)"},
+                        "--interval | -i": {"type": "number", "minimum": 0.5, "maximum": 60.0, "unit": "seconds", "description": "the recorder's cadence"},
+                    },
+                    "exits": [0, 2, 3, 4],
                 },
+                "history": history_verb,
                 "schema": {
                     "usage": "sysmon schema",
                     "kind": "one-shot",
                     "description": "this document — always current, generated from the binary",
                     "exits": [0],
+                },
+                "specs": {
+                    "usage": "sysmon specs [section] [--json]",
+                    "kind": "one-shot",
+                    "description": "what this machine IS (hardware, firmware, driver stack), not what it is doing. A terminal gets the plain-text sheet the GUI's copy buttons copy; piped, the envelope. Read on demand from sysfs/udev plus optional helpers (vulkaninfo, glxinfo, swaymsg, pactl) under a 3 s deadline each; needs no running instance. A missing source leaves its field absent, never zero; a section that cannot be read at all is listed in `unavailable`.",
+                    "arguments": {
+                        "section": {"enum": spec_section_enum, "optional": true,
+                                     "description": "scopes `result.text` to one section; the structured fields are always whole"},
+                        "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "result": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["ts", "gpus", "displays", "drives", "network", "unavailable", "section", "text"],
+                        "properties": {
+                            "ts": {"type": "number", "description": "unix seconds the specs were read"},
+                            "section": {"type": "string", "description": "the section `text` covers, or \"all\""},
+                            "text": {"type": "string", "description": "the shareable sheet, exactly what the copy button copies. `sysmon specs --json | jq -j .result.text` reproduces the clipboard. Leaves out the hostname, serials, addresses and mount paths"},
+                            "system": {"type": "object", "description": "os, os_base?, kernel, architecture, hostname (JSON only, never in text), session_type?, desktop?, model?, board?, firmware?, firmware_date? (ISO), boot_mode (UEFI|BIOS), secure_boot?"},
+                            "cpu": {"type": "object", "description": "model?, sockets?, cores? (physical), threads (logical), base_mhz? (ACPI CPPC nominal), max_mhz?, boost_enabled?, cache_l1d_bytes? | cache_l1i_bytes? | cache_l2_bytes? | cache_l3_bytes? (machine totals, shared caches counted once), frequency_driver?, governor?, energy_preference?, features[]"},
+                            "memory": {"type": "object", "description": "modules[] (the memory section's module shape, plus form_factor?, rank?, manufacturer?), slots?, installed_bytes?, usable_bytes (MemTotal), swap_bytes"},
+                            "gpus": {"type": "array", "description": "[{name, pci_id, pci_address, driver?, vram_bytes?, architecture? (e.g. gfx1201), family? (e.g. RDNA 4), compute_units?, pcie_link? {generation, width, device_max_generation?, device_max_width?} (the slowest hop to the CPU), power_cap_watts?, power_cap_max_watts?, vulkan? {version, driver}, opengl? {version, driver}, compute_stack?}] — every PCI display device; software renderers are never listed"},
+                            "displays": {"type": "array", "description": "[{connector, make?, model?, diagonal_inches?, width_px?, height_px?, refresh_hz?, scale?, mode_source: active (the compositor's running mode) | preferred (EDID only — the panel's preference, not necessarily in use)}]"},
+                            "drives": {"type": "array", "description": "[{name, model?, kind (NVMe SSD | SATA SSD | SATA HDD | USB | SD/eMMC), size_bytes, rpm?, link?, removable, filesystems: [{device, fs_type?, mount_points[]}]}] — physical drives, mounted or not"},
+                            "network": {"type": "array", "description": "[{name, kind (Ethernet | Wi-Fi), model?, driver?, link_up, speed_mbps?, duplex?}] — physical interfaces only, no addresses"},
+                            "audio": {"type": "object", "description": "server?, devices[] (ALSA card names)"},
+                            "unavailable": {"type": "array", "description": "[{section, reason}] for sections that could not be read at all"},
+                        },
+                    },
+                    "exits": [0, 3, 4],
                 },
             },
             "socket": {
@@ -507,6 +840,9 @@ fn build_schema() -> Value {
             "sysmon ctl <verb> […]": "drive the live instance",
             "sysmon serve": "headless daemon; samples only when asked — idle cost is zero",
             "sysmon schema": "this document",
+            "sysmon specs [section] [--json]": "what this machine is: the shareable spec sheet (the copy button's text), or every field as JSON when piped",
+            "sysmon history [section] [--since 1h] [--specs] [--records]": "what this machine did: usage history from disk, summarized (min/avg/p95/max, timeline, the GPU's programs); --specs is a pop-out's copy byte for byte",
+            "sysmon serve --record": "headless daemon that also keeps the usage history",
         },
         "sections": {
             "system": {"hostname": "string", "kernel": "string",
@@ -530,7 +866,7 @@ fn build_schema() -> Value {
             "memory": {
                 "total_bytes | free_bytes | available_bytes": "MemTotal / MemFree / MemAvailable",
                 "installed_bytes": "physical RAM fitted (sum of DMI memory devices); total_bytes is what the kernel can use after firmware/GPU reservations",
-                "modules": "[{locator, size_bytes, kind (DDR4…), rated_speed_mts, configured_speed_mts, part_number}] from /run/udev/data/+dmi:id; empty when DMI is unreadable",
+                "modules": "[{locator, size_bytes, kind (DDR4…), rated_speed_mts, configured_speed_mts, part_number, form_factor?, rank?, manufacturer? (the firmware's name, else the maker its JEDEC id belongs to)}] from /run/udev/data/+dmi:id; empty when DMI is unreadable",
                 "used_bytes": "total − available (psutil identity; htop shows a smaller figure by design)",
                 "used_percent": "used / total",
                 "cached_bytes": "Cached + SReclaimable",
@@ -551,7 +887,7 @@ fn build_schema() -> Value {
                 "core_clock_mhz | memory_clock_mhz": "mean across the sample window (the clock changes every few ms, 0 when gated)",
                 "clock_source": "\"mean of N reads\" or \"instant read\" (a window's first sample)",
                 "fan_rpm | fan_max_rpm": "hwmon fan1",
-                "processes": "[{pid, busy_percent, vram_bytes}] via DRM fdinfo, busiest first",
+                "processes": "[{pid, busy_percent, vram_bytes, gtt_bytes, vram_shared_bytes, vram_evicted_bytes}] via DRM fdinfo, each client once, busiest first. vram_bytes = drm-total-vram − amd-evicted-vram (buffers in VRAM now; never drm-memory-vram, which drifts to terabytes on kernel 7.2). A shared buffer counts in every process that maps it, so the sum can exceed vram_used_bytes by the shared part",
             },
             "network": {
                 "download_bps | upload_bps": "physical interfaces only (a device symlink in /sys/class/net)",

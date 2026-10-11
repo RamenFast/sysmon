@@ -15,6 +15,8 @@ out="${1:-e2e-out}"
 bin="${2:-target/release/sysmon}"
 display=":83"
 config="$(mktemp -d)"
+# Usage history (3.4) lands under XDG_STATE_HOME: a scratch one, always.
+export XDG_STATE_HOME="$config/state"
 runtime="$(mktemp -d /tmp/sysmon-e2e-rt.XXXX)"
 mkdir -p "$out"
 bin="$(realpath "$bin")"
@@ -111,6 +113,40 @@ pop_win=$(DISPLAY=$display xdotool search --name "GPU" | head -1)
 main_win=$(DISPLAY=$display xdotool search --name "^SysMon$" | head -1)
 [ -n "$pop_win" ] || fail "pop-out window exists"
 DISPLAY=$display import -window root "$out/popout.png"
+
+# 3.4: the pop-out's copy button, clicked for real, clipboard read back.
+# The copy is the GPU specs, then the usage the window has recorded
+# since launch (into the scratch XDG_STATE_HOME).
+if command -v xclip >/dev/null; then
+  say "pop-out copy button → clipboard"
+  client_x=$(DISPLAY=$display xwininfo -id "$pop_win" | awk '/Absolute upper-left X/{print $4}')
+  client_y=$(DISPLAY=$display xwininfo -id "$pop_win" | awk '/Absolute upper-left Y/{print $4}')
+  printf '' | DISPLAY=$display xclip -selection clipboard
+  # The row: pin (11 px), copy (≈49 px), then the range slider.
+  DISPLAY=$display xdotool mousemove $((client_x + 49)) $((client_y + 17)) click 1
+  copied=""
+  for _ in $(seq 20); do
+    sleep 0.5
+    copied="$(DISPLAY=$display xclip -o -selection clipboard 2>/dev/null || true)"
+    [ -n "$copied" ] && break
+  done
+  printf '%s\n' "$copied" >"$out/popout-copy.txt"
+  # No `| grep -q` under pipefail: an early-exiting reader turns a
+  # match into a SIGPIPE failure (seam #192). Test the strings directly.
+  first_line="${copied%%$'\n'*}"
+  [[ "$first_line" == "SysMon "*" · GPU" ]] || fail "pop-out copy: title line (see $out/popout-copy.txt)"
+  grep -q "^GPU  " <<<"$copied" || fail "pop-out copy: the GPU specs"
+  grep -q "^Usage · last 1 h · " <<<"$copied" || fail "pop-out copy: the usage block"
+  grep -q "^GPU busy " <<<"$copied" || fail "pop-out copy: the busy row"
+  ! grep -qF "$(cat /proc/sys/kernel/hostname)" <<<"$copied" || fail "pop-out copy carries the hostname"
+  # Piped output is the envelope; its text is what a terminal prints.
+  "$bin" history gpu --since 10m | jq -r .result.text >"$out/history-gpu.txt" || fail "sysmon history gpu failed"
+  grep -q "^GPU busy " "$out/history-gpu.txt" || fail "sysmon history reads what the window recorded"
+  pass "pop-out copy: specs + recorded usage on the clipboard ($(wc -l <"$out/popout-copy.txt") lines)"
+else
+  say "no xclip: pop-out copy readback skipped (sudo apt install xclip)"
+fi
+
 eval "$(DISPLAY=$display xdotool getwindowgeometry --shell "$main_win" | sed 's/^/m_/')"
 eval "$(DISPLAY=$display xdotool getwindowgeometry --shell "$pop_win" | sed 's/^/p_/')"
 DISPLAY=$display xdotool mousemove 1150 850 mousedown 1

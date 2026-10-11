@@ -52,3 +52,10 @@ Rules:
 - 2026-10-09 [claim] "why does it say 135? I have a 128gb kit" — the Usable 135.0 GB (decimal MemTotal) read as more than the sticks
 - 2026-10-09 [feature] add a copy button to SysMon (system specs to the clipboard)
 - 2026-10-09 [feature] copy specs for each pop-out window too ("for individual windows too")
+- 2026-10-09 [claim] the copied spec sheet is too thin to share: "i need more than that to share... please?"
+- 2026-10-09 [feature] yes to SysMon 3.4: a fuller shareable spec sheet (CPU cache and clocks, GPU link and driver stack, display, every physical drive, network, audio)
+- 2026-10-10 [bugfix] per-process GPU memory is wrong: "Was really hoping those usage statistics were working… wanted to see how much of the GPU power I was using and how much memory" (ghostty 620 GB, sway 1.98 TB of VRAM on a 32 GB card)
+- 2026-10-10 [context] purpose: see how much GPU and VRAM a game (Arc Raiders) uses while Nexus's local model stays loaded, so the model can stay open while he plays
+- 2026-10-10 [feature] a copy button in each pop-out window that copies its specs plus recent usage history, back as far as settings allow; the copied statistics must be easy to share, accurate and organized
+- 2026-10-10 [feature] a usage-history logging system built into sysmon (sensors, CPU, GPU, …), with a tooling surface Nexus can read ("a tooling surface for you to see")
+- 2026-10-10 [decision] yes to releasing 3.4.0 with these additions

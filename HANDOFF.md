@@ -105,6 +105,15 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.4 usage history** (`sysmon_core::history`, `sysmon history`,
+  `serve --record`): records while the window runs, default on, 7 d /
+  256 MB. Ideas: a Performance-page range picker that draws from the
+  disk history (today the graphs keep 150 samples in memory); a
+  `ctl` verb to bookmark a moment ("game started"); per-process CPU
+  and RAM in the record (only GPU programs today).
+- **Per-process VRAM** reads `drm-total-vram − amd-evicted-vram`.
+  If a future kernel fixes `drm-resident-vram`, prefer it only after
+  the accuracy check (Σ unshared ≤ card) proves it.
 - **The Cinnamon bar applet** — the whole reason `tap network`
   exists. Diet: `sysmon tap network -i 2`; click-through:
   `probe network` top_processes + `probe connections`. See

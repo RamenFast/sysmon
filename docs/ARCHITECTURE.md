@@ -54,9 +54,21 @@ src/collect/process.rs one pass over /proc/<pid>: stat, cmdline, io, exe.
                        cache with mtime refresh.
 src/collect/gpu.rs     amdgpu sysfs card metrics + per-process DRM fdinfo
                        (engine-time deltas, max across engines per client,
-                       negative cache so non-GPU pids are re-checked every
-                       5th sample)
+                       each client once by drm-client-id; VRAM = drm-total-
+                       vram − amd-evicted-vram, units honored, never the
+                       drifting drm-memory-vram; negative cache so non-GPU
+                       pids are re-checked every 5th sample)
 src/collect/sensors.rs hwmon walk + /sys/class/power_supply battery
+src/history/           usage history on disk (3.4). mod.rs: HistoryRecord,
+                       one compact line per sample, from a snapshot.
+                       store.rs: Recorder (one writer, flock'd .lock that
+                       names it; hourly UTC files, a finished hour gzipped;
+                       pruned by age then by a byte cap) and Recording (lock-
+                       free reader, torn lines counted). summary.rs: a range
+                       → min/avg/p95/max/timeline per reading + the GPU's
+                       programs, streaming (p95 from a 1% log-bucket sketch).
+                       text.rs: the shared plain text (copy buttons and
+                       `sysmon history`)
 tests/                 parsers (fixtures), accuracy (live cross-checks),
                        live_smoke, live_icons, live_net_attribution
 ```
@@ -116,8 +128,10 @@ src/gui/mod.rs         run(): settings → SharedUi → GuiBackend → socket
 src/gui/app.rs         SysMonApp (eframe::App) — the main-thread owner of
                        ALL UI state. SharedUi (Arc): latest snapshot,
                        histories, paused, interval, connections_wanted,
-                       open_viewports, main_window_rect. spawn_sampler():
-                       the sampling thread. process_commands(): drains ctl
+                       open_viewports, main_window_rect, history (the
+                       recorder's wishes + status). spawn_sampler(): the
+                       sampling thread; it also writes each sample to the
+                       history (HistoryWriter) after publishing it. process_commands(): drains ctl
                        verbs. collect_screenshot(): ViewportCommand::
                        Screenshot round-trip. popout_viewports(): immediate
                        viewports + drag-dock. x11_button1_down(): x11rb
@@ -140,6 +154,8 @@ src/gui/graphs.rs      History ring buffers + line/area/bars painters +
 src/gui/processes.rs   the table: filter, stable sort, 16 columns,
                        virtualized rows
 src/gui/details.rs     per-process viewport incl. live connections
+src/gui/specs.rs       the copy buttons: CopyJob (specs part + history
+                       part) run off the UI thread by SpecsCopier
 src/gui/icons.rs       IconCache: AppIndex path → png (image crate) / svg
                        (resvg) → egui texture; letter-tile fallback;
                        kernel threads stay bare
@@ -155,7 +171,12 @@ main thread            eframe event loop; ALL UI state mutation; drains
                        GuiCommand queue; immediate pop-out/detail viewports
 sysmon-sampler         loops at the user interval; Sampler::sample →
                        SharedUi.latest/histories; ctx.request_repaint() +
-                       request_repaint_of(each open viewport)
+                       request_repaint_of(each open viewport); then one
+                       history line to disk (outside the histories lock)
+sysmon-copy            one per copy click: reads specs (+ history range),
+                       hands the text back to a frame for the clipboard
+sysmon-history         `serve --record` only: its own sampler at its own
+                       cadence, one record per sample
 sysmon-ctl-accept      control.rs accept loop → per-connection threads
 sysmon-ctl-conn (×N)   read verb line → dispatch → write envelope;
                        subscribe loops sample-write-sleep

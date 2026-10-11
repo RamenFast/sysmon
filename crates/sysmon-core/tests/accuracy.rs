@@ -283,6 +283,28 @@ fn gpu_matches_sysfs_re_read() {
         sysfs_vram_used
     );
 
+    // Per-process VRAM (seam #196: 3.4.0 said sway held 1.98 TB of a
+    // 32 GB card). No process can hold more than the card, and the
+    // unshared parts of every process are buffers in VRAM, so they sum
+    // to at most what the card says is used. Shared buffers are left
+    // out of the sum because they legitimately count in each process
+    // that maps them. Same 256 MiB for allocations moving between reads.
+    for process in &ours.processes {
+        assert!(
+            process.vram_bytes <= ours.vram_total_bytes,
+            "pid {} holds {} bytes of VRAM on a {}-byte card",
+            process.pid,
+            process.vram_bytes,
+            ours.vram_total_bytes
+        );
+        assert!(process.vram_shared_bytes <= process.vram_bytes, "pid {} shares more than it holds", process.pid);
+    }
+    let unshared: u64 = ours.processes.iter().map(|p| p.vram_bytes - p.vram_shared_bytes).sum();
+    assert!(
+        unshared <= sysfs_vram_used + (256 << 20),
+        "per-process unshared VRAM sums to {unshared}, the card has {sysfs_vram_used} in use"
+    );
+
     // Temperature drifts a degree or two between reads, not ten.
     if let Some(edge) = ours.temperature_edge_celsius {
         let sysfs_edge: f32 = std::fs::read_to_string(format!("{device}/hwmon/hwmon2/temp1_input"))

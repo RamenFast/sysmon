@@ -43,6 +43,8 @@ fn ui_interactions_end_to_end() {
     let _ = std::fs::create_dir_all(&scratch);
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &scratch);
+        // History is recorded by the sampler: never into the real one.
+        std::env::set_var("XDG_STATE_HOME", scratch.join("state"));
     }
 
     // This test walks the Overview and the table; the Performance page
@@ -229,16 +231,61 @@ fn ui_interactions_end_to_end() {
     );
 
     // ---- the copy button puts the spec sheet on the clipboard -------
+    // The sheet is read off the UI thread (helpers like vulkaninfo
+    // run with a deadline), so the CopyText lands a few frames later.
     harness.get_by_label("Copy system specs").click();
-    harness.step();
-    let copied = harness.output().platform_output.commands.iter().find_map(|command| match command {
-        egui::OutputCommand::CopyText(text) => Some(text.clone()),
-        _ => None,
-    });
-    let copied = copied.expect("clicking Copy system specs sent CopyText");
-    for expected in ["Host ", "Kernel ", "usable "] {
+    let mut copied = None;
+    let waited = std::time::Instant::now();
+    while copied.is_none() && waited.elapsed() < std::time::Duration::from_secs(10) {
+        harness.step();
+        copied = harness.output().platform_output.commands.iter().find_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        });
+        if copied.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    let copied = copied.expect("clicking Copy system specs sent CopyText within 10 s");
+    for expected in ["system specs", "Kernel ", "CPU ", "Memory ", "usable ", "Storage "] {
         assert!(copied.contains(expected), "spec sheet lacks `{expected}`:\n{copied}");
     }
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    if hostname.trim().len() > 3 {
+        assert!(!copied.contains(hostname.trim()), "the shared sheet carries the hostname:\n{copied}");
+    }
+    harness.run_steps(8);
+
+    // ---- a card's copy: its specs, then its recorded usage (3.4) ------
+    // The sampler has been recording into the scratch XDG_STATE_HOME
+    // at 0.5 s since launch; the Memory card's copy reads it back.
+    let status = harness.state().shared().history.lock().unwrap().status.clone();
+    assert!(status.recording, "the window records history by default: {status:?}");
+    assert!(status.dir.starts_with(&scratch), "history must land in the scratch dir, not {:?}", status.dir);
+    let memory_copy = harness
+        .get_all_by_label("Copy this section: specs and recent usage")
+        .nth(1) // gpu, memory, cpu, … in SECTION_KEYS order
+        .expect("each docked card carries a copy button");
+    memory_copy.click();
+    let mut section_copy = None;
+    let waited = std::time::Instant::now();
+    while section_copy.is_none() && waited.elapsed() < std::time::Duration::from_secs(10) {
+        harness.step();
+        section_copy = harness.output().platform_output.commands.iter().find_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        });
+        if section_copy.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    let section_copy = section_copy.expect("a card's copy sent CopyText within 10 s");
+    assert!(section_copy.contains(" · Memory\n\n"), "titled by its section:\n{section_copy}");
+    assert!(section_copy.contains("Usage · last 1 h · "), "the default range is 1 h:\n{section_copy}");
+    assert!(
+        section_copy.lines().any(|l| l.starts_with("RAM used ")),
+        "the memory usage table is there:\n{section_copy}"
+    );
     harness.run_steps(8);
 
     harness.get_by_label("Display options").click();
@@ -303,6 +350,29 @@ fn ui_interactions_end_to_end() {
         harness.run_steps(8);
         assert_eq!(harness.state().settings.display().temperature, scale, "{label} chip applies");
     }
+
+    // ---- usage history switch through the menu (3.4) -------------------
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    harness.get_by_label("Record usage history").click();
+    harness.run_steps(8);
+    assert!(!harness.state().settings.history_enabled, "history off");
+    assert!(!harness.state().shared().history.lock().unwrap().enabled, "the sampler was told");
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    harness.get_by_label("Record usage history").click();
+    harness.run_steps(8);
+    assert!(harness.state().settings.history_enabled, "history back on");
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    harness.get_by_label("30 d").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().settings.history_retention_hours, 720.0, "retention chip applies");
+    assert_eq!(
+        harness.state().shared().history.lock().unwrap().limits.retention_seconds,
+        720.0 * 3_600.0,
+        "and reaches the recorder"
+    );
 
     // ---- compact mode through the menu -------------------------------
     harness.get_by_label("Display options").click();

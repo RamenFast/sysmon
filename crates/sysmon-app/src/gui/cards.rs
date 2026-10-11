@@ -72,6 +72,9 @@ pub enum AppAction {
     ConfirmKill(i32, String),
     SetPriority(i32, String, i32),
     CopyPid(i32),
+    /// Copy a section's specs and its usage history (a card's copy
+    /// button; a pop-out has its own beside the pin).
+    CopySection(&'static str),
     ToggleSensorGroup(String),
     /// Performance page CPU graph: "auto" | "combined" | "per_thread".
     SetCpuGraphMode(&'static str),
@@ -203,7 +206,7 @@ fn card_header(
                     .size()
                     .x
             });
-            let reserved = headline_width + 26.0 + 24.0; // button + spacing
+            let reserved = headline_width + 2.0 * 26.0 + 24.0; // two buttons + spacing
             let subtitle_width = (ui.available_width() - reserved).max(0.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(subtitle_width, 16.0),
@@ -228,6 +231,14 @@ fn card_header(
             };
             if glyph_button(ui, cx.palette, ButtonGlyph::PopOut, popped, tooltip).clicked() {
                 cx.actions.push(AppAction::TogglePopOut(section_key));
+            }
+            // Docked, the card carries its own copy; popped out, the
+            // window's row has it beside the pin and the range slider.
+            if !popped
+                && glyph_button(ui, cx.palette, ButtonGlyph::Copy, false, "Copy this section: specs and recent usage")
+                    .clicked()
+            {
+                cx.actions.push(AppAction::CopySection(section_key));
             }
             ui.label(RichText::new(headline).color(cx.palette.value).monospace().size(12.5));
         });

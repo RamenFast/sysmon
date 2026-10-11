@@ -90,6 +90,7 @@ impl Sandbox {
             .args(arguments)
             .env("XDG_RUNTIME_DIR", &self.runtime_path)
             .env("XDG_CONFIG_HOME", &self.config_path)
+            .env("XDG_STATE_HOME", self.config_path.join("state"))
             .output()
             .unwrap_or_else(|error| panic!("running sysmon {arguments:?}: {error}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -302,11 +303,167 @@ fn errors_are_parseable_and_carry_the_way_out() {
     }
 }
 
+/// `sysmon specs`: the envelope carries every field the schema
+/// requires, `result.text` is the shareable sheet, every published
+/// section scopes it, and a bad section is a fix-bearing exit 3.
+#[test]
+fn specs_answers_whole_and_by_section() {
+    let schema = schema();
+    let verb = &schema["contract"]["verbs"]["specs"];
+    let sandbox = Sandbox::new();
+    let (reply, code) = sandbox.run(&["specs", "--json"]);
+    assert_eq!(code, 0, "{reply}");
+    assert_eq!(reply["status"], "ok");
+    let result = &reply["result"];
+    for field in verb["result"]["required"].as_array().expect("specs publishes its required fields") {
+        let field = field.as_str().unwrap();
+        assert!(result.get(field).is_some(), "specs result lacks required `{field}`");
+    }
+    let published: Vec<&str> = verb["result"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for key in result.as_object().unwrap().keys() {
+        assert!(published.contains(&key.as_str()), "specs returns `{key}`, which the schema does not publish");
+    }
+    let whole = result["text"].as_str().expect("text");
+    assert!(whole.contains("system specs") && whole.contains("CPU "), "{whole}");
+
+    let sections = verb["arguments"]["section"]["enum"].as_array().expect("section enum");
+    for section in sections {
+        let section = section.as_str().unwrap();
+        assert!(sysmon_core::specs::SPEC_SECTIONS.contains(&section));
+        let (reply, code) = sandbox.run(&["specs", section, "--json"]);
+        assert_eq!(code, 0, "specs {section}: {reply}");
+        assert_eq!(reply["result"]["section"], section);
+        let text = reply["result"]["text"].as_str().unwrap();
+        assert!(whole.contains(text.trim_end()), "specs {section} is not a slice of the whole sheet:\n{text}");
+    }
+
+    for (arguments, expected) in [(vec!["specs", "nonsuch"], 3), (vec!["specs", "cpu", "memory"], 3), (vec!["specs", "--nope"], 3)] {
+        let (reply, code) = sandbox.run(&arguments);
+        assert_eq!(code, expected, "{arguments:?} → {reply}");
+        assert!(!reply["fix"].as_str().unwrap_or("").is_empty(), "{arguments:?} carried no fix");
+    }
+}
+
+/// `sysmon history` over a real recording: `serve --record` writes
+/// into a private XDG_STATE_HOME, then every documented shape answers.
+/// Empty store is exit 2 with a fix; bad arguments are exit 3.
+#[test]
+fn history_records_with_serve_and_answers_every_shape() {
+    let schema = schema();
+    let verb = &schema["contract"]["verbs"]["history"];
+    let sandbox = Sandbox::new();
+    let state = sandbox.config_path.join("state");
+
+    // Nothing recorded yet: unavailable, and the fix says how to start.
+    let (reply, code) = sandbox.run(&["history", "gpu"]);
+    assert_eq!(code, 2, "{reply}");
+    assert!(reply["fix"].as_str().unwrap_or("").contains("serve --record"), "{reply}");
+
+    let mut serve = Command::new(binary())
+        .args(["serve", "--record", "--interval", "0.5"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", &state)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("serve --record");
+    std::thread::sleep(std::time::Duration::from_millis(3_500));
+    // One writer: a second recorder is refused, naming the first.
+    let (second, code) = {
+        let output = Command::new(binary())
+            .args(["serve", "--record"])
+            .env("XDG_RUNTIME_DIR", sandbox.config_path.join("other-run"))
+            .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .env("XDG_STATE_HOME", &state)
+            .output()
+            .expect("second serve");
+        let _ = std::fs::create_dir_all(sandbox.config_path.join("other-run"));
+        (String::from_utf8_lossy(&output.stdout).to_string(), output.status.code().unwrap_or(-1))
+    };
+    let (status, _) = sandbox.run(&["ctl", "status"]);
+    let _ = Command::new(binary()).args(["ctl", "quit"]).env("XDG_RUNTIME_DIR", &sandbox.runtime_path).output();
+    let _ = serve.wait();
+    assert_eq!(code, 2, "a second recorder must exit 2: {second}");
+    assert!(second.contains("serve"), "the refusal names the writer: {second}");
+    assert_eq!(status["result"]["history"]["recording"], true, "{status}");
+
+    let (reply, code) = sandbox.run(&["history", "gpu", "--since", "5m", "--json"]);
+    assert_eq!(code, 0, "{reply}");
+    let result = &reply["result"];
+    for field in verb["result"]["required"].as_array().expect("history publishes its required fields") {
+        let field = field.as_str().unwrap();
+        assert!(result.get(field).is_some(), "history result lacks required `{field}`: {result}");
+    }
+    let published = verb["result"]["properties"].as_object().unwrap();
+    for key in result.as_object().unwrap().keys() {
+        assert!(
+            published.keys().any(|p| p.split(" | ").any(|name| name == key)),
+            "history returns `{key}`, which the schema does not publish"
+        );
+    }
+    assert!(result["samples"].as_u64().unwrap() >= 4, "{result}");
+    assert_eq!(result["recorder"], Value::Null, "the recorder quit with serve");
+    let vram = result["metrics"].as_array().unwrap().iter().find(|m| m["key"] == "gpu.vram_used_bytes");
+    let card = std::fs::read_dir("/sys/class/drm").ok().into_iter().flatten().flatten().any(|e| {
+        std::fs::read_to_string(e.path().join("device/vendor")).is_ok_and(|v| v.trim() == "0x1002")
+            && e.path().join("device/gpu_busy_percent").exists()
+    });
+    if card {
+        let vram = vram.expect("a GPU machine records VRAM");
+        assert!(vram["max"].as_f64().unwrap() >= vram["min"].as_f64().unwrap());
+        assert_eq!(vram["timeline"].as_array().unwrap().len(), 48);
+    }
+
+    // The copy text, with specs on top.
+    let (reply, code) = sandbox.run(&["history", "cpu", "--specs", "--json"]);
+    assert_eq!(code, 0, "{reply}");
+    let text = reply["result"]["text"].as_str().unwrap();
+    assert!(text.starts_with(&format!("SysMon {} · CPU\n\nCPU ", sysmon_core::VERSION)), "{text}");
+    assert!(text.contains("\nUsage · last 1 h · "), "{text}");
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    if hostname.trim().len() > 3 {
+        assert!(!text.contains(hostname.trim()), "the shared text carries the hostname");
+    }
+
+    // Raw records: NDJSON, each self-identified and scoped.
+    let output = Command::new(binary())
+        .args(["history", "gpu", "--records", "--since", "5m"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    let lines: Vec<Value> =
+        String::from_utf8_lossy(&output.stdout).lines().map(|l| serde_json::from_str(l).expect("NDJSON line")).collect();
+    assert!(lines.len() >= 4);
+    for line in &lines {
+        assert_eq!(line["event"], "history");
+        assert!(line.get("cpu").is_none(), "--records gpu keeps only the gpu keys: {line}");
+    }
+
+    for (arguments, expected) in [
+        (vec!["history", "nonsuch"], 3),
+        (vec!["history", "--since", "yesterday"], 3),
+        (vec!["history", "--since", "1h", "--until", "2h"], 3),
+        (vec!["history", "--specs"], 3),
+        (vec!["history", "gpu", "cpu"], 3),
+    ] {
+        let (reply, code) = sandbox.run(&arguments);
+        assert_eq!(code, expected, "{arguments:?} → {reply}");
+        assert!(!reply["fix"].as_str().unwrap_or("").is_empty(), "{arguments:?} carried no fix");
+    }
+}
+
 /// The exits each verb publishes must be the ones it can produce.
 #[test]
 fn every_verb_publishes_its_exit_codes() {
     let schema = schema();
-    for verb in ["probe", "tap", "ctl", "serve", "schema"] {
+    for verb in ["probe", "tap", "ctl", "serve", "schema", "specs", "history"] {
         let exits = schema["contract"]["verbs"][verb]["exits"]
             .as_array()
             .unwrap_or_else(|| panic!("`{verb}` does not publish its exits"));
@@ -338,6 +495,7 @@ fn stream_lines_self_identify_without_reformatting_the_numbers() {
         .args(["tap", "sensors", "--interval", "0.3"])
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .stdout(std::process::Stdio::piped())
         .spawn()
         .map(|mut child| {
@@ -412,6 +570,7 @@ fn every_producer_prints_f32_readings_exactly() {
         .args(["probe", "cpu", "sensors", "--json"])
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .output()
         .expect("probe runs");
     let direct = String::from_utf8_lossy(&direct.stdout).to_string();
@@ -422,6 +581,7 @@ fn every_producer_prints_f32_readings_exactly() {
         .arg("serve")
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -435,6 +595,7 @@ fn every_producer_prints_f32_readings_exactly() {
         .args(["probe", "cpu", "sensors", "--json"])
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .output()
         .expect("probe via socket runs");
     let via_socket = String::from_utf8_lossy(&via_socket.stdout).to_string();
@@ -444,6 +605,7 @@ fn every_producer_prints_f32_readings_exactly() {
             .args(["tap", "cpu", "sensors", "--interval", "0.3"])
             .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
             .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("tap via socket runs");
@@ -457,6 +619,7 @@ fn every_producer_prints_f32_readings_exactly() {
         .args(["ctl", "quit"])
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .output();
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -479,6 +642,7 @@ fn a_full_disk_is_not_a_clean_exit() {
         .args(["probe", "memory", "--json"])
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .stdout(full)
         .output()
         .expect("probe runs");
@@ -497,6 +661,7 @@ fn a_closed_pipe_is_a_clean_exit() {
             .args(arguments)
             .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
             .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -548,6 +713,7 @@ fn a_fresh_serve_never_answers_with_an_empty_window() {
         .arg("serve")
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -578,6 +744,7 @@ fn a_warm_serve_measures_each_section_over_its_own_window() {
         command
             .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
             .env("XDG_CONFIG_HOME", &sandbox.config_path)
+            .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
     };
@@ -683,6 +850,7 @@ fn background_mode_starts_and_quits_cleanly_from_a_wayland_session() {
         .arg("--background")
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         // What a launcher in a Wayland session hands down.
         .env("WAYLAND_DISPLAY", "wayland-1")
         .env("XDG_SESSION_TYPE", "wayland")
@@ -770,6 +938,7 @@ fn a_quit_during_gui_startup_is_honored() {
         .arg("--background")
         .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
         .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", sandbox.config_path.join("state"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let mut guard = GroupGuard::spawn(command);

@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "3.3.0"
+version = "3.4.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/RamenFast/sysmon"
@@ -17,6 +17,7 @@ sysmon-core = { path = "crates/sysmon-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # egui 0.33 ↔ wgpu 27 ↔ winit 0.30: the compatible set phosphor ships on
 # this machine — bump all together, never singly. The direct wgpu dep
 # exists to switch its BACKEND features on (eframe's "wgpu" feature

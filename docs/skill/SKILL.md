@@ -1,6 +1,6 @@
 ---
 name: sysmon
-description: "Drive SysMon by CLI: probe CPU/GPU/memory/network/processes, tap streams, ctl the window. Isolate test instances."
+description: "Drive SysMon by CLI: probe live state, read usage history, tap streams, ctl the window. Isolate test instances."
 ---
 
 # Driving SysMon
@@ -15,11 +15,12 @@ hand-maintained. Worked repo guide:
 
 ## ⛔ The isolation law (this one has already bitten)
 
-Any test, experiment, or throwaway instance **must** set *both*:
+Any test, experiment, or throwaway instance **must** set *all three*:
 
 ```bash
 export XDG_RUNTIME_DIR="$(mktemp -d)"   # the control socket
 export XDG_CONFIG_HOME="$(mktemp -d)"   # the saved settings
+export XDG_STATE_HOME="$(mktemp -d)"    # the usage history (3.4+)
 ```
 
 Set only the first and you will drive Ben's real window. Set neither
@@ -79,6 +80,29 @@ test fails if a live field goes undocumented):
 - Every temperature in JSON is °C (`*_celsius`); the GUI's °F/°C/both
   is display only.
 
+## Read the past (3.4+)
+
+```bash
+sysmon history gpu --since 2h          # min/avg/p95/max, timeline, programs on the GPU
+sysmon history gpu --specs             # the GPU pop-out's copy, byte for byte
+sysmon history --since 7d --json | jq '.result.metrics[] | {key, max}'
+sysmon history gpu --since 30m --records   # raw NDJSON records, event: "history"
+```
+
+The window records a usage history (CPU, memory, GPU and the programs
+holding it, network, disks, temperatures, fans) to
+`~/.local/state/sysmon/history/`, one gzipped file per UTC hour,
+default 7 days / 256 MB. Headless: `sysmon serve --record`. `history`
+reads the files directly (no instance needed); exit 2 = nothing
+recorded yet. `null` timeline blocks are gaps, never zeros.
+`result.gpu_processes` is the "how much did the game use while the
+model stayed loaded" answer.
+
+Per-process VRAM (`gpu.processes[].vram_bytes`) is
+`drm-total-vram − amd-evicted-vram` per DRM client. 3.4.0's terabyte
+figures came from `drm-memory-vram`, which drifts on kernel 7.2. A
+shared buffer counts in each process that maps it.
+
 ## Stream
 
 ```bash
@@ -127,6 +151,7 @@ cadence with `tap --interval N` instead). A bad enum value is exit
 
 ```bash
 sysmon serve          # headless daemon; idle = zero sampling, ~6 MB
+sysmon serve --record # …and keep the usage history (one writer at a time)
 sysmon --background & # full GUI on a private Xvfb — no window on Ben's
                       # screen, socket + ctl + shot all live. Game-safe.
 ```

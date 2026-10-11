@@ -32,6 +32,8 @@ here match ids there.
 | GPU clocks | mean of `gpu_metrics` reads across the window (20/s) | independent 100 Hz poll, same window | RMS error ≤ 0.6 σ over six windows |
 | GPU temps / power / fan / VRAM | hwmon by **label** (channel order isn't ABI); `mem_info_vram_*` | `sensors -j`, sysfs | next read |
 | GPU name | `lspci -mm` (pci.ids) → amdgpu.ids → "AMD GPU 1002:xxxx", never "Device 7551" | `lspci` | exact |
+| Process VRAM | per DRM client, once: fdinfo `drm-total-vram − amd-evicted-vram` (units honored: `2 MiB` is 2 MiB). Never `drm-memory-vram`/`drm-resident-vram`: on kernel 7.2.9 they read 1.9 TB for sway on a 32 GB card | each process ≤ the card's VRAM; Σ(vram − shared) ≤ `mem_info_vram_used` (test); `amdgpu_top -p` "Requested" by hand | 256 MiB (allocations move) |
+| History summary | min/avg/max/latest exact over the records in the range; p95 from a log-bucket sketch (γ = 1.01) clamped to [min, max] | exact nearest-rank p95 of the same values (unit test) | 0.5% |
 | Process RSS | `statm` field 2 (the kernel's exact per-CPU sum — `stat` runs MiB low) | `ps -o rss=` | 10% / 8 MiB |
 | Process CPU % | Δ(utime+stime) ticks / window; `probe` uses a 1 s window so one tick is 1% | contract test: window ≥ 1 s. `pidstat` compared by hand in the 3.1 audit (not yet scripted: SERIOUS-TODOS) | — |
 | Process name | `display_name`: a generic thread comm (MainThread) → its executable; `python3` → its script | jq: none left generic | 0 |

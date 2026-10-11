@@ -25,8 +25,8 @@ out="${2:-audit-out/$(date +%Y%m%dT%H%M%S)}"
 mkdir -p "${out}"
 results="${out}/checks.ndjson"
 : >"${results}"
-export XDG_RUNTIME_DIR="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)"
-trap 'rm -rf "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}"' EXIT
+export XDG_RUNTIME_DIR="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)" XDG_STATE_HOME="$(mktemp -d)"
+trap 'rm -rf "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}" "${XDG_STATE_HOME}"' EXIT
 
 have() { command -v "$1" >/dev/null 2>&1; }
 root() { if have sudoplz; then sudoplz sudo "$@"; else sudo -n "$@"; fi; }

@@ -10,3 +10,5 @@ repository.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
+# gzip for sealed history hours; already in the tree via png/image
+flate2 = { workspace = true }

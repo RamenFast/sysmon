@@ -38,7 +38,7 @@ pub fn parse_fdinfo(content: &str) -> HashMap<&str, FdinfoValue<'_>> {
         let value = raw.trim();
         let first = value.split(' ').next().unwrap_or("");
         let parsed = match first.parse::<u64>() {
-            Ok(number) => FdinfoValue::Number(number),
+            Ok(number) => FdinfoValue::Number(number, value),
             Err(_) => FdinfoValue::Text(value),
         };
         fields.insert(key, parsed);
@@ -48,51 +48,111 @@ pub fn parse_fdinfo(content: &str) -> HashMap<&str, FdinfoValue<'_>> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FdinfoValue<'a> {
-    Number(u64),
+    /// The leading integer, and the whole trimmed value it came from
+    /// ("2 MiB" keeps its unit for [`fdinfo_bytes`]).
+    Number(u64, &'a str),
     Text(&'a str),
 }
 
-impl FdinfoValue<'_> {
+impl<'a> FdinfoValue<'a> {
+    fn raw(&self) -> Option<&'a str> {
+        match self {
+            FdinfoValue::Number(_, raw) | FdinfoValue::Text(raw) => Some(raw),
+        }
+    }
+
     fn number(&self) -> Option<u64> {
         match self {
-            FdinfoValue::Number(n) => Some(*n),
+            FdinfoValue::Number(n, _) => Some(*n),
             FdinfoValue::Text(_) => None,
         }
     }
     fn text(&self) -> Option<&str> {
         match self {
             FdinfoValue::Text(t) => Some(t),
-            FdinfoValue::Number(_) => None,
+            FdinfoValue::Number(..) => None,
         }
     }
 }
 
-/// (max engine-time ns across engines, vram bytes) for one fdinfo
-/// blob on the given card, or None when it isn't a DRM client there.
+/// A memory figure from fdinfo in bytes. The DRM usage-stats format
+/// is `<uint> [KiB|MiB]`, and a bare number is bytes. 3.4.0 read
+/// only the number, so "2 MiB" counted as 2 KiB.
+pub fn fdinfo_bytes(raw: &str) -> Option<u64> {
+    let mut parts = raw.split_ascii_whitespace();
+    let number = parts.next()?.parse::<u64>().ok()?;
+    let scale = match parts.next() {
+        None => 1,
+        Some("KiB") => 1 << 10,
+        Some("MiB") => 1 << 20,
+        Some("GiB") => 1 << 30,
+        Some(_) => return None,
+    };
+    number.checked_mul(scale)
+}
+
+/// One DRM client's usage on one card, from its fdinfo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrmClientUsage {
+    /// Max engine time across engines, ns (graphics and compute
+    /// both register without double counting).
+    pub engine_ns: u64,
+    /// Buffers that live in VRAM right now: `drm-total-vram` minus
+    /// `amd-evicted-vram`. See [`drm_usage_from_fdinfo`] for why not
+    /// `drm-resident-vram`.
+    pub vram_bytes: u64,
+    /// Buffers in GTT (system RAM the GPU maps): `drm-total-gtt`.
+    pub gtt_bytes: u64,
+    /// The part of `vram_bytes` shared with another client (a
+    /// window's surface that the compositor also maps).
+    pub vram_shared_bytes: u64,
+    /// Buffers that want VRAM but were pushed out to system RAM.
+    pub vram_evicted_bytes: u64,
+}
+
+/// One fdinfo blob on the given card, or None when it isn't a DRM
+/// client there (or a client already counted through another fd).
+///
+/// VRAM is `drm-total-vram − amd-evicted-vram`, the buffers placed in
+/// VRAM and still there. `drm-memory-vram` (the same counter as
+/// `drm-resident-vram`) is not used: on this machine (kernel 7.2.9,
+/// 2026-10-10) it had drifted to 1.8 TB for sway and quickshell and
+/// 620 GB for ghostty on a 32 GB card, with the same excess in
+/// `drm-purgeable-vram`, while total − evicted summed to the card's own
+/// `mem_info_vram_used` within 0.2%. Kernels older than the
+/// `drm-total-*` keys only have `drm-memory-vram`, and get it.
 pub fn drm_usage_from_fdinfo(
     content: &str,
     pci_address: &str,
     seen_client_ids: &mut HashSet<u64>,
-) -> Option<(u64, u64)> {
+) -> Option<DrmClientUsage> {
     let fields = parse_fdinfo(content);
     if fields.get("drm-pdev").and_then(|v| v.text()) != Some(pci_address) {
         return None;
     }
     if let Some(client_id) = fields.get("drm-client-id").and_then(|v| v.number())
-        && !seen_client_ids.insert(client_id) {
-            return None; // duplicate fd for the same client (dup/fork)
-        }
+        && !seen_client_ids.insert(client_id)
+    {
+        return None; // duplicate fd for the same client (dup/fork)
+    }
     let engine_ns = ENGINE_TIME_KEYS
         .iter()
         .filter_map(|key| fields.get(key).and_then(|v| v.number()))
         .max()
         .unwrap_or(0);
-    let vram_kib = fields
-        .get("drm-memory-vram")
-        .or_else(|| fields.get("drm-total-vram"))
-        .and_then(|v| v.number())
-        .unwrap_or(0);
-    Some((engine_ns, vram_kib * 1024))
+    let bytes = |key: &str| fields.get(key).and_then(|v| v.raw()).and_then(fdinfo_bytes);
+    let evicted = bytes("amd-evicted-vram").unwrap_or(0);
+    let vram_bytes = match bytes("drm-total-vram") {
+        Some(total) => total.saturating_sub(evicted),
+        None => bytes("drm-memory-vram").unwrap_or(0),
+    };
+    Some(DrmClientUsage {
+        engine_ns,
+        vram_bytes,
+        gtt_bytes: bytes("drm-total-gtt").or_else(|| bytes("drm-memory-gtt")).unwrap_or(0),
+        vram_shared_bytes: bytes("drm-shared-vram").unwrap_or(0).min(vram_bytes),
+        vram_evicted_bytes: evicted,
+    })
 }
 
 /// What `gpu_metrics` adds over hwmon: the firmware's own *averaged*
@@ -456,23 +516,26 @@ impl GpuCollector {
                     self.pids_without_drm.insert(pid, NEGATIVE_CACHE_SAMPLES);
                     self.previous_engine_ns.remove(&pid);
                 }
-                Some((engine_ns, vram_bytes)) => {
+                Some(usage) => {
                     self.pids_without_drm.remove(&pid);
                     let mut busy_percent = 0.0f32;
                     if interval_seconds > 0.0
                         && let Some(previous_ns) = self.previous_engine_ns.get(&pid)
                     {
-                        busy_percent = (engine_ns.saturating_sub(*previous_ns) as f64
+                        busy_percent = (usage.engine_ns.saturating_sub(*previous_ns) as f64
                             / (interval_seconds * 1e9)
                             * 100.0)
                             .clamp(0.0, 100.0) as f32;
                     }
-                    self.previous_engine_ns.insert(pid, engine_ns);
-                    if busy_percent > 0.05 || vram_bytes > 0 {
+                    self.previous_engine_ns.insert(pid, usage.engine_ns);
+                    if busy_percent > 0.05 || usage.vram_bytes > 0 || usage.gtt_bytes > 0 {
                         usages.push(GpuProcessUsage {
                             pid,
                             busy_percent,
-                            vram_bytes,
+                            vram_bytes: usage.vram_bytes,
+                            gtt_bytes: usage.gtt_bytes,
+                            vram_shared_bytes: usage.vram_shared_bytes,
+                            vram_evicted_bytes: usage.vram_evicted_bytes,
                         });
                     }
                 }
@@ -490,18 +553,18 @@ impl GpuCollector {
         usages
     }
 
-    /// Sum engine time + VRAM over the process's DRM clients on this
-    /// card; None when it holds no DRM files at all.
+    /// Sum engine time and memory over the process's DRM clients on
+    /// this card (each client once, however many fds point at it);
+    /// None when it holds no DRM files at all.
     fn read_process_drm(
         &self,
         pid: i32,
         seen_client_ids: &mut HashSet<u64>,
-    ) -> Option<(u64, u64)> {
+    ) -> Option<DrmClientUsage> {
         let fd_dir = format!("/proc/{pid}/fd");
         let entries = fs::read_dir(&fd_dir).ok()?;
 
-        let mut total_engine_ns = 0u64;
-        let mut total_vram_bytes = 0u64;
+        let mut total = DrmClientUsage::default();
         let mut found_drm_file = false;
 
         for entry in entries.flatten() {
@@ -523,15 +586,16 @@ impl GpuCollector {
             let Ok(content) = fs::read_to_string(&fdinfo_path) else {
                 continue;
             };
-            if let Some((engine_ns, vram_bytes)) =
-                drm_usage_from_fdinfo(&content, &self.pci_address, seen_client_ids)
-            {
-                total_engine_ns += engine_ns;
-                total_vram_bytes += vram_bytes;
+            if let Some(client) = drm_usage_from_fdinfo(&content, &self.pci_address, seen_client_ids) {
+                total.engine_ns += client.engine_ns;
+                total.vram_bytes += client.vram_bytes;
+                total.gtt_bytes += client.gtt_bytes;
+                total.vram_shared_bytes += client.vram_shared_bytes;
+                total.vram_evicted_bytes += client.vram_evicted_bytes;
             }
         }
 
-        found_drm_file.then_some((total_engine_ns, total_vram_bytes))
+        found_drm_file.then_some(total)
     }
 }
 
@@ -559,7 +623,7 @@ fn find_hwmon(device: &Path) -> Option<PathBuf> {
 ///   3. "AMD GPU 1002:7551" — honest about what is known.
 ///
 /// Runs once at discovery.
-fn query_marketing_name(pci_address: &str, device: &Path) -> String {
+pub(crate) fn query_marketing_name(pci_address: &str, device: &Path) -> String {
     if let Some(name) = lspci_name(pci_address) {
         return name;
     }
@@ -581,7 +645,7 @@ fn query_marketing_name(pci_address: &str, device: &Path) -> String {
 
 const AMDGPU_IDS: &str = "/usr/share/libdrm/amdgpu.ids";
 
-fn lspci_name(pci_address: &str) -> Option<String> {
+pub(crate) fn lspci_name(pci_address: &str) -> Option<String> {
     let slot = pci_address.split_once(':').map(|(_, rest)| rest)?;
     let output = Command::new("lspci").args(["-mm", "-s", slot]).output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -756,10 +820,55 @@ drm-engine-compute:	23456789 ns
     #[test]
     fn fdinfo_engine_time_takes_max_across_engines() {
         let mut seen = HashSet::new();
-        let (engine_ns, vram) =
-            drm_usage_from_fdinfo(FDINFO_FIXTURE, "0000:09:00.0", &mut seen).expect("drm client");
-        assert_eq!(engine_ns, 123_456_789);
-        assert_eq!(vram, 204_800 * 1024);
+        let usage = drm_usage_from_fdinfo(FDINFO_FIXTURE, "0000:09:00.0", &mut seen).expect("drm client");
+        assert_eq!(usage.engine_ns, 123_456_789);
+        // An older kernel: only drm-memory-vram exists, and it is used.
+        assert_eq!(usage.vram_bytes, 204_800 * 1024);
+        assert_eq!(usage.gtt_bytes, 1024 * 1024);
+    }
+
+    /// Seam #196: sway's real fdinfo on kernel 7.2.9 (one client of
+    /// five, values verbatim). drm-memory-vram / drm-resident-vram say
+    /// 1.8 TB on a 32 GB card; the same excess sits in
+    /// drm-purgeable-vram. 3.4.0 summed that into "sway 1.98 TB".
+    const FDINFO_DRIFTED_RESIDENT: &str = "\
+drm-driver:\tamdgpu
+drm-client-id:\t36
+drm-pdev:\t0000:0a:00.0
+drm-total-gtt:\t8220 KiB
+drm-shared-gtt:\t0
+drm-resident-gtt:\t43020 KiB
+drm-total-vram:\t473804 KiB
+drm-shared-vram:\t248256 KiB
+drm-resident-vram:\t1929842396 KiB
+drm-purgeable-vram:\t1884204 MiB
+drm-memory-vram:\t1929842396 KiB
+drm-memory-gtt: \t43020 KiB
+amd-evicted-vram:\t34800 KiB
+amd-requested-vram:\t473804 KiB
+amd-requested-gtt:\t8220 KiB
+drm-engine-gfx:\t5000 ns
+";
+
+    #[test]
+    fn vram_is_total_minus_evicted_not_the_drifted_resident_counter() {
+        let mut seen = HashSet::new();
+        let usage = drm_usage_from_fdinfo(FDINFO_DRIFTED_RESIDENT, "0000:0a:00.0", &mut seen).expect("client");
+        assert_eq!(usage.vram_bytes, (473_804 - 34_800) * 1024, "429 MiB, not 1.8 TB");
+        assert_eq!(usage.vram_evicted_bytes, 34_800 * 1024);
+        assert_eq!(usage.vram_shared_bytes, 248_256 * 1024);
+        assert_eq!(usage.gtt_bytes, 8_220 * 1024);
+        assert!(usage.vram_bytes < 32 << 30, "a process can't hold more than the card");
+    }
+
+    #[test]
+    fn fdinfo_sizes_honor_their_unit() {
+        assert_eq!(fdinfo_bytes("2 MiB"), Some(2 << 20), "3.4.0 read this as 2 KiB");
+        assert_eq!(fdinfo_bytes("12 KiB"), Some(12 << 10));
+        assert_eq!(fdinfo_bytes("1 GiB"), Some(1 << 30));
+        assert_eq!(fdinfo_bytes("0"), Some(0), "a bare number is bytes");
+        assert_eq!(fdinfo_bytes("7 parsecs"), None, "an unknown unit is refused, not guessed");
+        assert_eq!(fdinfo_bytes(""), None);
     }
 
     #[test]
