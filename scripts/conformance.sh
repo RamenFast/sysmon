@@ -43,7 +43,8 @@ command -v jq >/dev/null 2>&1 || {
 run_root="$(mktemp -d /tmp/sysmon-conformance.XXXXXX)"
 export XDG_RUNTIME_DIR="${run_root}/run"
 export XDG_CONFIG_HOME="${run_root}/config"
-mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}"
+export XDG_STATE_HOME="${run_root}/state"  # usage history (3.4)
+mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}" "${XDG_STATE_HOME}"
 chmod 700 "${XDG_RUNTIME_DIR}"
 serve_pid=""
 cleanup() {

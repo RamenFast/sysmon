@@ -25,7 +25,7 @@ use super::graphs::History;
 use super::icons::IconCache;
 use super::performance::{self, PerformanceContext};
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
-use super::settings::{SECTION_KEYS, Settings};
+use super::settings::{HISTORY_MB_CHOICES, RETENTION_CHOICES_HOURS, SECTION_KEYS, Settings};
 use super::specs;
 use super::theme::{self, Palette};
 use super::widgets::{ButtonGlyph, glyph_button, menu_check_row, menu_chip, menu_option_row};
@@ -152,6 +152,18 @@ pub struct SharedUi {
     /// Set by the control socket's `quit`; honored on the next frame
     /// (including a quit that arrived before the first one).
     pub quit_requested: AtomicBool,
+    /// Usage history on disk: what the sampler should do (the window
+    /// sets it from settings) and what it last reported.
+    pub history: Mutex<HistoryControl>,
+}
+
+/// The main thread's wishes for the recorder, and the recorder's own
+/// account back.
+pub struct HistoryControl {
+    pub enabled: bool,
+    pub dir: std::path::PathBuf,
+    pub limits: sysmon_core::history::Limits,
+    pub status: sysmon_core::history::RecordingStatus,
 }
 
 pub struct RendererInfo {
@@ -171,7 +183,86 @@ impl SharedUi {
             main_window_rect: Mutex::new(None),
             renderer: OnceLock::new(),
             quit_requested: AtomicBool::new(false),
+            history: Mutex::new(HistoryControl {
+                enabled: false,
+                dir: sysmon_core::history::default_dir(),
+                limits: Settings::default().history_limits(),
+                status: sysmon_core::history::RecordingStatus::default(),
+            }),
         }
+    }
+
+    /// Point the recorder at the settings' choices (applied by the
+    /// sampler on its next sample).
+    pub fn apply_history_settings(&self, settings: &Settings) {
+        let mut history = self.history.lock().unwrap();
+        history.enabled = settings.history_enabled;
+        history.limits = settings.history_limits();
+    }
+}
+
+/// The sampler's side of the history: opens the recorder when wanted
+/// (retrying a busy lock every 5 s: a `sysmon serve --record` that is
+/// still handing over), writes each sample, and reports.
+struct HistoryWriter {
+    recorder: Option<sysmon_core::history::Recorder>,
+    last_attempt: Option<Instant>,
+    retry_after: Duration,
+}
+
+impl HistoryWriter {
+    fn write(&mut self, shared: &SharedUi, snapshot: &SystemSnapshot) {
+        use sysmon_core::history::{HistoryRecord, OpenError, Recorder, RecordingStatus};
+        let (enabled, dir, limits) = {
+            let history = shared.history.lock().unwrap();
+            (history.enabled, history.dir.clone(), history.limits)
+        };
+        if !enabled {
+            // Off: drop the writer (and its lock), and say so with the
+            // place and limits it would use.
+            self.recorder = None;
+            shared.history.lock().unwrap().status =
+                RecordingStatus { dir, retention_seconds: limits.retention_seconds, max_bytes: limits.max_bytes, ..Default::default() };
+            return;
+        }
+        if self.recorder.is_none() && self.last_attempt.is_none_or(|at| at.elapsed() > self.retry_after) {
+            self.last_attempt = Some(Instant::now());
+            match Recorder::open(&dir, limits, "gui") {
+                Ok(recorder) => self.recorder = Some(recorder),
+                Err(error) => {
+                    self.retry_after =
+                        Duration::from_secs(if matches!(error, OpenError::Busy(_)) { 5 } else { 30 });
+                    let problem = match &error {
+                        OpenError::Busy(_) => format!("{error}; this window will take over when it stops"),
+                        OpenError::Io(_) => format!("cannot write {}: {error}", dir.display()),
+                    };
+                    shared.history.lock().unwrap().status = RecordingStatus {
+                        dir,
+                        retention_seconds: limits.retention_seconds,
+                        max_bytes: limits.max_bytes,
+                        problem: Some(problem),
+                        ..Default::default()
+                    };
+                    return;
+                }
+            }
+        }
+        let Some(recorder) = &mut self.recorder else { return };
+        recorder.set_limits(limits);
+        let mut status = match recorder.record(&HistoryRecord::from_snapshot(snapshot)) {
+            Ok(()) => recorder.status(),
+            Err(error) => {
+                // A full disk or a removed directory: say so, and try a
+                // fresh open later.
+                let mut status = recorder.status();
+                status.recording = false;
+                status.problem = Some(format!("writing history failed: {error}"));
+                self.recorder = None;
+                status
+            }
+        };
+        status.dir = dir;
+        shared.history.lock().unwrap().status = status;
     }
 }
 
@@ -182,6 +273,7 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
         .name("sysmon-sampler".to_string())
         .spawn(move || {
             let mut sampler = Sampler::new();
+            let mut history = HistoryWriter { recorder: None, last_attempt: None, retry_after: Duration::ZERO };
             loop {
                 let started = Instant::now();
                 if !shared.paused.load(Ordering::Relaxed) {
@@ -197,8 +289,11 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
                     {
                         let mut histories = shared.histories.write().unwrap();
                         histories.record(&snapshot);
-                        *shared.latest.write().unwrap() = snapshot;
+                        *shared.latest.write().unwrap() = snapshot.clone();
                     }
+                    // Then the disk: a slow write never holds the lock
+                    // the frames read under.
+                    history.write(&shared, &snapshot);
 
                     ctx.request_repaint();
                     for viewport in shared.open_viewports.lock().unwrap().iter() {
@@ -274,6 +369,7 @@ impl SysMonApp {
         command_rx: std::sync::mpsc::Receiver<GuiCommand>,
         control_server: Option<crate::control::ControlServer>,
     ) -> Self {
+        shared.apply_history_settings(&settings);
         spawn_sampler(cc.egui_ctx.clone(), shared.clone());
         let (toast_tx, toast_rx) = std::sync::mpsc::channel();
 
@@ -341,6 +437,12 @@ impl SysMonApp {
         }
     }
 
+    /// The state shared with the sampler and the socket (tests read the
+    /// history recorder's status through it).
+    pub fn shared(&self) -> &Arc<SharedUi> {
+        &self.shared
+    }
+
     /// The open combined-details selection, if any (tests + future
     /// introspection verbs read this).
     pub fn combined_details(&self) -> Option<&[i32]> {
@@ -406,7 +508,10 @@ impl SysMonApp {
                     }
                     let copying = self.specs_copier.is_busy();
                     if glyph_button(ui, palette, ButtonGlyph::Copy, copying, "Copy system specs").clicked() {
-                        self.specs_copier.request(ctx, None, "System specs".to_string());
+                        self.specs_copier.request(
+                            ctx,
+                            specs::CopyJob { title: "System specs".to_string(), specs: specs::SpecsPart::Whole, history: None },
+                        );
                     }
 
                     // Page switcher, centered-ish.
@@ -612,6 +717,46 @@ impl SysMonApp {
                 }
 
                 ui.separator();
+                heading(ui, "Usage history");
+                if menu_check_row(ui, palette, self.settings.history_enabled, "Record usage history")
+                    .on_hover_text(
+                        "CPU, memory, GPU and its programs, network, disks and sensors, \
+                         one line per sample, kept on disk for the copy buttons and `sysmon history`",
+                    )
+                    .clicked()
+                {
+                    self.settings.history_enabled = !self.settings.history_enabled;
+                    settings_changed = true;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("keep").color(palette.muted).size(10.5));
+                    for hours in RETENTION_CHOICES_HOURS {
+                        let label = sysmon_core::history::text::range_label(hours * 3_600.0);
+                        if menu_chip(ui, palette, (self.settings.history_retention_hours - hours).abs() < 0.01, &label).clicked() {
+                            self.settings.history_retention_hours = hours;
+                            settings_changed = true;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("at most").color(palette.muted).size(10.5));
+                    for megabytes in HISTORY_MB_CHOICES {
+                        let label = if megabytes >= 1_000 { format!("{} GB", megabytes / 1_000) } else { format!("{megabytes} MB") };
+                        if menu_chip(ui, palette, self.settings.history_max_mb == megabytes, &label)
+                            .on_hover_text("the oldest hours go first when history reaches this size")
+                            .clicked()
+                        {
+                            self.settings.history_max_mb = megabytes;
+                            settings_changed = true;
+                        }
+                    }
+                });
+                let status = self.shared.history.lock().unwrap().status.clone();
+                let (line, color) = history_status_line(&status);
+                ui.label(RichText::new(line).color(if color { palette.accent } else { palette.muted }).size(10.5))
+                    .on_hover_text(status.dir.display().to_string());
+
+                ui.separator();
                 heading(ui, "Overview sections");
                 for key in SECTION_KEYS {
                     let visible = self.settings.section_visible(key);
@@ -634,6 +779,8 @@ impl SysMonApp {
                 }
             });
         if settings_changed {
+            self.settings.copy_range_seconds = self.settings.copy_range();
+            self.shared.apply_history_settings(&self.settings);
             self.settings.save();
         }
     }
@@ -719,7 +866,10 @@ impl SysMonApp {
             let mut close_requested = false;
 
             let palette = self.palette();
-            let histories = self.shared.histories.read().unwrap();
+            // Through a local handle: the closure below needs `&mut self`
+            // (the copy range slider) while the read guard is held.
+            let shared = self.shared.clone();
+            let histories = shared.histories.read().unwrap();
             let builder = ViewportBuilder::default()
                 .with_title(title)
                 .with_inner_size([380.0, 320.0])
@@ -769,26 +919,19 @@ impl SysMonApp {
                                     }),
                                 );
                             }
-                            let what = title.trim_end_matches(" — SysMon");
-                            match specs::spec_section_for_popout(section) {
-                                Some(spec_section) => {
-                                    let copying = self.specs_copier.is_busy();
-                                    if glyph_button(ui, palette, ButtonGlyph::Copy, copying, "Copy these specs").clicked() {
-                                        self.specs_copier.request(ctx, Some(spec_section), format!("{what} specs"));
-                                    }
-                                }
-                                None => {
-                                    if glyph_button(ui, palette, ButtonGlyph::Copy, false, "Copy these readings").clicked() {
-                                        ctx.copy_text(specs::sensor_readings_text(&snapshot));
-                                        let _ = self.toast_tx.send(format!("{what} readings copied"));
-                                    }
-                                }
+                            let copying = self.specs_copier.is_busy();
+                            let tooltip = format!("Copy {} specs and the last {} of usage", specs::section_title(section), sysmon_core::history::text::range_label(self.settings.copy_range()));
+                            if glyph_button(ui, palette, ButtonGlyph::Copy, copying, &tooltip).clicked() {
+                                self.copy_section(ctx, section);
                             }
-                            ui.label(
-                                RichText::new("drag onto the main window to dock")
-                                    .color(palette.muted)
-                                    .size(10.0),
-                            );
+                            self.copy_range_slider(ui, palette);
+                            if ui.available_width() > 190.0 {
+                                ui.label(
+                                    RichText::new("drag onto the main window to dock")
+                                        .color(palette.muted)
+                                        .size(10.0),
+                                );
+                            }
                         });
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
@@ -964,7 +1107,61 @@ impl SysMonApp {
                 AppAction::CopyPid(pid) => {
                     ctx.copy_text(pid.to_string());
                 }
+                AppAction::CopySection(section) => {
+                    self.copy_section(ctx, section);
+                }
             }
+        }
+    }
+
+    /// A section's copy: its specs (the Sensors readings stand in for
+    /// specs there), then its usage over the copy range.
+    fn copy_section(&self, ctx: &egui::Context, section: &'static str) {
+        let specs_part = match specs::spec_section_for_popout(section) {
+            Some(spec_section) => specs::SpecsPart::Section(spec_section),
+            None => specs::SpecsPart::Text(specs::sensor_readings_text(&self.shared.latest.read().unwrap())),
+        };
+        let display = self.settings.display();
+        let job = specs::CopyJob {
+            title: specs::section_title(section).to_string(),
+            specs: specs_part,
+            history: Some(specs::HistoryPart {
+                section,
+                range_seconds: self.settings.copy_range(),
+                dir: self.shared.history.lock().unwrap().dir.clone(),
+                style: sysmon_core::history::text::TextStyle { units: display.units, temperature: display.temperature },
+            }),
+        };
+        self.specs_copier.request(ctx, job);
+    }
+
+    /// The pop-outs' "how much history to copy" slider: stops from
+    /// 5 min up to the retention the settings keep.
+    fn copy_range_slider(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        let stops = self.settings.copy_range_stops();
+        let current = self.settings.copy_range();
+        let mut index = stops.iter().position(|stop| *stop >= current - 0.5).unwrap_or(stops.len() - 1);
+        let label = sysmon_core::history::text::range_label(stops[index]);
+        let response = ui
+            .scope(|ui| {
+                ui.spacing_mut().slider_width = 84.0;
+                ui.add(
+                    egui::Slider::new(&mut index, 0..=stops.len() - 1)
+                        .show_value(false)
+                        .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.5 }),
+                )
+            })
+            .inner;
+        response
+            .widget_info(|| egui::WidgetInfo::slider(true, index as f64, format!("Copy range: last {label}")));
+        let response = response.on_hover_text(
+            "How much usage history the copy button includes. \
+             Display options → Usage history sets how much is kept.",
+        );
+        ui.label(RichText::new(format!("last {label}")).color(palette.muted).monospace().size(10.5));
+        if response.changed() {
+            self.settings.copy_range_seconds = stops[index.min(stops.len() - 1)];
+            self.settings.save();
         }
     }
 
@@ -1266,6 +1463,24 @@ impl SysMonApp {
                 )
             });
         let _ = reply.send(result);
+    }
+}
+
+/// The menu's one-line account of the history: (text, is it a problem).
+pub fn history_status_line(status: &sysmon_core::history::RecordingStatus) -> (String, bool) {
+    if let Some(problem) = &status.problem {
+        return (problem.clone(), true);
+    }
+    if !status.recording {
+        return ("not recording".to_string(), false);
+    }
+    let size = sysmon_core::units::format_size(status.bytes, sysmon_core::units::Units::Decimal);
+    match status.oldest_ts {
+        Some(oldest) => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(oldest);
+            (format!("recording · {size} · {} back", sysmon_core::history::text::range_label((now - oldest).max(0.0).round())), false)
+        }
+        None => (format!("recording · {size}"), false),
     }
 }
 

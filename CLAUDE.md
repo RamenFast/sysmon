@@ -48,8 +48,9 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
   controls. Palettes are token blocks in `gui/theme.rs`; components
   read tokens, never hardcode colors.
 - **Testing law**: every GUI test launch uses a
-  scratch `XDG_CONFIG_HOME` *and* scratch `XDG_RUNTIME_DIR` — never
-  the real settings file, never the real control socket. Never map a
+  scratch `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR` *and* `XDG_STATE_HOME`
+  — never the real settings file, the real control socket, or the
+  real usage history (the window records it by default since 3.4). Never map a
   window on the user's real display; use Xvfb (`scripts/e2e.sh`
   shows the pattern).
 - **v1 compatibility**: `~/.config/sysmon/settings.json` must keep
@@ -86,4 +87,8 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
   changed, the receipt.
 - Wire field names carry units (`_bytes`, `_bps`, `_percent`,
   `_celsius`, `_mhz`, `_seconds`). New snapshot fields need:
-  `snapshot.rs` + `sysmon schema` + `docs/API.md`.
+  `snapshot.rs` + `sysmon schema` + `docs/API.md`. A reading worth a
+  timeline also goes in `history::HistoryRecord` (+ `summary.rs`).
+- Per-process GPU memory comes from fdinfo `drm-total-vram −
+  amd-evicted-vram`, never `drm-memory-vram` (drifts to terabytes on
+  kernel 7.2; seam #196). fdinfo sizes carry units: parse them.

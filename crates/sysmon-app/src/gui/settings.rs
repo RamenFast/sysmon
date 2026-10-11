@@ -15,6 +15,21 @@ use sysmon_core::units::{TemperatureScale, Units};
 
 pub const SECTION_KEYS: [&str; 6] = ["gpu", "memory", "cpu", "network", "disks", "sensors"];
 
+/// A week of history in at most 256 MB. Measured on this machine
+/// (24 temperatures, 8 fans, 5 disks, 10 GPU programs a sample): 3.4 KB
+/// a sample while its hour is open, 162 B once sealed (gzip, 20x). At
+/// the 2 s default a week is ~49 MB, so the cap is headroom.
+pub const DEFAULT_RETENTION_HOURS: f64 = 168.0;
+pub const DEFAULT_HISTORY_MB: u64 = 256;
+pub const RETENTION_CHOICES_HOURS: [f64; 5] = [24.0, 72.0, 168.0, 720.0, 2_160.0];
+pub const HISTORY_MB_CHOICES: [u64; 4] = [64, 256, 1_024, 4_096];
+
+/// The copy range slider's stops, seconds (cut at the retention).
+pub const COPY_RANGE_STOPS: [f64; 13] = [
+    300.0, 900.0, 1_800.0, 3_600.0, 7_200.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0, 259_200.0, 604_800.0,
+    2_592_000.0, 7_776_000.0,
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -52,6 +67,16 @@ pub struct Settings {
     /// Performance page CPU graph: "auto" (by width) | "combined" |
     /// "per_thread". New in 3.2.
     pub cpu_graph_mode: String,
+    /// Usage history on disk (`sysmon_core::history`): record while the
+    /// window runs. New in 3.4.
+    pub history_enabled: bool,
+    /// How far back the history goes, hours (1 h – 90 d). New in 3.4.
+    pub history_retention_hours: f64,
+    /// The most disk the history may use, MB (32 MB – 4 GB). New in 3.4.
+    pub history_max_mb: u64,
+    /// How much history a copy button includes, seconds (the pop-outs'
+    /// slider; never more than the retention). New in 3.4.
+    pub copy_range_seconds: f64,
 }
 
 impl Default for Settings {
@@ -77,6 +102,10 @@ impl Default for Settings {
             folded_sensor_groups: Vec::new(),
             start_page: "performance".to_string(),
             cpu_graph_mode: "auto".to_string(),
+            history_enabled: true,
+            history_retention_hours: DEFAULT_RETENTION_HOURS,
+            history_max_mb: DEFAULT_HISTORY_MB,
+            copy_range_seconds: 3_600.0,
         }
     }
 }
@@ -184,6 +213,15 @@ impl Settings {
         if !matches!(settings.cpu_graph_mode.as_str(), "auto" | "combined" | "per_thread") {
             settings.cpu_graph_mode = Settings::default().cpu_graph_mode;
         }
+        if !settings.history_retention_hours.is_finite() {
+            settings.history_retention_hours = DEFAULT_RETENTION_HOURS;
+        }
+        settings.history_retention_hours = settings.history_retention_hours.clamp(1.0, 2_160.0);
+        settings.history_max_mb = settings.history_max_mb.clamp(32, 4_096);
+        if !settings.copy_range_seconds.is_finite() {
+            settings.copy_range_seconds = Settings::default().copy_range_seconds;
+        }
+        settings.copy_range_seconds = settings.copy_range_seconds.clamp(60.0, settings.history_retention_hours * 3_600.0);
         Some(settings)
     }
 
@@ -228,6 +266,25 @@ impl Settings {
 
     pub fn section_visible(&self, key: &str) -> bool {
         self.visible_sections.get(key).copied().unwrap_or(true)
+    }
+
+    /// The history limits these settings ask for.
+    pub fn history_limits(&self) -> sysmon_core::history::Limits {
+        sysmon_core::history::Limits::new(self.history_retention_hours * 3_600.0, self.history_max_mb * 1_000_000)
+    }
+
+    /// The copy range, never longer than the history kept.
+    pub fn copy_range(&self) -> f64 {
+        self.copy_range_seconds.min(self.history_retention_hours * 3_600.0).max(60.0)
+    }
+
+    /// The slider's stops for this retention: every stop inside it,
+    /// then the retention itself as the last stop.
+    pub fn copy_range_stops(&self) -> Vec<f64> {
+        let retention = self.history_retention_hours * 3_600.0;
+        let mut stops: Vec<f64> = COPY_RANGE_STOPS.iter().copied().filter(|s| *s < retention).collect();
+        stops.push(retention);
+        stops
     }
 }
 
@@ -277,6 +334,28 @@ mod tests {
         // An int where a float goes is fine.
         let settings = Settings::from_json(r#"{"settings_version":2,"update_interval_seconds":3}"#).unwrap();
         assert_eq!(settings.update_interval_seconds, 3.0);
+    }
+
+    /// 3.4: history settings are additive (a 3.3 file records with the
+    /// defaults) and bounded (an edited file can't ask for 0 MB or a
+    /// copy range longer than what is kept).
+    #[test]
+    fn history_settings_are_additive_and_bounded() {
+        let from_3_3 = r#"{"settings_version":2,"theme_mode":"amoled"}"#;
+        let settings = Settings::from_json(from_3_3).unwrap();
+        assert!(settings.history_enabled);
+        assert_eq!(settings.history_retention_hours, DEFAULT_RETENTION_HOURS);
+        assert_eq!(settings.history_max_mb, DEFAULT_HISTORY_MB);
+        assert_eq!(settings.copy_range(), 3_600.0);
+        let junk = r#"{"settings_version":2,"history_retention_hours":0,"history_max_mb":0,"copy_range_seconds":1e12}"#;
+        let settings = Settings::from_json(junk).unwrap();
+        assert_eq!(settings.history_retention_hours, 1.0);
+        assert_eq!(settings.history_max_mb, 32);
+        assert_eq!(settings.copy_range(), 3_600.0, "never longer than the retention");
+        assert_eq!(settings.copy_range_stops(), vec![300.0, 900.0, 1_800.0, 3_600.0]);
+        let week = Settings::default();
+        assert_eq!(week.copy_range_stops().last(), Some(&604_800.0));
+        assert_eq!(week.history_limits().max_bytes, 256_000_000);
     }
 
     #[test]

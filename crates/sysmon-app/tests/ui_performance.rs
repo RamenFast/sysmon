@@ -124,6 +124,8 @@ fn the_performance_page_shows_the_snapshot_and_switches_modes() {
     std::fs::create_dir_all(&runtime).unwrap();
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &config);
+        // History is recorded by the sampler: never into the real one.
+        std::env::set_var("XDG_STATE_HOME", config.join("state"));
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
     }
     let mut receipt = serde_json::Map::new();

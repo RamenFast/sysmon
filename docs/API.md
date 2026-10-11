@@ -1,6 +1,6 @@
 # The SysMon API
 
-Everything the window knows, one command away. Four doors, one
+Everything the window knows, one command away. Five doors, one
 contract; `sysmon schema` is the always-current machine map of all of
 it.
 
@@ -85,7 +85,7 @@ modes are disclosed, never silent.
 ```bash
 sysmon specs                 # the shareable spec sheet, plain text
 sysmon specs graphics        # one section: system cpu memory graphics storage network audio
-sysmon specs --json | jq -j .result.text   # byte-for-byte what the copy button copies
+sysmon specs --json | jq -j .result.text   # byte-for-byte what the top bar's copy button copies
 ```
 
 `probe` answers *how busy*; `specs` answers *which hardware, which
@@ -110,6 +110,62 @@ for local scripts. `result.text` is the sheet meant for sharing: it
 leaves out the hostname, serials, addresses and private mount paths (a
 drive says what it holds, such as system, home, EFI or data, not where
 it is mounted).
+
+The top bar's copy button copies the whole sheet. Each section's copy
+button (beside a pop-out's pin, and in a docked card's header) copies
+that section's specs and then its usage over the range the pop-out's
+slider picks: `sysmon history <section> --specs` prints the same text.
+
+## Door 5 — `sysmon history` (what the machine did)
+
+```bash
+sysmon history gpu --since 2h            # GPU over the last 2 h: min/avg/p95/max, timeline, programs
+sysmon history --since 7d --json | jq '.result.metrics[] | {key, max}'
+sysmon history gpu --specs --json | jq -j .result.text   # byte-for-byte a GPU pop-out's copy
+sysmon history gpu --since 30m --records | jq -c '{ts, busy: .gpu.busy_percent}'
+```
+
+`probe` is now; `history` is the past. SysMon records one line per
+sample while its window runs (Display options → Usage history), or
+while `sysmon serve --record` runs headless: CPU (busy, kernel, iowait,
+busy clock, temperature, load), memory (used, cache, swap, commit), GPU
+(busy, VRAM, GTT, power, clocks, temperatures, fan, and the programs
+holding it), network rates, per-disk rates and busy share, and every
+plausible temperature and fan.
+
+Per reading the summary gives min, avg, p95, max, the latest value, and
+a timeline (`--blocks`, default 48) whose empty blocks are `null`:
+SysMon was not recording then, and no gap is ever filled with a zero.
+`covered_seconds` below `range_seconds` says the same for the range as
+a whole. Rates add `total_bytes`, the bytes moved over the range. min,
+avg and max are exact; p95 comes from a log-bucket sketch, within 0.5%
+of the exact value. The GPU summary also lists every program that held
+the card: peak, p95 and average VRAM, average and peak busy share, and
+how much of the range it was present for. That answers "how much did
+the game use while the model stayed loaded".
+
+Storage: one file per UTC hour under `$XDG_STATE_HOME/sysmon/history/`
+(default `~/.local/state/sysmon/history/`); a finished hour is gzipped.
+Measured here (24 temperatures, 8 fans, 5 disks, 10 GPU programs), a
+sample is 3.4 KB while its hour is open and 162 B once sealed, so a
+week at the 2 s default is about 49 MB. Two limits are kept: an age (default 7 days)
+and a size cap (default 256 MB, oldest hours first). One process
+writes at a time, through a lock file that names it (`result.recorder`).
+Readers need no lock and skip a torn last line, counted in
+`skipped_lines`.
+
+## Per-process GPU memory
+
+`gpu.processes[].vram_bytes` is the VRAM a process holds now: for each
+of its DRM clients (counted once, however many file descriptors point
+at it), `drm-total-vram − amd-evicted-vram` from its fdinfo.
+`drm-memory-vram` is never used where `drm-total-vram` exists: on
+kernel 7.2 it drifted to 1.9 TB for sway and quickshell on a 32 GB
+card (3.4.0 shipped that number). A buffer two processes share, such
+as a window surface the compositor maps, counts in both and is reported
+as `vram_shared_bytes`, so the sum over processes can exceed the card's
+`vram_used_bytes` by the shared part. `vram_evicted_bytes` are buffers
+that want VRAM but were moved to system RAM: the sign of VRAM pressure.
 
 ## The socket
 

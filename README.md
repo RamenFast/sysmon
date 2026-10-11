@@ -112,9 +112,53 @@ stick, each GPU with the PCIe link it actually gets and its driver
 stack, displays at their running mode, every physical drive (mounted
 or not), network and audio. The sheet carries no hostname, serials,
 addresses or mount paths: a drive says what it holds, not where it's
-mounted. Every pop-out has its own copy button for its section; the
-Sensors pop-out copies its current readings, stamped with the time.
-`sysmon specs` prints the same sheet in a terminal.
+mounted. `sysmon specs` prints the same sheet in a terminal.
+
+### Usage history, and a copy button per section
+
+SysMon keeps a **usage history** on disk while it runs: CPU, memory,
+GPU (and every program holding it), network, disks, temperatures and
+fans, one line per sample. Each card has its own copy button (in a
+pop-out it sits beside the pin, with a slider for how far back to
+copy, from 5 minutes up to the whole history kept). It copies that
+section's specs and then its usage over that range:
+
+```
+Usage · last 10 min · 2026-10-10 17:55–18:05 PDT
+289 samples, one every 2 s, covering 10 min of it
+
+                    min       avg       p95       max
+GPU busy           1.0%      7.2%       14%       34%
+VRAM used       26.4 GB   26.5 GB   26.6 GB   26.6 GB
+Power              22 W      41 W      48 W      60 W
+Junction temp      35°C      37°C      38°C      39°C
+…
+Timeline, one block per 13 s (% and memory: ▁ empty … █ full; the rest: ▁ its min … █ its max; blank = not recorded)
+VRAM used       ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+Junction temp   ▁▁▂▁▁▁▂▂▂▃▃▄▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅▇▆▆▆▆▆▆▆▆▆▆▆▆▆
+
+On the GPU       peak VRAM  avg VRAM  busy avg / max  present
+strata             24.6 GB   24.6 GB     0.0% / 0.0%     100%
+sway              661.2 MB  588.2 MB     3.5% / 4.8%     100%
+obs               154.0 MB  130.7 MB     0.8% / 1.3%      26%
+…
+```
+
+(Real output, this machine, with a local model loaded: `strata` holds
+24.6 GB of the card while idle. A game started in that window would
+get its own row with its peak VRAM and busy share.)
+
+That answers how much of the GPU and its memory a game takes while a
+local model stays loaded. A gap in the recording is a blank in the
+timeline, never a zero. min, avg and max are exact; p95
+is within 0.5%. The history lives in `~/.local/state/sysmon/history/`,
+one file per hour, gzipped once the hour is over. Measured here, a
+sample is 3.4 KB while its hour is open and 162 bytes once sealed, so
+a week at the default 2 s is about 49 MB. It is kept for 7 days and
+at most 256 MB, oldest hours first; both limits are in ☰ → Usage
+history.
+`sysmon history gpu --since 2h` prints the same summary in a terminal,
+and `sysmon serve --record` keeps recording with no window open.
 
 ### Overview
 
@@ -173,6 +217,7 @@ sysmon tap network -i 2     # NDJSON stream — the desktop-bar diet
 sysmon ctl shot /tmp/s.png  # drive the window: pages, themes, pop-outs, screenshots
 sysmon serve                # headless daemon; idle = literally zero sampling
 sysmon specs                # what the machine is: the shareable spec sheet
+sysmon history gpu --since 2h   # what it did: usage over a range, from disk
 sysmon schema               # the machine-readable map of everything
 ```
 

@@ -6,6 +6,10 @@
 //! `--background` (GUI on a private Xvfb display). All agent-grade:
 //! JSON envelopes, errors that carry a `fix`, exit codes 0/2/3/4.
 
+// `sysmon schema` is one large `json!` map; serde_json's macro recurses
+// once per entry, and 3.4's `history` verb took it past the default 128.
+#![recursion_limit = "256"]
+
 /// `println!` for the CLI's stdout: same formatting, but a closed pipe
 /// is a clean exit 0 instead of a panic (see `envelope::print_line`).
 macro_rules! out {
@@ -38,6 +42,7 @@ pub fn run_cli() -> i32 {
         Some("ctl") => agent::run_ctl(&arguments[1..]),
         Some("schema") => agent::run_schema(&arguments[1..]),
         Some("specs") => agent::run_specs(&arguments[1..]),
+        Some("history") => agent::run_history(&arguments[1..]),
         Some("serve") => serve::run(&arguments[1..]),
         None => gui::run(&arguments),
         Some("--background") => run_background(&arguments),
@@ -110,8 +115,11 @@ USAGE
     sysmon probe [sections…]        one-shot system state (JSON when piped)
     sysmon tap [sections…] [-i N]   stream NDJSON snapshots (default: network, 1s)
     sysmon ctl <verb> […]           drive the running instance
-    sysmon serve                    headless daemon on the control socket
+    sysmon serve [--record]         headless daemon on the control socket
+                                    (--record: also keep the usage history)
     sysmon specs [section]          what this machine is: the shareable spec sheet
+    sysmon history [section] [--since 1h] [--specs] [--records]
+                                    what it did: usage over a range, from disk
     sysmon schema                   machine-readable map of all of the above
     sysmon --version                print the version
 
@@ -120,6 +128,9 @@ SECTIONS
 
 SPEC SECTIONS
     system cpu memory graphics storage network audio
+
+HISTORY SECTIONS
+    all cpu memory gpu network disks sensors
 
 CTL VERBS
     status quit pause resume interval <s> raise page <p> theme <t>

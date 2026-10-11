@@ -47,6 +47,24 @@ protocols, all users) · `tcp_diag` (kernel TCP counters, own-UID
 sockets, zero setup) · `none` (and `process_source_hint` says how to
 upgrade). Don't compare rates across sources: they measure different layers.
 
+## Read the past
+
+```bash
+sysmon history gpu --since 2h       # min/avg/p95/max, a timeline, every program on the GPU
+sysmon history --since 7d --json | jq '.result.metrics[] | {key, max}'
+sysmon history gpu --specs          # exactly what the GPU pop-out's copy button copies
+sysmon history gpu --since 30m --records   # raw records, NDJSON (event: "history")
+```
+
+SysMon keeps a usage history on disk while its window runs, or while
+`sysmon serve --record` runs headless. `history` reads the files
+directly, so it needs no running instance. Exit 2 means nothing has
+recorded yet. A timeline block that is `null` means nothing was
+recording then; `covered_seconds` says how much of the range has data.
+`result.gpu_processes` answers "how much GPU and VRAM did each program
+use": peak and average VRAM, average and peak busy share, and how much
+of the range it ran.
+
 ## Stream
 
 ```bash
@@ -90,6 +108,7 @@ root if you need the composition).
 
 ```bash
 sysmon serve                       # headless daemon; idle = zero sampling, ~6 MB
+sysmon serve --record              # …and keep the usage history (one writer at a time)
 sysmon --background &              # full GUI on a private Xvfb — no window on the
                                    # user's screen, socket + ctl verbs + shot all live
 ```
@@ -111,8 +130,10 @@ echo '{"verb":"snapshot","sections":["network"]}' | nc -U $XDG_RUNTIME_DIR/sysmo
 
 ## Gotchas (paid for, so you don't have to)
 
-- **Isolate test instances**: set both `XDG_RUNTIME_DIR` (socket)
-  and `XDG_CONFIG_HOME` (settings) or you'll drive and *rewrite the saved settings of* the user's real instance. `ctl theme` in
+- **Isolate test instances**: set `XDG_RUNTIME_DIR` (socket),
+  `XDG_CONFIG_HOME` (settings) and `XDG_STATE_HOME` (usage history),
+  or you'll drive and *rewrite the saved settings of* the user's real
+  instance and write test samples into their history. `ctl theme` in
   a test once silently repainted the user's config.
 - `ctl` against nothing running exits 2 (the fix names your
   options); `probe`/`tap` never need a daemon.

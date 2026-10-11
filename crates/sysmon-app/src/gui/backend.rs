@@ -76,6 +76,7 @@ impl Backend for GuiBackend {
             "socket": socket_path(),
             "paused": self.shared.paused.load(Ordering::Relaxed),
             "interval_seconds": *self.shared.interval_seconds.lock().unwrap(),
+            "history": self.shared.history.lock().unwrap().status,
         });
         // Disclosed like process_source/_hint: the hint key exists
         // only in the degraded mode, and names the fix.

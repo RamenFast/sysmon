@@ -21,7 +21,7 @@ set -euo pipefail
 bin="$(realpath "${1:-target/release/sysmon}")"
 seconds="${2:-30}"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/sysmon-perf.XXXXXX")"
-export XDG_RUNTIME_DIR="${scratch}/run" XDG_CONFIG_HOME="${scratch}/config"
+export XDG_RUNTIME_DIR="${scratch}/run" XDG_CONFIG_HOME="${scratch}/config" XDG_STATE_HOME="${scratch}/state"
 mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}/sysmon"
 chmod 700 "${XDG_RUNTIME_DIR}"
 unset WAYLAND_DISPLAY WAYLAND_SOCKET

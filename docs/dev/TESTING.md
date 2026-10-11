@@ -10,7 +10,8 @@ as fixture (a monitor passing only synthetic data proves nothing).
 | accuracy cross-checks | `cargo test -p sysmon-core --test accuracy` | a live Linux box |
 | live probes (smoke, icons, net attribution) | `cargo test -p sysmon-core --test live_smoke --test live_icons --test live_net_attribution` | live box; net test wants WAN + skips offline |
 | UI interactions | `cargo test -p sysmon-app --test ui_kittest` | GPU or lavapipe (wgpu) |
-| full e2e | `scripts/e2e.sh out/ target/release/sysmon` | Xvfb, openbox, xdotool, imagemagick, jq |
+| full e2e | `scripts/e2e.sh out/ target/release/sysmon` | Xvfb, openbox, xdotool, imagemagick, jq, xclip |
+| history at scale (ignored) | `cargo test --release -p sysmon-core --test history_scale -- --ignored --nocapture` | a week at 2 s through the real store: fits the cap, summarizes in seconds |
 
 `cargo test` runs everything but the e2e script. All 41 green is the
 resting state.
@@ -74,8 +75,14 @@ the law for release screenshots).
   its exact PID first; the confirm modal must name the sacrifice
   before you click confirm.
 - **Scratch env or you drive the real thing**: `XDG_CONFIG_HOME`
-  (settings writes!) and `XDG_RUNTIME_DIR` (socket ownership!) both.
+  (settings writes!), `XDG_RUNTIME_DIR` (socket ownership!) and
+  `XDG_STATE_HOME` (the usage history the window records, 3.4+).
   A ctl theme test once silently rewrote the user's saved theme.
+- **Clicking a pop-out's row**: xdotool's window geometry is the
+  frame's; take the client origin from `xwininfo` ("Absolute
+  upper-left"). The copy button is at client (49, 17), the range
+  slider's handle starts near (95, 17). `scripts/e2e.sh` reads the
+  clipboard back with `xclip` after the click.
 - **`pkill -f <pattern>` kills your own test shell** when the
   pattern appears in its command text (exit 144, script dies
   mid-run). Match `readlink /proc/<pid>/exe` instead.

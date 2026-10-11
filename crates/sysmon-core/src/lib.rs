@@ -8,6 +8,7 @@
 
 pub mod apps;
 pub mod collect;
+pub mod history;
 pub mod snapshot;
 pub mod specs;
 pub mod units;

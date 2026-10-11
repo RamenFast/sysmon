@@ -239,7 +239,23 @@ pub struct GpuSnapshot {
 pub struct GpuProcessUsage {
     pub pid: i32,
     pub busy_percent: f32,
+    /// Buffers in VRAM right now, summed over the process's DRM
+    /// clients (each once): fdinfo `drm-total-vram − amd-evicted-vram`.
+    /// A buffer two processes share (a window surface the compositor
+    /// also maps) counts in both, so the per-process sum can exceed the
+    /// card's `vram_used_bytes` by the shared part.
     pub vram_bytes: u64,
+    /// Buffers in GTT, system RAM the GPU maps (`drm-total-gtt`).
+    /// New in 3.4.
+    #[serde(default)]
+    pub gtt_bytes: u64,
+    /// The part of `vram_bytes` shared with other clients. New in 3.4.
+    #[serde(default)]
+    pub vram_shared_bytes: u64,
+    /// Buffers that want VRAM but were moved to system RAM: the sign
+    /// of VRAM pressure. New in 3.4.
+    #[serde(default)]
+    pub vram_evicted_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -11,8 +11,9 @@ sysmon - compact system monitor with an agent-drivable API
 *sysmon* probe [_sections_...] [--json]++
 *sysmon* tap [_sections_...] [--interval _N_]++
 *sysmon* ctl _verb_ [_args_...]++
-*sysmon* serve++
+*sysmon* serve [--record [--interval _N_]]++
 *sysmon* specs [_section_] [--json]++
+*sysmon* history [_section_] [--since _D_] [--until _D_] [--specs] [--records] [--json]++
 *sysmon* schema
 
 # DESCRIPTION
@@ -63,9 +64,12 @@ networking first — without scraping a UI.
 	the fix, and the window says so at startup too. Degraded modes
 	are disclosed, never silent.
 
-*serve*
+*serve* [--record [--interval _N_]]
 	Headless sampling daemon on the control socket. Samples only
-	when a client asks — an idle daemon does nothing at all.
+	when a client asks — an idle daemon does nothing at all. With
+	*--record* it also keeps the usage history (see *history*) at its
+	own cadence, for a machine where the window is not open. One
+	process records at a time; a second exits 2 and names the first.
 
 *specs* [_section_] [--json]
 	What this machine is, rather than what it is doing: OS, desktop,
@@ -79,6 +83,19 @@ networking first — without scraping a UI.
 	graphics storage network audio*. Needs no running instance; the
 	optional helpers it asks (vulkaninfo, glxinfo, swaymsg, pactl)
 	each run under a 3 s deadline.
+
+*history* [_section_] [--since _D_] [--until _D_] [--specs] [--records] [--blocks _N_] [--json]
+	What the machine did over a time range, from the usage history
+	SysMon keeps on disk while its window (or *serve --record*) runs.
+	Per reading: min, avg, p95, max and a timeline; for the GPU, every
+	program that held it with its peak and average VRAM and busy
+	share. Times read as _90s_, _15m_, _2h_, _7d_, plain seconds, or a
+	unix time; *--since* defaults to 1 h. *--specs* puts the section's
+	specs above the usage, exactly what its pop-out's copy button
+	copies. *--records* prints every raw record in the range as NDJSON
+	instead. A timeline block with no samples is blank (JSON: null),
+	never zero. Sections: *all cpu memory gpu network disks sensors*.
+	Exits 2 when no history exists yet.
 
 *schema*
 	The machine-readable map of every command, section, field, and
@@ -115,6 +132,12 @@ The API and the Network card state which source fed them.
 _~/.config/sysmon/settings.json_
 	Preferences (v1 files are read and migrated in place).
 
+_~/.local/state/sysmon/history/_ (_$XDG_STATE_HOME_)
+	Usage history: one file per UTC hour, a finished hour gzipped
+	(~200 bytes a sample). Kept for 7 days and at most 256 MB by
+	default, the oldest hours removed first; both limits are in
+	Display options → Usage history. _.lock_ names the one writer.
+
 # EXAMPLES
 
 Network rate for a bar, every 2 s:
@@ -128,6 +151,12 @@ Screenshot the running window:
 
 A spec sheet for a forum post (piped output is JSON, so take the text):
 	sysmon specs --json | jq -j .result.text | wl-copy
+
+How much GPU and VRAM each program used over the last two hours:
+	sysmon history gpu --since 2h
+
+The same as the GPU pop-out's copy button, to paste somewhere:
+	sysmon history gpu --specs --json | jq -j .result.text | wl-copy
 
 # AUTHORS
 
