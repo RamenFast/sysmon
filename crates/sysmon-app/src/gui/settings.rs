@@ -15,20 +15,33 @@ use sysmon_core::units::{TemperatureScale, Units};
 
 pub const SECTION_KEYS: [&str; 6] = ["gpu", "memory", "cpu", "network", "disks", "sensors"];
 
-/// A week of history in at most 256 MB. Measured on this machine
-/// (24 temperatures, 8 fans, 5 disks, 10 GPU programs a sample): 3.4 KB
-/// a sample while its hour is open, 162 B once sealed (gzip, 20x). At
-/// the 2 s default a week is ~49 MB, so the cap is headroom.
-pub const DEFAULT_RETENTION_HOURS: f64 = 168.0;
-pub const DEFAULT_HISTORY_MB: u64 = 256;
-pub const RETENTION_CHOICES_HOURS: [f64; 5] = [24.0, 72.0, 168.0, 720.0, 2_160.0];
-pub const HISTORY_MB_CHOICES: [u64; 4] = [64, 256, 1_024, 4_096];
+/// Usage history (3.5): hours stay hourly gzip files for a week, then
+/// whole days are packed losslessly into the archive, and nothing is
+/// deleted unless the user sets a keep or a cap. Measured on this
+/// machine (24 temperatures, 8 fans, 5 disks, 10 GPU programs a
+/// sample): 3.4 KB a sample raw, 141 B gzip-sealed, 103 B packed (with
+/// its rollup). At the 2 s default that is ~135 MB a month, ~1.6 GB a
+/// year; at 5 s ~54 MB a month, ~0.65 GB a year. With no cap the menu
+/// warns past 1 GB (store::WARN_BYTES): ~7 months at 2 s, ~1.5 years
+/// at 5 s. A cap deletes, so it stays opt-in. The 3.4 keys
+/// (`history_retention_hours`, `history_max_mb`) are retired: their
+/// 7 d / 256 MB were deletion limits, and a 3.4 file wrote them even
+/// when nobody chose them, so they are not carried over.
+pub const DEFAULT_HOT_HOURS: f64 = 168.0;
+pub const HOT_CHOICES_HOURS: [f64; 4] = [24.0, 72.0, 168.0, 720.0];
+/// 0 = forever.
+pub const KEEP_CHOICES_DAYS: [f64; 3] = [0.0, 365.0, 90.0];
+/// 0 = no cap.
+pub const CAP_CHOICES_MB: [u64; 4] = [0, 1_000, 4_000, 16_000];
 
-/// The copy range slider's stops, seconds (cut at the retention).
-pub const COPY_RANGE_STOPS: [f64; 13] = [
+/// The copy range slider's stops, seconds (cut at the oldest data on
+/// disk, which is the last stop).
+pub const COPY_RANGE_STOPS: [f64; 15] = [
     300.0, 900.0, 1_800.0, 3_600.0, 7_200.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0, 259_200.0, 604_800.0,
-    2_592_000.0, 7_776_000.0,
+    2_592_000.0, 7_776_000.0, 15_552_000.0, 31_536_000.0,
 ];
+/// The longest copy range a settings file may hold (10 years).
+pub const MAX_COPY_RANGE_SECONDS: f64 = 315_360_000.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -70,12 +83,17 @@ pub struct Settings {
     /// Usage history on disk (`sysmon_core::history`): record while the
     /// window runs. New in 3.4.
     pub history_enabled: bool,
-    /// How far back the history goes, hours (1 h – 90 d). New in 3.4.
-    pub history_retention_hours: f64,
-    /// The most disk the history may use, MB (32 MB – 4 GB). New in 3.4.
-    pub history_max_mb: u64,
+    /// Hours stay hourly files this long before their day is packed
+    /// into the archive, hours (1 h – 90 d). New in 3.5.
+    pub history_hot_hours: f64,
+    /// Remove whole days older than this, days; 0 = keep forever (the
+    /// default). New in 3.5.
+    pub history_keep_days: f64,
+    /// Remove the oldest data past this size, MB; 0 = no cap (the
+    /// default; past 1 GB the menu warns instead). New in 3.5.
+    pub history_cap_mb: u64,
     /// How much history a copy button includes, seconds (the pop-outs'
-    /// slider; never more than the retention). New in 3.4.
+    /// slider, up to the oldest data on disk). New in 3.4.
     pub copy_range_seconds: f64,
 }
 
@@ -103,8 +121,9 @@ impl Default for Settings {
             start_page: "performance".to_string(),
             cpu_graph_mode: "auto".to_string(),
             history_enabled: true,
-            history_retention_hours: DEFAULT_RETENTION_HOURS,
-            history_max_mb: DEFAULT_HISTORY_MB,
+            history_hot_hours: DEFAULT_HOT_HOURS,
+            history_keep_days: 0.0,
+            history_cap_mb: 0,
             copy_range_seconds: 3_600.0,
         }
     }
@@ -213,15 +232,25 @@ impl Settings {
         if !matches!(settings.cpu_graph_mode.as_str(), "auto" | "combined" | "per_thread") {
             settings.cpu_graph_mode = Settings::default().cpu_graph_mode;
         }
-        if !settings.history_retention_hours.is_finite() {
-            settings.history_retention_hours = DEFAULT_RETENTION_HOURS;
+        if !settings.history_hot_hours.is_finite() {
+            settings.history_hot_hours = DEFAULT_HOT_HOURS;
         }
-        settings.history_retention_hours = settings.history_retention_hours.clamp(1.0, 2_160.0);
-        settings.history_max_mb = settings.history_max_mb.clamp(32, 4_096);
+        settings.history_hot_hours = settings.history_hot_hours.clamp(1.0, 2_160.0);
+        if !settings.history_keep_days.is_finite() || settings.history_keep_days < 0.0 {
+            settings.history_keep_days = 0.0;
+        }
+        if settings.history_keep_days > 0.0 {
+            // A keep shorter than the hourly window would delete hours
+            // before they could be packed: never shorter than it.
+            settings.history_keep_days = settings.history_keep_days.max(settings.history_hot_hours / 24.0);
+        }
+        if settings.history_cap_mb > 0 {
+            settings.history_cap_mb = settings.history_cap_mb.max(32);
+        }
         if !settings.copy_range_seconds.is_finite() {
             settings.copy_range_seconds = Settings::default().copy_range_seconds;
         }
-        settings.copy_range_seconds = settings.copy_range_seconds.clamp(60.0, settings.history_retention_hours * 3_600.0);
+        settings.copy_range_seconds = settings.copy_range_seconds.clamp(60.0, MAX_COPY_RANGE_SECONDS);
         Some(settings)
     }
 
@@ -270,20 +299,26 @@ impl Settings {
 
     /// The history limits these settings ask for.
     pub fn history_limits(&self) -> sysmon_core::history::Limits {
-        sysmon_core::history::Limits::new(self.history_retention_hours * 3_600.0, self.history_max_mb * 1_000_000)
+        sysmon_core::history::Limits::new(
+            self.history_hot_hours * 3_600.0,
+            (self.history_keep_days > 0.0).then_some(self.history_keep_days * 86_400.0),
+            (self.history_cap_mb > 0).then_some(self.history_cap_mb * 1_000_000),
+        )
     }
 
-    /// The copy range, never longer than the history kept.
-    pub fn copy_range(&self) -> f64 {
-        self.copy_range_seconds.min(self.history_retention_hours * 3_600.0).max(60.0)
+    /// The copy range, never longer than the history on disk (`span`:
+    /// seconds from the oldest record to now, when known).
+    pub fn copy_range(&self, span: Option<f64>) -> f64 {
+        let longest = span.map_or(MAX_COPY_RANGE_SECONDS, |s| s.max(300.0));
+        self.copy_range_seconds.min(longest).max(60.0)
     }
 
-    /// The slider's stops for this retention: every stop inside it,
-    /// then the retention itself as the last stop.
-    pub fn copy_range_stops(&self) -> Vec<f64> {
-        let retention = self.history_retention_hours * 3_600.0;
-        let mut stops: Vec<f64> = COPY_RANGE_STOPS.iter().copied().filter(|s| *s < retention).collect();
-        stops.push(retention);
+    /// The slider's stops: every stop shorter than the history on
+    /// disk, then all of it as the last stop (a week when unknown).
+    pub fn copy_range_stops(&self, span: Option<f64>) -> Vec<f64> {
+        let longest = span.map_or(604_800.0, |s| s.max(300.0).ceil());
+        let mut stops: Vec<f64> = COPY_RANGE_STOPS.iter().copied().filter(|s| *s < longest).collect();
+        stops.push(longest);
         stops
     }
 }
@@ -336,26 +371,33 @@ mod tests {
         assert_eq!(settings.update_interval_seconds, 3.0);
     }
 
-    /// 3.4: history settings are additive (a 3.3 file records with the
-    /// defaults) and bounded (an edited file can't ask for 0 MB or a
-    /// copy range longer than what is kept).
+    /// 3.5: nothing old is deleted by default. A 3.4 file's deletion
+    /// limits (7 d / 256 MB, written even when nobody chose them) are
+    /// not carried over; an edited file stays bounded.
     #[test]
-    fn history_settings_are_additive_and_bounded() {
-        let from_3_3 = r#"{"settings_version":2,"theme_mode":"amoled"}"#;
-        let settings = Settings::from_json(from_3_3).unwrap();
+    fn history_settings_keep_everything_by_default_and_stay_bounded() {
+        let from_3_4 = r#"{"settings_version":2,"theme_mode":"amoled","history_retention_hours":168.0,"history_max_mb":256}"#;
+        let settings = Settings::from_json(from_3_4).unwrap();
         assert!(settings.history_enabled);
-        assert_eq!(settings.history_retention_hours, DEFAULT_RETENTION_HOURS);
-        assert_eq!(settings.history_max_mb, DEFAULT_HISTORY_MB);
-        assert_eq!(settings.copy_range(), 3_600.0);
-        let junk = r#"{"settings_version":2,"history_retention_hours":0,"history_max_mb":0,"copy_range_seconds":1e12}"#;
+        assert_eq!(settings.history_hot_hours, DEFAULT_HOT_HOURS);
+        let limits = settings.history_limits();
+        assert_eq!((limits.keep_seconds, limits.max_bytes), (None, None), "keep forever, no cap");
+        assert_eq!(limits.hot_seconds, 7.0 * 86_400.0);
+        assert_eq!(settings.copy_range(None), 3_600.0);
+        let junk = r#"{"settings_version":2,"history_hot_hours":0,"history_keep_days":-3,"history_cap_mb":5,"copy_range_seconds":1e12}"#;
         let settings = Settings::from_json(junk).unwrap();
-        assert_eq!(settings.history_retention_hours, 1.0);
-        assert_eq!(settings.history_max_mb, 32);
-        assert_eq!(settings.copy_range(), 3_600.0, "never longer than the retention");
-        assert_eq!(settings.copy_range_stops(), vec![300.0, 900.0, 1_800.0, 3_600.0]);
-        let week = Settings::default();
-        assert_eq!(week.copy_range_stops().last(), Some(&604_800.0));
-        assert_eq!(week.history_limits().max_bytes, 256_000_000);
+        assert_eq!(settings.history_hot_hours, 1.0);
+        assert_eq!(settings.history_keep_days, 0.0);
+        assert_eq!(settings.history_cap_mb, 32);
+        assert_eq!(settings.copy_range(Some(3_600.0)), 3_600.0, "never longer than what is on disk");
+        assert_eq!(settings.copy_range_stops(Some(3_600.0)), vec![300.0, 900.0, 1_800.0, 3_600.0]);
+        // The slider reaches the oldest record: 40 days on disk.
+        let stops = Settings::default().copy_range_stops(Some(40.0 * 86_400.0));
+        assert_eq!(stops.last(), Some(&(40.0 * 86_400.0)));
+        assert!(stops.contains(&2_592_000.0));
+        // A keep never undercuts the hourly window.
+        let short = Settings::from_json(r#"{"settings_version":2,"history_hot_hours":720,"history_keep_days":7}"#).unwrap();
+        assert_eq!(short.history_keep_days, 30.0);
     }
 
     #[test]

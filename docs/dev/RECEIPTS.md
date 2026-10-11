@@ -60,3 +60,60 @@ The serve figure is the design receipt: zero clients = zero sampling.
 - **Icon chain**: guard-band scan clean (no colored pixel on the
   8/248 frame); `app_icon_renders` pins SVG→resvg→128 px RGBA;
   titlebar icon verified live on the Xvfb instance.
+
+## v3.5.0 addenda (2026-10-11): the long-term history
+
+**Compression, on a copy of the real history** (this machine: 24
+temperatures, 8 fans, 5 disks, 10 GPU programs a sample; 5 s cadence;
+2,781 samples over 4.6 h, idle and Arc Raiders):
+
+| form | bytes a sample | vs raw |
+|---|---|---|
+| raw JSON line (the open hour) | 3,398 | 1× |
+| gzip -6 sealed hours (hot tier) | 141 | 24× |
+| packed day file, `archive/<day>.jsonl.zst` | **103** | **33×** |
+| · of which hour frames (zstd -19) | 94.3 | |
+| · of which rollups / index | 8.4 / 0.3 | |
+
+Codec choice, one real hour (716 samples, 2.43 MB raw): gzip -6 84 KB,
+gzip -9 80 KB, zstd -12 61 KB, zstd -19 55 KB, xz -6 59 KB, xz -9e 52 KB.
+zstd -19 with window/chain/hash 22/22/21 gives the same 55 KB at 32 MB
+peak memory instead of 57 MB. xz -9e is 6–8% smaller but decodes ~3×
+slower (two real hours, 30 decodes: zstd 0.05 s, xz 0.12 s), and zstd's
+skippable frames carry the index and rollups inside the day file while
+`zstd -dc` still prints only the lines. Repack of the copy: 5 hours packed in
+1.9 s wall at nice 19, 47 MB peak; every record byte-identical after
+(md5 of `history all --records`), the summary identical with rollups
+and with `--raw`; `zstd -dc` on the day file prints its 2,781 lines.
+
+**Growth** (from the measured 103 B): 5 s → 2.2 MB a day, ~54 MB a
+month, ~650 MB a year; 2 s → ~135 MB a month, ~1.6 GB a year. The hot
+week adds a fixed ~18 MB at 5 s. Defaults: keep forever, no cap; the
+status warns past 1 GB (≈1.5 years at 5 s).
+
+**Query speed** (`history_scale::long_ranges_stay_fast`, synthetic
+records from a real template, release build, nice 19, while a game
+ran on the same machine):
+
+| store | `history gpu --since 30d` with rollups | record by record | whole store |
+|---|---|---|---|
+| 30 days at 2 s (1.30 M records; 23 archive days 11.3 MB + 175 hourly 48 MB) | **0.92 s** (672/720 hours merged) | 13.1 s | 0.92 s |
+| 1 year at 10 s (3.15 M records; 358 archive days 54 MB) | **0.21 s** | 2.6 s | **0.74 s** (vs 33.7 s) |
+| 1 week at 2 s (302 k records) | 0.91 s for the week | 3.0 s | |
+
+The same two stores kept (`SYSMON_SCALE_KEEP=1`) and timed through the
+real binary, `XDG_STATE_HOME=<scratch> sysmon history gpu --since 30d`,
+three runs each, nice 19, a game running: 30-day store **1.01 s** (13.2 s
+with `--raw`); 1-year store **0.26 s** (2.7 s with `--raw`).
+
+Rollups never change a number a person sees: counts, min, max, p95,
+latest and ceilings are exact; sums agree to 1e-9 relative (hour
+subtotals round differently from 1.3 M single adds, in the 14th digit).
+The unit test `merged_rollups_summarize_exactly_like_the_records`
+checks every section over ranges that cut hours, align with them and
+span a recording gap.
+
+**Recorder cost** (`serve --record --interval 5`, nice 10, 60 s, scratch
+copy, first pass building 4 hour rollups): 0.58% of one core, 8.7 MB
+RSS (peak 10.9 MB).
+

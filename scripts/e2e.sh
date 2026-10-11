@@ -136,7 +136,8 @@ if command -v xclip >/dev/null; then
   first_line="${copied%%$'\n'*}"
   [[ "$first_line" == "SysMon "*" · GPU" ]] || fail "pop-out copy: title line (see $out/popout-copy.txt)"
   grep -q "^GPU  " <<<"$copied" || fail "pop-out copy: the GPU specs"
-  grep -q "^Usage · last 1 h · " <<<"$copied" || fail "pop-out copy: the usage block"
+  # The range is capped at the history on disk (3.5): seconds old here.
+  grep -q "^Usage · last 5 min · " <<<"$copied" || fail "pop-out copy: the usage block"
   grep -q "^GPU busy " <<<"$copied" || fail "pop-out copy: the busy row"
   ! grep -qF "$(cat /proc/sys/kernel/hostname)" <<<"$copied" || fail "pop-out copy carries the hostname"
   # Piped output is the envelope; its text is what a terminal prints.

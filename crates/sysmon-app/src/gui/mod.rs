@@ -80,8 +80,10 @@ fn negotiate_socket(backend: Arc<backend::GuiBackend>) -> Result<Option<ControlS
                     );
                 }
                 // serve, an older GUI, or something unreachable:
-                // ask it to leave and take the socket over.
-                let _ = control::request(&json!({"verb": "quit"}));
+                // ask it to leave and take the socket over. A recording
+                // serve (the headless recorder) stands by for this pid
+                // and records again once this window closes.
+                let _ = control::request(&json!({"verb": "quit", "takeover_pid": std::process::id()}));
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 if attempt == ATTEMPTS - 1 {
                     eprintln!("sysmon: the control socket is held by `{owner_mode}` and won't yield");

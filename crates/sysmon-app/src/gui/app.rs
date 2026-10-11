@@ -25,7 +25,7 @@ use super::graphs::History;
 use super::icons::IconCache;
 use super::performance::{self, PerformanceContext};
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
-use super::settings::{HISTORY_MB_CHOICES, RETENTION_CHOICES_HOURS, SECTION_KEYS, Settings};
+use super::settings::{CAP_CHOICES_MB, HOT_CHOICES_HOURS, KEEP_CHOICES_DAYS, SECTION_KEYS, Settings};
 use super::specs;
 use super::theme::{self, Palette};
 use super::widgets::{ButtonGlyph, glyph_button, menu_check_row, menu_chip, menu_option_row};
@@ -155,6 +155,9 @@ pub struct SharedUi {
     /// Usage history on disk: what the sampler should do (the window
     /// sets it from settings) and what it last reported.
     pub history: Mutex<HistoryControl>,
+    /// Clear / pack requests (the menu's Clear…, `sysmon history
+    /// --clear`) for the sampler thread, which owns the recorder.
+    pub history_desk: crate::history_desk::HistoryDesk,
 }
 
 /// The main thread's wishes for the recorder, and the recorder's own
@@ -189,6 +192,7 @@ impl SharedUi {
                 limits: Settings::default().history_limits(),
                 status: sysmon_core::history::RecordingStatus::default(),
             }),
+            history_desk: crate::history_desk::HistoryDesk::default(),
         }
     }
 
@@ -219,10 +223,16 @@ impl HistoryWriter {
         };
         if !enabled {
             // Off: drop the writer (and its lock), and say so with the
-            // place and limits it would use.
+            // place and limits it would use. A clear still works.
             self.recorder = None;
-            shared.history.lock().unwrap().status =
-                RecordingStatus { dir, retention_seconds: limits.retention_seconds, max_bytes: limits.max_bytes, ..Default::default() };
+            shared.history_desk.serve(None, &dir);
+            shared.history.lock().unwrap().status = RecordingStatus {
+                dir,
+                hot_seconds: limits.hot_seconds,
+                keep_seconds: limits.keep_seconds,
+                max_bytes: limits.max_bytes,
+                ..Default::default()
+            };
             return;
         }
         if self.recorder.is_none() && self.last_attempt.is_none_or(|at| at.elapsed() > self.retry_after) {
@@ -236,9 +246,11 @@ impl HistoryWriter {
                         OpenError::Busy(_) => format!("{error}; this window will take over when it stops"),
                         OpenError::Io(_) => format!("cannot write {}: {error}", dir.display()),
                     };
+                    shared.history_desk.serve(None, &dir);
                     shared.history.lock().unwrap().status = RecordingStatus {
                         dir,
-                        retention_seconds: limits.retention_seconds,
+                        hot_seconds: limits.hot_seconds,
+                        keep_seconds: limits.keep_seconds,
                         max_bytes: limits.max_bytes,
                         problem: Some(problem),
                         ..Default::default()
@@ -249,6 +261,7 @@ impl HistoryWriter {
         }
         let Some(recorder) = &mut self.recorder else { return };
         recorder.set_limits(limits);
+        shared.history_desk.serve(Some(recorder), &dir);
         let mut status = match recorder.record(&HistoryRecord::from_snapshot(snapshot)) {
             Ok(()) => recorder.status(),
             Err(error) => {
@@ -343,6 +356,15 @@ pub struct SysMonApp {
     /// The Performance page's CPU column width from the last frame
     /// it drew (what `auto` resolved against).
     last_performance_column_width: f32,
+    /// ☰ → Usage history → Export…: the path step, then the write.
+    export_dialog: Option<ExportDialog>,
+    /// ☰ → Usage history → Clear…: the confirm step, with what goes.
+    clear_dialog: Option<sysmon_core::history::ClearReport>,
+    /// A confirmed clear, waiting for the recorder's answer.
+    clear_pending: Option<std::sync::mpsc::Receiver<crate::history_desk::HistoryReply>>,
+    /// The oldest record on disk when this window is not the one
+    /// recording: (read at, ts).
+    history_oldest_cache: (Option<Instant>, Option<f64>),
     /// Keeps the socket alive exactly as long as the app; Drop
     /// unlinks it.
     _control_server: Option<crate::control::ControlServer>,
@@ -432,6 +454,10 @@ impl SysMonApp {
             popout_drags: HashMap::new(),
             overview_scroll_to: None,
             last_performance_column_width: 0.0,
+            export_dialog: None,
+            clear_dialog: None,
+            clear_pending: None,
+            history_oldest_cache: (None, None),
             _control_server: control_server,
             settings,
         }
@@ -556,6 +582,22 @@ impl SysMonApp {
         egui::Popup::menu(button_response)
             .align(egui::RectAlign::BOTTOM_END)
             .show(|ui| {
+                // The menu outgrew the window (3.5's history rows; at
+                // Ben's 842 px the last rows were already cut in 3.4, and
+                // a popup is clamped to the window): it scrolls instead.
+                let max_height = (ui.ctx().content_rect().height() - button_response.rect.bottom() - 16.0).max(200.0);
+                // No drag-to-scroll: a press on a chip must be a click, never
+                // the start of a scroll (wheel and scrollbar scroll it).
+                // min_scrolled_height: the popup's first (sizing) frame
+                // offers only egui's default 400 px area, and the area
+                // keeps whatever size that frame reported, so without it
+                // the menu stayed a 400 px scroller with rows clipped.
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .min_scrolled_height(max_height)
+                    .auto_shrink([true, true])
+                    .scroll_source(egui::scroll_area::ScrollSource { drag: false, ..egui::scroll_area::ScrollSource::ALL })
+                    .show(ui, |ui| {
                 ui.set_min_width(210.0);
                 let palette = theme::palette_by_id(&self.applied_palette_id)
                     .unwrap_or(&theme::PALETTES[0]);
@@ -729,32 +771,82 @@ impl SysMonApp {
                     settings_changed = true;
                 }
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("keep").color(palette.muted).size(10.5));
-                    for hours in RETENTION_CHOICES_HOURS {
+                    ui.label(RichText::new("hourly for").color(palette.muted).size(10.5));
+                    for hours in HOT_CHOICES_HOURS {
                         let label = sysmon_core::history::text::range_label(hours * 3_600.0);
-                        if menu_chip(ui, palette, (self.settings.history_retention_hours - hours).abs() < 0.01, &label).clicked() {
-                            self.settings.history_retention_hours = hours;
+                        if menu_chip(ui, palette, (self.settings.history_hot_hours - hours).abs() < 0.01, &label)
+                            .on_hover_text(
+                                "how long hours stay hourly files; after that each day is packed, \
+                                 losslessly, into one smaller archive file",
+                            )
+                            .clicked()
+                        {
+                            self.settings.history_hot_hours = hours;
                             settings_changed = true;
                         }
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("at most").color(palette.muted).size(10.5));
-                    for megabytes in HISTORY_MB_CHOICES {
-                        let label = if megabytes >= 1_000 { format!("{} GB", megabytes / 1_000) } else { format!("{megabytes} MB") };
-                        if menu_chip(ui, palette, self.settings.history_max_mb == megabytes, &label)
-                            .on_hover_text("the oldest hours go first when history reaches this size")
+                    ui.label(RichText::new("keep").color(palette.muted).size(10.5));
+                    for days in KEEP_CHOICES_DAYS {
+                        let label = match days as u32 {
+                            0 => "forever".to_string(),
+                            365 => "1 y".to_string(),
+                            other => format!("{other} d"),
+                        };
+                        let hover = if days == 0.0 {
+                            "nothing is ever removed by age (the default)"
+                        } else {
+                            "older days are removed for good"
+                        };
+                        if menu_chip(ui, palette, (self.settings.history_keep_days - days).abs() < 0.01, &label)
+                            .on_hover_text(hover)
                             .clicked()
                         {
-                            self.settings.history_max_mb = megabytes;
+                            self.settings.history_keep_days = days;
+                            settings_changed = true;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("size cap").color(palette.muted).size(10.5));
+                    for megabytes in CAP_CHOICES_MB {
+                        let label = if megabytes == 0 { "none".to_string() } else { format!("{} GB", megabytes / 1_000) };
+                        let hover = if megabytes == 0 {
+                            "no size limit (the default); past 1 GB the line below warns"
+                        } else {
+                            "past this size the oldest days are removed for good"
+                        };
+                        if menu_chip(ui, palette, self.settings.history_cap_mb == megabytes, &label)
+                            .on_hover_text(hover)
+                            .clicked()
+                        {
+                            self.settings.history_cap_mb = megabytes;
                             settings_changed = true;
                         }
                     }
                 });
                 let status = self.shared.history.lock().unwrap().status.clone();
-                let (line, color) = history_status_line(&status);
-                ui.label(RichText::new(line).color(if color { palette.accent } else { palette.muted }).size(10.5))
-                    .on_hover_text(status.dir.display().to_string());
+                for (line, alert) in history_status_lines(&status) {
+                    ui.label(RichText::new(line).color(if alert { palette.accent } else { palette.muted }).size(10.5))
+                        .on_hover_text(status.dir.display().to_string());
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(RichText::new("Export…").size(11.5))
+                        .on_hover_text("save the whole history as one .tar.zst file")
+                        .clicked()
+                    {
+                        self.export_dialog = Some(ExportDialog::new(&status.dir));
+                    }
+                    if ui
+                        .button(RichText::new("Clear…").size(11.5))
+                        .on_hover_text("delete the whole history (asks first)")
+                        .clicked()
+                    {
+                        self.clear_dialog = Some(sysmon_core::history::manage::clear_preview(&status.dir));
+                    }
+                });
 
                 ui.separator();
                 heading(ui, "Overview sections");
@@ -777,9 +869,9 @@ impl SysMonApp {
                         settings_changed = true;
                     }
                 }
+                });
             });
         if settings_changed {
-            self.settings.copy_range_seconds = self.settings.copy_range();
             self.shared.apply_history_settings(&self.settings);
             self.settings.save();
         }
@@ -920,7 +1012,8 @@ impl SysMonApp {
                                 );
                             }
                             let copying = self.specs_copier.is_busy();
-                            let tooltip = format!("Copy {} specs and the last {} of usage", specs::section_title(section), sysmon_core::history::text::range_label(self.settings.copy_range()));
+                            let span = self.history_span();
+                            let tooltip = format!("Copy {} specs and the last {} of usage", specs::section_title(section), sysmon_core::history::text::range_label(self.settings.copy_range(span)));
                             if glyph_button(ui, palette, ButtonGlyph::Copy, copying, &tooltip).clicked() {
                                 self.copy_section(ctx, section);
                             }
@@ -1116,7 +1209,8 @@ impl SysMonApp {
 
     /// A section's copy: its specs (the Sensors readings stand in for
     /// specs there), then its usage over the copy range.
-    fn copy_section(&self, ctx: &egui::Context, section: &'static str) {
+    fn copy_section(&mut self, ctx: &egui::Context, section: &'static str) {
+        let span = self.history_span();
         let specs_part = match specs::spec_section_for_popout(section) {
             Some(spec_section) => specs::SpecsPart::Section(spec_section),
             None => specs::SpecsPart::Text(specs::sensor_readings_text(&self.shared.latest.read().unwrap())),
@@ -1127,7 +1221,7 @@ impl SysMonApp {
             specs: specs_part,
             history: Some(specs::HistoryPart {
                 section,
-                range_seconds: self.settings.copy_range(),
+                range_seconds: self.settings.copy_range(span),
                 dir: self.shared.history.lock().unwrap().dir.clone(),
                 style: sysmon_core::history::text::TextStyle { units: display.units, temperature: display.temperature },
             }),
@@ -1135,11 +1229,33 @@ impl SysMonApp {
         self.specs_copier.request(ctx, job);
     }
 
+    /// Seconds from the oldest record on disk to now: the recorder's
+    /// own account while this window records, else a cheap read of the
+    /// directory, refreshed every 30 s (another SysMon may be recording).
+    fn history_span(&mut self) -> Option<f64> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let (oldest, dir) = {
+            let history = self.shared.history.lock().unwrap();
+            (history.status.oldest_ts, history.dir.clone())
+        };
+        let oldest = match oldest {
+            Some(oldest) => Some(oldest),
+            None => {
+                if self.history_oldest_cache.0.is_none_or(|at| at.elapsed() > Duration::from_secs(30)) {
+                    self.history_oldest_cache = (Some(Instant::now()), sysmon_core::history::Recording::oldest_ts(&dir));
+                }
+                self.history_oldest_cache.1
+            }
+        };
+        oldest.map(|oldest| (now - oldest).max(0.0))
+    }
+
     /// The pop-outs' "how much history to copy" slider: stops from
-    /// 5 min up to the retention the settings keep.
+    /// 5 min up to the oldest record on disk (both tiers).
     fn copy_range_slider(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        let stops = self.settings.copy_range_stops();
-        let current = self.settings.copy_range();
+        let span = self.history_span();
+        let stops = self.settings.copy_range_stops(span);
+        let current = self.settings.copy_range(span);
         let mut index = stops.iter().position(|stop| *stop >= current - 0.5).unwrap_or(stops.len() - 1);
         let label = sysmon_core::history::text::range_label(stops[index]);
         let response = ui
@@ -1155,12 +1271,17 @@ impl SysMonApp {
         response
             .widget_info(|| egui::WidgetInfo::slider(true, index as f64, format!("Copy range: last {label}")));
         let response = response.on_hover_text(
-            "How much usage history the copy button includes. \
-             Display options → Usage history sets how much is kept.",
+            "How much usage history the copy button includes, \
+             up to the oldest record on disk.",
         );
         ui.label(RichText::new(format!("last {label}")).color(palette.muted).monospace().size(10.5));
         if response.changed() {
-            self.settings.copy_range_seconds = stops[index.min(stops.len() - 1)];
+            let index = index.min(stops.len() - 1);
+            // The last stop is "everything on disk": stored as the
+            // longest range, so it keeps meaning all of it as the
+            // history grows.
+            self.settings.copy_range_seconds =
+                if index == stops.len() - 1 { super::settings::MAX_COPY_RANGE_SECONDS } else { stops[index] };
             self.settings.save();
         }
     }
@@ -1194,6 +1315,8 @@ impl SysMonApp {
             self.pending_confirm = None;
         }
 
+        self.history_dialogs(ctx, palette);
+
         // A finished spec read lands on the clipboard from a frame of
         // the main viewport (the clipboard belongs to the window).
         while let Some(copied) = self.specs_copier.poll() {
@@ -1222,6 +1345,165 @@ impl SysMonApp {
                         );
                     }
                 });
+        }
+    }
+
+    /// ☰ → Usage history's two steps: Export… (a path, then the write
+    /// off the UI thread) and Clear… (what goes, then the recorder's
+    /// own thread deletes it).
+    fn history_dialogs(&mut self, ctx: &egui::Context, palette: &'static Palette) {
+        let size = |bytes: u64| sysmon_core::units::format_size(bytes, sysmon_core::units::Units::Decimal);
+        let dir = self.shared.history.lock().unwrap().dir.clone();
+
+        if let Some(dialog) = &mut self.export_dialog {
+            if let Some(running) = &dialog.running
+                && let Ok(result) = running.try_recv()
+            {
+                dialog.running = None;
+                match result {
+                    Ok(report) => {
+                        let _ = self.toast_tx.send(format!(
+                            "History exported: {} files, {} → {}",
+                            report.files,
+                            size(report.bytes),
+                            report.path.display()
+                        ));
+                        self.export_dialog = None;
+                        return;
+                    }
+                    Err(error) => dialog.error = Some(error),
+                }
+            }
+            let mut close = false;
+            let mut start = false;
+            let modal = egui::Modal::new(egui::Id::new("export_history")).show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                ui.label(RichText::new("Export the usage history").strong().size(14.0));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("One .tar.zst file with every hour and archived day, as they are on disk.")
+                        .color(palette.ink_2)
+                        .size(12.0),
+                );
+                ui.add_space(6.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut dialog.path)
+                        .desired_width(360.0)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("~/sysmon-history.tar.zst"),
+                )
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Export path"));
+                if let Some(error) = &dialog.error {
+                    ui.label(RichText::new(error).color(palette.accent).size(11.5));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    let busy = dialog.running.is_some();
+                    let label = if busy { "Exporting…" } else { "Export" };
+                    let button = egui::Button::new(RichText::new(label).color(palette.on_accent)).fill(palette.accent);
+                    if ui.add_enabled(!busy, button).clicked() {
+                        start = true;
+                    }
+                });
+            });
+            if modal.should_close() && dialog.running.is_none() {
+                close = true;
+            }
+            if start {
+                let raw = dialog.path.trim().to_string();
+                let expanded = match raw.strip_prefix("~/") {
+                    Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
+                    None => std::path::PathBuf::from(&raw),
+                };
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                let target = if expanded.is_dir() { expanded.join(sysmon_core::history::manage::default_export_name(now)) } else { expanded };
+                if raw.is_empty() {
+                    dialog.error = Some("type where the file should go".to_string());
+                } else if target.starts_with(&dir) {
+                    dialog.error = Some("not inside the history folder itself; pick another place".to_string());
+                } else if target.exists() {
+                    dialog.error = Some(format!("{} already exists; pick another name", target.display()));
+                } else {
+                    dialog.error = None;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let source = dir.clone();
+                    let ctx = ctx.clone();
+                    let spawned = std::thread::Builder::new().name("sysmon-export".to_string()).spawn(move || {
+                        let result = sysmon_core::history::manage::export(&source, &target, false).map_err(|error| format!("export failed: {error}"));
+                        let _ = tx.send(result);
+                        ctx.request_repaint();
+                    });
+                    match spawned {
+                        Ok(_) => dialog.running = Some(rx),
+                        Err(error) => dialog.error = Some(format!("could not start the export: {error}")),
+                    }
+                }
+            }
+            if close {
+                self.export_dialog = None;
+            }
+        }
+
+        if let Some(pending) = &self.clear_pending
+            && let Ok(answer) = pending.try_recv()
+        {
+            self.clear_pending = None;
+            let toast = match answer {
+                Ok(result) => format!(
+                    "History cleared: {} files, {} removed",
+                    result["cleared"]["removed_files"].as_u64().unwrap_or(0),
+                    size(result["cleared"]["removed_bytes"].as_u64().unwrap_or(0))
+                ),
+                Err(error) => format!("Could not clear the history: {}", error.message),
+            };
+            let _ = self.toast_tx.send(toast);
+            self.history_oldest_cache = (None, None);
+        }
+
+        if let Some(preview) = self.clear_dialog.clone() {
+            let mut decision = None;
+            let modal = egui::Modal::new(egui::Id::new("clear_history")).show(ctx, |ui| {
+                ui.set_max_width(340.0);
+                ui.label(RichText::new("Delete the whole usage history?").strong().size(14.0));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} files, {}, from {}. This cannot be undone; Export… first keeps a copy. \
+                         Recording carries on from now.",
+                        preview.removed_files,
+                        size(preview.removed_bytes),
+                        preview.dir.display()
+                    ))
+                    .color(palette.ink_2)
+                    .size(12.0),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                    let button = egui::Button::new(RichText::new("Delete history").color(palette.on_accent)).fill(palette.accent);
+                    if ui.add(button).clicked() {
+                        decision = Some(true);
+                    }
+                });
+            });
+            if modal.should_close() && decision.is_none() {
+                decision = Some(false);
+            }
+            if let Some(confirmed) = decision {
+                self.clear_dialog = None;
+                if confirmed {
+                    if self.shared.paused.load(Ordering::Relaxed) {
+                        let _ = self.toast_tx.send("Resume sampling first: the recorder clears between samples".to_string());
+                    } else {
+                        self.clear_pending = Some(self.shared.history_desk.submit(crate::history_desk::HistoryOp::Clear));
+                    }
+                }
+            }
         }
     }
 
@@ -1466,21 +1748,73 @@ impl SysMonApp {
     }
 }
 
-/// The menu's one-line account of the history: (text, is it a problem).
-pub fn history_status_line(status: &sysmon_core::history::RecordingStatus) -> (String, bool) {
+/// The menu's account of the history, a line each: what it is doing,
+/// what is on disk per tier, how fast it grows, and any warning.
+/// (text, is it an alert).
+pub fn history_status_lines(status: &sysmon_core::history::RecordingStatus) -> Vec<(String, bool)> {
+    use sysmon_core::history::text::range_label;
+    let size = |bytes: f64| sysmon_core::units::format_size(bytes.max(0.0).round() as u64, sysmon_core::units::Units::Decimal);
+    let mut lines = Vec::new();
     if let Some(problem) = &status.problem {
-        return (problem.clone(), true);
+        lines.push((problem.clone(), true));
     }
     if !status.recording {
-        return ("not recording".to_string(), false);
-    }
-    let size = sysmon_core::units::format_size(status.bytes, sysmon_core::units::Units::Decimal);
-    match status.oldest_ts {
-        Some(oldest) => {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(oldest);
-            (format!("recording · {size} · {} back", sysmon_core::history::text::range_label((now - oldest).max(0.0).round())), false)
+        if status.problem.is_none() {
+            lines.push(("not recording".to_string(), false));
         }
-        None => (format!("recording · {size}"), false),
+        return lines;
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let back = status
+        .oldest_ts
+        .map(|oldest| format!(" · {} back", range_label(((now - oldest).max(0.0) / 60.0).round() * 60.0)))
+        .unwrap_or_default();
+    let packing = if status.packing { " · packing…" } else { "" };
+    lines.push((format!("recording · {} on disk{back}{packing}", size(status.bytes as f64)), false));
+    lines.push((
+        if status.archive_days > 0 {
+            format!(
+                "hourly {} · archive {} in {} day{}",
+                size(status.hot_bytes as f64),
+                size(status.archive_bytes as f64),
+                status.archive_days,
+                if status.archive_days == 1 { "" } else { "s" }
+            )
+        } else {
+            format!("hourly {} · nothing older than {} yet", size(status.hot_bytes as f64), range_label(status.hot_seconds))
+        },
+        false,
+    ));
+    if let Some(growth) = &status.growth {
+        let estimate = if growth.basis == "archive" { "" } else { " (est.)" };
+        lines.push((
+            format!(
+                "grows ~{} a month · ~{} a year{estimate}",
+                size(growth.per_month_bytes),
+                size(growth.per_year_bytes)
+            ),
+            false,
+        ));
+    }
+    if let Some(warning) = &status.warning {
+        lines.push((warning.clone(), true));
+    }
+    lines
+}
+
+/// The menu's Export… step: where to write, and the write in flight.
+pub struct ExportDialog {
+    pub path: String,
+    pub running: Option<std::sync::mpsc::Receiver<Result<sysmon_core::history::ExportReport, String>>>,
+    pub error: Option<String>,
+}
+
+impl ExportDialog {
+    pub fn new(history_dir: &std::path::Path) -> ExportDialog {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| history_dir.to_path_buf());
+        let path = home.join(sysmon_core::history::manage::default_export_name(now));
+        ExportDialog { path: path.display().to_string(), running: None, error: None }
     }
 }
 

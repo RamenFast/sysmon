@@ -80,23 +80,31 @@ test fails if a live field goes undocumented):
 - Every temperature in JSON is °C (`*_celsius`); the GUI's °F/°C/both
   is display only.
 
-## Read the past (3.4+)
+## Read the past (3.4+; two tiers 3.5+)
 
 ```bash
 sysmon history gpu --since 2h          # min/avg/p95/max, timeline, programs on the GPU
 sysmon history gpu --specs             # the GPU pop-out's copy, byte for byte
 sysmon history --since 7d --json | jq '.result.metrics[] | {key, max}'
+sysmon history gpu --since 1y          # the archive reads like the rest; fast via hourly rollups
 sysmon history gpu --since 30m --records   # raw NDJSON records, event: "history"
+sysmon history --info                  # size per tier, how far back, growth / month and / year
+sysmon history --export ~/backup/      # one .tar.zst of everything
+sysmon history --clear --yes           # delete it all (asks the running recorder if one holds it)
 ```
 
 The window records a usage history (CPU, memory, GPU and the programs
 holding it, network, disks, temperatures, fans) to
-`~/.local/state/sysmon/history/`, one gzipped file per UTC hour,
-default 7 days / 256 MB. Headless: `sysmon serve --record`. `history`
-reads the files directly (no instance needed); exit 2 = nothing
-recorded yet. `null` timeline blocks are gaps, never zeros.
+`~/.local/state/sysmon/history/`: hourly gzip files for the last 7
+days, then one losslessly packed `archive/<day>.jsonl.zst` per day
+(3.5). **Nothing is deleted by default**; keep and size cap are
+opt-in. Headless: `sysmon serve --record` (Ben runs it as the
+`sysmon-record` user service; the window takes over while open).
+`history` reads the files directly (no instance needed); exit 2 =
+nothing recorded yet. `null` timeline blocks are gaps, never zeros.
 `result.gpu_processes` is the "how much did the game use while the
-model stayed loaded" answer.
+model stayed loaded" answer. Never `--clear` Ben's real history
+without his say-so; tests use a scratch `XDG_STATE_HOME`.
 
 Per-process VRAM (`gpu.processes[].vram_bytes`) is
 `drm-total-vram − amd-evicted-vram` per DRM client. 3.4.0's terabyte

@@ -383,7 +383,7 @@ pub fn run_specs(arguments: &[String]) -> i32 {
 
 const HISTORY_SECTION_NAMES: &str = "all cpu memory gpu network disks sensors";
 
-/// "90s", "15m", "2h", "7d", a bare number of seconds, or a unix time
+/// "90s", "15m", "2h", "7d", "1y", a bare number of seconds, or a unix time
 /// (a number above 1e9) → seconds back from `now`.
 fn parse_when(raw: &str, now: f64) -> Option<f64> {
     let raw = raw.trim();
@@ -395,6 +395,7 @@ fn parse_when(raw: &str, now: f64) -> Option<f64> {
                 "h" => 3_600.0,
                 "d" => 86_400.0,
                 "w" => 604_800.0,
+                "y" => 31_536_000.0,
                 _ => return None,
             };
             (&raw[..index], scale)
@@ -408,15 +409,26 @@ fn parse_when(raw: &str, now: f64) -> Option<f64> {
     Some(value * scale)
 }
 
+/// The store's management ops: `--info`, `--export`, `--clear`, `--pack`.
+enum StoreOp {
+    Info,
+    Export(String),
+    Clear,
+    Pack,
+}
+
 /// `sysmon history [section] [--since D] [--until D] [--specs]
-/// [--records] [--blocks N] [--json]`: the usage history SysMon keeps
-/// on disk, summarized (min/avg/p95/max, a timeline, the GPU's
-/// programs). Reads the files directly: needs no running instance.
+/// [--records] [--blocks N] [--raw] [--json]`: the usage history SysMon
+/// keeps on disk, summarized (min/avg/p95/max, a timeline, the GPU's
+/// programs), from both tiers. Reads the files directly: needs no
+/// running instance. `--info`, `--export PATH`, `--clear --yes` and
+/// `--pack` manage the store itself.
 pub fn run_history(arguments: &[String]) -> i32 {
     let asked_for_json = arguments.iter().any(|a| a == "--json");
     let usage = format!(
-        "usage: sysmon history [section] [--since 1h] [--until 0s] [--specs] [--records] [--blocks 48] [--json]; \
-         sections: {HISTORY_SECTION_NAMES}; times: 90s 15m 2h 7d, or a unix time"
+        "usage: sysmon history [section] [--since 1h] [--until 0s] [--specs] [--records] [--blocks 48] [--raw] [--json]; \
+         sysmon history --info | --export PATH [--force] | --clear --yes | --pack; \
+         sections: {HISTORY_SECTION_NAMES}; times: 90s 15m 2h 7d 1y, or a unix time"
     );
     let bad = |message: String| envelope::fail_forced(message, usage.clone(), EXIT_BAD_ARGS, asked_for_json);
     let now = envelope::now_ts();
@@ -425,13 +437,37 @@ pub fn run_history(arguments: &[String]) -> i32 {
     let mut until = 0.0;
     let mut with_specs = false;
     let mut records = false;
+    let mut raw = false;
+    let mut yes = false;
+    let mut force = false;
+    let mut store_op: Option<StoreOp> = None;
     let mut blocks = sysmon_core::history::summary::TIMELINE_BUCKETS;
     let mut cursor = arguments.iter();
     while let Some(argument) = cursor.next() {
+        let op = match argument.as_str() {
+            "--info" => Some(StoreOp::Info),
+            "--clear" => Some(StoreOp::Clear),
+            "--pack" => Some(StoreOp::Pack),
+            "--export" => match cursor.next() {
+                Some(path) if !path.starts_with("--") => Some(StoreOp::Export(path.clone())),
+                _ => return bad("--export needs a path: a file (…/history.tar.zst) or a directory".to_string()),
+            },
+            _ => None,
+        };
+        if let Some(op) = op {
+            if store_op.is_some() {
+                return bad("one of --info, --export, --clear, --pack at a time".to_string());
+            }
+            store_op = Some(op);
+            continue;
+        }
         match argument.as_str() {
             "--json" => {}
             "--specs" => with_specs = true,
             "--records" => records = true,
+            "--raw" => raw = true,
+            "--yes" => yes = true,
+            "--force" => force = true,
             flag @ ("--since" | "--until") => {
                 let Some(value) = cursor.next() else {
                     return bad(format!("{flag} needs a time, e.g. {flag} 2h"));
@@ -452,6 +488,18 @@ pub fn run_history(arguments: &[String]) -> i32 {
             other => return bad(format!("history takes one section, got a second: `{other}`")),
         }
     }
+    if let Some(op) = store_op {
+        if section.is_some() || with_specs || records || raw {
+            return bad("--info/--export/--clear/--pack act on the whole store: no section or summary flags".to_string());
+        }
+        if yes && !matches!(op, StoreOp::Clear) || force && !matches!(op, StoreOp::Export(_)) {
+            return bad("--yes goes with --clear, --force with --export".to_string());
+        }
+        return history_store_op(op, yes, force, asked_for_json);
+    }
+    if yes || force {
+        return bad("--yes goes with --clear, --force with --export".to_string());
+    }
     let section = section.unwrap_or("all");
     if section != "all" && !sysmon_core::history::HISTORY_SECTIONS.contains(&section) {
         return bad(format!("unknown history section `{section}`"));
@@ -466,7 +514,7 @@ pub fn run_history(arguments: &[String]) -> i32 {
 
     let dir = sysmon_core::history::default_dir();
     let store = sysmon_core::history::Recording::info(&dir);
-    if store.files == 0 {
+    if store.hot_files == 0 && store.archive_days == 0 {
         return envelope::fail_forced(
             format!("no usage history in {}", dir.display()),
             "history is recorded while the SysMon window runs (Display options → Usage history), \
@@ -498,9 +546,7 @@ pub fn run_history(arguments: &[String]) -> i32 {
         return EXIT_OK;
     }
 
-    let summary = sysmon_core::history::summarize(section, from_ts, to_ts, blocks, |sink| {
-        sysmon_core::history::Recording::for_each(&dir, from_ts, to_ts, sink).skipped_lines
-    });
+    let summary = sysmon_core::history::summarize_dir(&dir, section, from_ts, to_ts, blocks, !raw);
     let style = sysmon_core::history::text::TextStyle::default();
     let text = if with_specs {
         let spec_section = crate::gui::specs::spec_section_for_popout(section);
@@ -558,6 +604,223 @@ pub fn run_history(arguments: &[String]) -> i32 {
     EXIT_OK
 }
 
+
+/// "1.2 GB" (decimal, like the menu).
+fn human_bytes(bytes: f64) -> String {
+    sysmon_core::units::format_size(bytes.max(0.0).round() as u64, sysmon_core::units::Units::Decimal)
+}
+
+/// The store, in a few lines a person reads: where, how big, how far
+/// back, how fast it grows, what removes it.
+fn store_text(info: &sysmon_core::history::StoreInfo, limits: &sysmon_core::history::Limits, writer: Option<&str>, now: f64) -> String {
+    use sysmon_core::history::text::{local_range, range_label};
+    let mut lines = vec![format!("Usage history in {}", info.dir.display())];
+    let span = match (info.oldest_ts, info.newest_ts) {
+        (Some(oldest), Some(newest)) => format!(", {} back ({})", range_label(((now - oldest) / 60.0).round() * 60.0), local_range(oldest, newest)),
+        _ => String::new(),
+    };
+    lines.push(format!("{} on disk{span}", human_bytes(info.bytes as f64)));
+    lines.push(format!(
+        "  hourly (last {}): {} in {} file{}",
+        range_label(limits.hot_seconds),
+        human_bytes(info.hot_bytes as f64),
+        info.hot_files,
+        if info.hot_files == 1 { "" } else { "s" }
+    ));
+    lines.push(format!(
+        "  archive: {} in {} day file{}",
+        human_bytes(info.archive_bytes as f64),
+        info.archive_days,
+        if info.archive_days == 1 { "" } else { "s" }
+    ));
+    match info.cadence_seconds.and_then(|c| sysmon_core::history::growth(info, c)) {
+        Some(growth) => lines.push(format!(
+            "Grows ~{} a month, ~{} a year at one sample every {} ({:.0} B a sample, {})",
+            human_bytes(growth.per_month_bytes),
+            human_bytes(growth.per_year_bytes),
+            range_label(growth.cadence_seconds),
+            growth.bytes_per_sample,
+            if growth.basis == "archive" { "measured on the archive" } else { "estimated until a day is packed" }
+        )),
+        None => lines.push("Growth: not enough recorded yet to say".to_string()),
+    }
+    let keep = match limits.keep_seconds {
+        Some(keep) => format!("days older than {} are removed", range_label(keep)),
+        None => "nothing is removed by age".to_string(),
+    };
+    let cap = match limits.max_bytes {
+        Some(cap) => format!("the oldest data goes past {}", human_bytes(cap as f64)),
+        None => "no size cap".to_string(),
+    };
+    lines.push(format!("Kept: {keep}; {cap} (☰ → Usage history)"));
+    lines.push(format!("Recorder: {}", writer.unwrap_or("none running")));
+    lines.join("\n") + "\n"
+}
+
+fn history_store_op(op: StoreOp, yes: bool, force: bool, asked_for_json: bool) -> i32 {
+    use sysmon_core::history::{manage, OpenError, Recording};
+    let dir = sysmon_core::history::default_dir();
+    let now = envelope::now_ts();
+    let settings = crate::gui::settings::Settings::load();
+    let limits = settings.history_limits();
+    let writer = sysmon_core::history::store::current_writer(&dir);
+    let reply = |result: Value, text: String| -> i32 {
+        if !envelope::json_wanted(asked_for_json) {
+            for line in text.lines() {
+                out!("{line}");
+            }
+            return EXIT_OK;
+        }
+        let mut result = result;
+        result["text"] = json!(text);
+        envelope::emit(&envelope::ok(result));
+        EXIT_OK
+    };
+    // Ask the recorder, when one holds the lock: (reply result) or a failure exit.
+    let via_recorder = |op_name: &str| -> Result<Value, i32> {
+        let request = json!({"verb": "history", "op": op_name, "yes": true});
+        let reply = std::os::unix::net::UnixStream::connect(crate::control::socket_path())
+            .ok()
+            .and_then(|stream| crate::control::request_on_waiting(stream, &request, std::time::Duration::from_secs(600)));
+        match reply {
+            Some(reply) if reply["status"] == "ok" => Ok(reply["result"].clone()),
+            Some(reply) => Err(envelope::fail_forced(
+                reply["error"].as_str().unwrap_or("the recorder refused").to_string(),
+                reply["fix"].as_str().unwrap_or("try again").to_string(),
+                reply["exit"].as_i64().map_or(EXIT_UNAVAILABLE, |e| e as i32),
+                asked_for_json,
+            )),
+            None => Err(envelope::fail_forced(
+                format!("{} holds the history and did not answer", writer.as_deref().unwrap_or("another SysMon")),
+                "it may be an older SysMon (3.4) that cannot clear or pack; close it (or `systemctl --user stop sysmon-record`), then run this again",
+                EXIT_UNAVAILABLE,
+                asked_for_json,
+            )),
+        }
+    };
+    match op {
+        StoreOp::Info => {
+            let info = Recording::info(&dir);
+            let growth = info.cadence_seconds.and_then(|c| sysmon_core::history::growth(&info, c));
+            let text = store_text(&info, &limits, writer.as_deref(), now);
+            reply(json!({"op": "info", "store": info, "growth": growth, "limits": limits, "recorder": writer, "warn_bytes": sysmon_core::history::store::WARN_BYTES}), text)
+        }
+        StoreOp::Export(raw_path) => {
+            let mut path = std::path::PathBuf::from(&raw_path);
+            if path.is_dir() {
+                path = path.join(manage::default_export_name(now));
+            }
+            if path.starts_with(&dir) {
+                return envelope::fail_forced(
+                    "an export inside the history directory would be part of the history",
+                    "write it somewhere else, e.g. `--export ~/sysmon-history.tar.zst`",
+                    EXIT_BAD_ARGS,
+                    asked_for_json,
+                );
+            }
+            match manage::export(&dir, &path, force) {
+                Ok(report) => {
+                    let text = format!(
+                        "Exported {} files ({} of history) to {} ({})\nRestore: stop SysMon, then `tar --zstd -xf {} -C {}`\n",
+                        report.files,
+                        human_bytes(report.source_bytes as f64),
+                        report.path.display(),
+                        human_bytes(report.bytes as f64),
+                        report.path.display(),
+                        dir.parent().map_or_else(|| dir.display().to_string(), |p| p.display().to_string()),
+                    );
+                    reply(json!({"op": "export", "export": report}), text)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => envelope::fail_forced(
+                    format!("{} already exists", path.display()),
+                    "pick another name, or add --force to replace it",
+                    EXIT_BAD_ARGS,
+                    asked_for_json,
+                ),
+                Err(error) => envelope::fail_forced(
+                    format!("export to {} failed: {error}", path.display()),
+                    "check the target directory exists, is writable and has room",
+                    EXIT_RUNTIME,
+                    asked_for_json,
+                ),
+            }
+        }
+        StoreOp::Clear => {
+            let preview = manage::clear_preview(&dir);
+            if !yes {
+                return envelope::fail_forced(
+                    format!(
+                        "--clear deletes the whole usage history: {} files, {} in {}",
+                        preview.removed_files,
+                        human_bytes(preview.removed_bytes as f64),
+                        dir.display()
+                    ),
+                    "add --yes to confirm (`sysmon history --export PATH` first keeps a copy)",
+                    EXIT_BAD_ARGS,
+                    asked_for_json,
+                );
+            }
+            let cleared = match manage::clear_unlocked(&dir) {
+                Ok(report) => json!({"op": "clear", "cleared": report, "by": "cli"}),
+                Err(OpenError::Busy(_)) => match via_recorder("clear") {
+                    Ok(result) => result,
+                    Err(exit) => return exit,
+                },
+                Err(OpenError::Io(error)) => {
+                    return envelope::fail_forced(
+                        format!("clearing {} failed: {error}", dir.display()),
+                        "check the directory's permissions",
+                        EXIT_RUNTIME,
+                        asked_for_json,
+                    );
+                }
+            };
+            let removed = cleared["cleared"]["removed_files"].as_u64().unwrap_or(0);
+            let bytes = cleared["cleared"]["removed_bytes"].as_f64().unwrap_or(0.0);
+            let unknown = cleared["cleared"]["left_unknown"].as_u64().unwrap_or(0);
+            let mut text = format!("Cleared the usage history: {removed} files, {} removed from {}\n", human_bytes(bytes), dir.display());
+            if unknown > 0 {
+                text.push_str(&format!("{unknown} other files in that directory are not SysMon's and were left alone\n"));
+            }
+            reply(cleared, text)
+        }
+        StoreOp::Pack => {
+            let result = match sysmon_core::history::Recorder::open(&dir, limits, "pack") {
+                Ok(mut recorder) => {
+                    let report = recorder.maintain_blocking(sysmon_core::history::PackScope::AllSealed);
+                    json!({"op": "pack", "packed": report, "store": recorder.status(), "by": "cli"})
+                }
+                Err(OpenError::Busy(_)) => match via_recorder("pack") {
+                    Ok(result) => result,
+                    Err(exit) => return exit,
+                },
+                Err(OpenError::Io(error)) => {
+                    return envelope::fail_forced(
+                        format!("cannot open {}: {error}", dir.display()),
+                        "check the directory's permissions",
+                        EXIT_RUNTIME,
+                        asked_for_json,
+                    );
+                }
+            };
+            let packed = &result["packed"];
+            let mut text = format!(
+                "Packed {} hours into {} day files: {} of hourly files → archive now {}\n",
+                packed["packed_hours"].as_u64().unwrap_or(0),
+                packed["packed_days"].as_u64().unwrap_or(0),
+                human_bytes(packed["packed_from_bytes"].as_f64().unwrap_or(0.0)),
+                human_bytes(result["store"]["archive_bytes"].as_f64().unwrap_or(0.0)),
+            );
+            if let Some(problems) = packed["problems"].as_array() {
+                for problem in problems {
+                    text.push_str(&format!("problem: {}\n", problem.as_str().unwrap_or("")));
+                }
+            }
+            reply(result, text)
+        }
+    }
+}
+
 // ----------------------------------------------------------------- schema
 
 pub fn run_schema(_arguments: &[String]) -> i32 {
@@ -594,22 +857,35 @@ fn build_schema() -> Value {
     // Its own value: one json! for the whole map passes the macro's
     // recursion limit.
     let history_verb = json!({
-                    "usage": "sysmon history [section] [--since D] [--until D] [--specs] [--records] [--blocks N] [--json]",
+                    "usage": "sysmon history [section] [--since D] [--until D] [--specs] [--records] [--blocks N] [--raw] [--json] | sysmon history --info | --export PATH [--force] | --clear --yes | --pack",
                     "kind": "one-shot (NDJSON stream with --records)",
-                    "description": "what the machine DID over a time range, from the usage history on disk (recorded while the GUI runs, or by `sysmon serve --record`). Per reading: min, avg, p95, max, latest and a timeline; for the GPU, every program that held it with peak/avg VRAM and busy share. A terminal gets the plain text a pop-out's copy button copies; piped, the envelope. Needs no running instance.",
+                    "description": "what the machine DID over a time range, from the usage history on disk (recorded while the GUI runs, or by `sysmon serve --record`). Two tiers, read as one: hourly gzip files for the last 7 days (settings: history_hot_hours), then one losslessly packed zstd file per day under archive/, kept until the user removes them (nothing is deleted by age or size unless a keep or cap is set). Per reading: min, avg, p95, max, latest and a timeline; for the GPU, every program that held it with peak/avg VRAM and busy share. A terminal gets the plain text a pop-out's copy button copies; piped, the envelope. Needs no running instance. --info/--export/--clear/--pack manage the whole store (see store_ops); when a recorder holds the writer lock, --clear and --pack reach it over the socket's `history` verb ({\"verb\":\"history\",\"op\":\"clear\"|\"pack\",\"yes\":true}).",
                     "arguments": {
                         "section": {"enum": history_section_enum, "optional": true, "default": "all"},
-                        "--since": {"type": "string", "default": "1h", "description": "how far back: 90s 15m 2h 7d, plain seconds, or a unix time"},
+                        "--since": {"type": "string", "default": "1h", "description": "how far back: 90s 15m 2h 7d 1y, plain seconds, or a unix time"},
                         "--until": {"type": "string", "default": "0s", "description": "the range's end, as far back as --since reads"},
                         "--specs": {"type": "flag", "description": "put the section's specs above the usage: exactly what its pop-out's copy button copies (needs a section)"},
                         "--records": {"type": "flag", "description": "instead of a summary, every raw record in the range as NDJSON, one per line, each with `event`: \"history\" (scoped to the section's keys)"},
                         "--blocks": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 48, "description": "timeline resolution"},
+                        "--raw": {"type": "flag", "description": "summarize record by record instead of merging sealed hours from their rollups (same numbers, slower: a check, not a mode)"},
+                        "--info": {"type": "flag", "description": "the store: size per tier, how far back, growth per month and year at the recorded cadence, what removes data"},
+                        "--export": {"type": "string", "description": "write the whole history to one .tar.zst (a file path, or a directory for sysmon-history-<date>.tar.zst); restore with `tar --zstd -xf FILE -C ~/.local/state/sysmon`"},
+                        "--force": {"type": "flag", "description": "with --export: replace an existing file"},
+                        "--clear": {"type": "flag", "description": "delete the whole history (hourly files, rollups, archive days; nothing else in the directory, nothing outside it). Refused without --yes"},
+                        "--yes": {"type": "flag", "description": "confirms --clear"},
+                        "--pack": {"type": "flag", "description": "pack every sealed hour into the archive now, instead of when its day leaves the hot window"},
                         "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "store_ops": {
+                        "info": "result {op, store: {dir, bytes, files, hot_bytes, hot_files, archive_bytes, archive_days, oldest_ts?, newest_ts?, cadence_seconds?, packed_bytes_per_sample?, packed_basis?: archive|estimate}, growth: {cadence_seconds, bytes_per_sample, per_month_bytes, per_year_bytes, basis} | null, limits: {hot_seconds, keep_seconds | null, max_bytes | null}, recorder, warn_bytes, text}",
+                        "export": "result {op, export: {path, files, source_bytes, bytes, oldest_ts?, newest_ts?}, text}; exit 3 if the file exists (no --force) or lies inside the history directory",
+                        "clear": "result {op, cleared: {dir, removed_files, removed_bytes, left_unknown}, by: cli|recorder|files, text}; exit 3 without --yes (the error names what would go)",
+                        "pack": "result {op, packed: {packed_hours, packed_days, packed_from_bytes, archive_written_bytes, rollups_built, torn_lines, removed_by_keep, removed_by_cap, removed_bytes, cancelled, problems?}, store, by, text}",
                     },
                     "result": {
                         "type": "object",
                         "additionalProperties": false,
-                        "required": ["section", "from_ts", "to_ts", "range_seconds", "samples", "covered_seconds", "timeline_block_seconds", "metrics", "skipped_lines", "store", "recorder", "text"],
+                        "required": ["section", "from_ts", "to_ts", "range_seconds", "samples", "covered_seconds", "timeline_block_seconds", "metrics", "skipped_lines", "rollup_hours", "store", "recorder", "text"],
                         "properties": {
                             "section": {"type": "string"},
                             "from_ts | to_ts": {"type": "number", "description": "the range asked for, unix seconds"},
@@ -622,14 +898,15 @@ fn build_schema() -> Value {
                             "metrics": {"type": "array", "description": "[{key (`<section>.<reading>_<unit>`, e.g. gpu.vram_used_bytes, sensors.k10temp Tctl_celsius), label, unit (percent|bytes|bps|celsius|watts|mhz|rpm|load), samples, min, avg, p95, max, latest, total_bytes? (rates: bytes moved over the range), ceiling? (100 for a percent, the card/RAM size for memory), timeline: [mean per block | null where nothing was recorded]}]. min/avg/max/latest exact; p95 from a log-bucket sketch, within 0.5% of the exact nearest-rank p95"},
                             "gpu_processes": {"type": "array", "description": "[{name, pids[], samples, present_percent, vram_avg_bytes, vram_p95_bytes, vram_max_bytes, busy_avg_percent, busy_p95_percent, busy_max_percent, gtt_max_bytes}] — programs grouped by name per sample, biggest peak VRAM first. A buffer two programs share counts in both"},
                             "skipped_lines": {"type": "integer", "description": "unreadable lines on disk (a torn tail after a crash), reported rather than hidden"},
-                            "store": {"type": "object", "description": "{dir, bytes, files, oldest_ts?, newest_ts?} — the whole history on disk"},
+                            "rollup_hours": {"type": "integer", "description": "hours merged whole from their rollups instead of read record by record (0 with --raw); the numbers are the same either way"},
+                            "store": {"type": "object", "description": "the whole history on disk: as `store` in store_ops.info"},
                             "recorder": {"type": ["string", "null"], "description": "who writes the history right now (\"pid 4242 gui\"), null when nothing records"},
                             "hint": {"type": "string", "description": "present when the range holds no samples"},
                             "text": {"type": "string", "description": "the plain-text summary; with --specs, byte-for-byte a pop-out's copy (the clipboard)"},
                         },
                     },
                     "exits": [0, 2, 3, 4],
-                    "exit_2": "no history on disk at all (nothing has recorded yet); the fix names how to start recording",
+                    "exit_2": "no history on disk at all (nothing has recorded yet); the fix names how to start recording. --clear/--pack: a recorder holds the lock and could not act (an older SysMon, or a paused window)",
                 });
     json!({
         "status": "ok",
@@ -749,7 +1026,7 @@ fn build_schema() -> Value {
                                                       "pid": {"type": "integer"},
                                                       "version": {"type": "string"},
                                                       "mode": {"enum": ["gui", "serve"]},
-                                                      "history": {"type": "object", "description": "the usage history recorder: {recording, dir, bytes, oldest_ts?, retention_seconds, max_bytes, problem?}. GUI always; serve only with --record"},
+                                                      "history": {"type": "object", "description": "the usage history recorder: {recording, dir, bytes, hot_bytes, archive_bytes, archive_days, oldest_ts?, newest_ts?, hot_seconds, keep_seconds (null: forever), max_bytes (null: no cap), growth?: {cadence_seconds, bytes_per_sample, per_month_bytes, per_year_bytes, basis}, packing, problem?, warning? (past 1 GB with no cap)}. GUI always; serve only with --record"},
                                                       "renderer": {"type": "string", "description": "GUI only: the adapter the window renders on"},
                                                       "renderer_hint": {"type": "string", "description": "present only when degraded to a CPU rasterizer — the fix"},
                                                   }}},

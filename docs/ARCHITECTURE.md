@@ -59,16 +59,25 @@ src/collect/gpu.rs     amdgpu sysfs card metrics + per-process DRM fdinfo
                        drifting drm-memory-vram; negative cache so non-GPU
                        pids are re-checked every 5th sample)
 src/collect/sensors.rs hwmon walk + /sys/class/power_supply battery
-src/history/           usage history on disk (3.4). mod.rs: HistoryRecord,
-                       one compact line per sample, from a snapshot.
+src/history/           usage history on disk (3.4; two tiers 3.5). mod.rs:
+                       HistoryRecord, one compact line per sample.
                        store.rs: Recorder (one writer, flock'd .lock that
                        names it; hourly UTC files, a finished hour gzipped;
-                       pruned by age then by a byte cap) and Recording (lock-
-                       free reader, torn lines counted). summary.rs: a range
+                       a background pass at nice 19 builds hour rollups,
+                       packs whole days past the hot window into the
+                       archive, and applies the opt-in keep / cap; clear).
+                       archive.rs: archive/<day>.jsonl.zst (index + rollups
+                       in skippable frames, one zstd-19 frame per hour,
+                       verified before any source is removed). rollup.rs:
+                       an hour condensed (mergeable stats + sketch +
+                       programs + gaps). read.rs: Recording (lock-free
+                       reader over both tiers, dedup by ts, torn lines
+                       counted), summarize_dir (rollups where exact),
+                       StoreInfo + growth. summary.rs: Summarizer, a range
                        → min/avg/p95/max/timeline per reading + the GPU's
-                       programs, streaming (p95 from a 1% log-bucket sketch).
-                       text.rs: the shared plain text (copy buttons and
-                       `sysmon history`)
+                       programs, streaming, from records or rollups.
+                       manage.rs: export (.tar.zst) and clear (store-named
+                       files only). text.rs: the shared plain text
 tests/                 parsers (fixtures), accuracy (live cross-checks),
                        live_smoke, live_icons, live_net_attribution
 ```
@@ -176,7 +185,14 @@ sysmon-sampler         loops at the user interval; Sampler::sample →
 sysmon-copy            one per copy click: reads specs (+ history range),
                        hands the text back to a frame for the clipboard
 sysmon-history         `serve --record` only: its own sampler at its own
-                       cadence, one record per sample
+                       cadence, one record per sample; answers the history
+                       desk (clear / pack) between samples, as the GUI's
+                       sampler does
+sysmon-history-pack    one at a time, owned by the Recorder: rollups, the
+                       day packing, keep / cap; at nice 19 (per-thread
+                       setpriority), cancelled between hours on drop
+sysmon-export          the menu's Export…: writes the .tar.zst off the UI
+                       thread
 sysmon-ctl-accept      control.rs accept loop → per-connection threads
 sysmon-ctl-conn (×N)   read verb line → dispatch → write envelope;
                        subscribe loops sample-write-sleep

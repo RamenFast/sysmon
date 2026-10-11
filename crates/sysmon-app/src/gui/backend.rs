@@ -114,6 +114,19 @@ impl Backend for GuiBackend {
         Ok(self.filtered_snapshot(wants))
     }
 
+    fn history_op(&self, arguments: &Value) -> Result<Value, VerbError> {
+        let op = crate::history_desk::HistoryOp::from_request(arguments)?;
+        if self.shared.paused.load(Ordering::Relaxed) {
+            // The sampler thread answers between samples; paused, it
+            // takes none.
+            return Err(VerbError::unavailable(
+                "the window is paused, so its recorder is not taking requests",
+                "resume it (`sysmon ctl resume`), then try again",
+            ));
+        }
+        self.shared.history_desk.ask(op, Duration::from_secs(600))
+    }
+
     fn set_paused(&self, paused: bool) -> Result<Value, VerbError> {
         self.shared.paused.store(paused, Ordering::Relaxed);
         if let Some(ctx) = self.ctx.get() {
