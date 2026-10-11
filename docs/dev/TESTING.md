@@ -11,7 +11,7 @@ as fixture (a monitor passing only synthetic data proves nothing).
 | live probes (smoke, icons, net attribution) | `cargo test -p sysmon-core --test live_smoke --test live_icons --test live_net_attribution` | live box; net test wants WAN + skips offline |
 | UI interactions | `cargo test -p sysmon-app --test ui_kittest` | GPU or lavapipe (wgpu) |
 | full e2e | `scripts/e2e.sh out/ target/release/sysmon` | Xvfb, openbox, xdotool, imagemagick, jq, xclip |
-| history at scale (ignored) | `cargo test --release -p sysmon-core --test history_scale -- --ignored --nocapture` | a week at 2 s through the real store: fits the cap, summarizes in seconds |
+| history at scale (ignored) | `cargo test --release -p sysmon-core --test history_scale -- --ignored --nocapture` | a week at 2 s through the real store; a simulated 30-day and 1-year store (hot week + packed archive): `history gpu --since 30d` timed with and without rollups, which must agree (~8 min, writes ~1 GB of scratch) |
 
 `cargo test` runs everything but the e2e script. All 41 green is the
 resting state.
@@ -78,6 +78,14 @@ the law for release screenshots).
   (settings writes!), `XDG_RUNTIME_DIR` (socket ownership!) and
   `XDG_STATE_HOME` (the usage history the window records, 3.4+).
   A ctl theme test once silently rewrote the user's saved theme.
+  With 3.5's `history --clear` a stray real `XDG_STATE_HOME` would
+  delete Ben's history: never run it without a scratch one.
+- **The real history has a live writer** (the `sysmon-record` user
+  service, `serve --record`). A window launched against the real
+  state dir takes the writer lock over and the service stands by
+  (3.5); before 3.5 the service exited for good and recording
+  stopped. To exercise packing on real data, copy the directory to
+  a scratch `XDG_STATE_HOME` and run `sysmon history --pack` there.
 - **Clicking a pop-out's row**: xdotool's window geometry is the
   frame's; take the client origin from `xwininfo` ("Absolute
   upper-left"). The copy button is at client (49, 17), the range

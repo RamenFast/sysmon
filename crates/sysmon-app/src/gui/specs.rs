@@ -15,7 +15,8 @@
 //!   the moment of the click stand in for them.
 //!
 //! Specs take ~0.1–0.2 s here (helpers bounded at 3 s); an hour of
-//! history ~10 ms, a week under a second (measured in the 3.4 notes).
+//! history ~10 ms, 30 days or a year well under a second through the
+//! hourly rollups (measured: docs/dev/RECEIPTS.md, 3.5).
 //! Either way the window keeps drawing; the button only answers when
 //! the text is real.
 
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use sysmon_core::history::{self, Recording, text::TextStyle};
+use sysmon_core::history::{self, text::TextStyle};
 use sysmon_core::snapshot::SystemSnapshot;
 use sysmon_core::specs;
 use sysmon_core::units::{TemperatureScale, format_temperature_in};
@@ -97,9 +98,9 @@ impl CopyJob {
             return (specs_text, format!("{} copied", self.title));
         };
         let from = now_ts - part.range_seconds;
-        let summary = history::summarize(part.section, from, now_ts, history::summary::TIMELINE_BUCKETS, |sink| {
-            Recording::for_each(&part.dir, from, now_ts, sink).skipped_lines
-        });
+        // Both tiers; sealed hours merge from their rollups, so a year
+        // copies in about the time a week used to.
+        let summary = history::summarize_dir(&part.dir, part.section, from, now_ts, history::summary::TIMELINE_BUCKETS, true);
         let text = history::text::section_report(&self.title, Some(&specs_text), &summary, part.style);
         let range = history::text::range_label(part.range_seconds);
         let what = if matches!(self.specs, SpecsPart::Text(_)) { "readings" } else { "specs" };
@@ -230,7 +231,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sysmon-copyjob-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = 1_791_690_000.0;
-        let mut recorder = Recorder::open(&dir, Limits::new(1e9, 1 << 30), "test").unwrap();
+        let mut recorder = Recorder::open(&dir, Limits::new(1e9, None, None), "test").unwrap();
         for i in 0..30 {
             recorder
                 .record(&HistoryRecord {

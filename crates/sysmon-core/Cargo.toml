@@ -12,3 +12,6 @@ serde_json = { workspace = true }
 libc = { workspace = true }
 # gzip for sealed history hours; already in the tree via png/image
 flate2 = { workspace = true }
+# packed archive days + export (3.5)
+zstd = { workspace = true }
+tar = { workspace = true }

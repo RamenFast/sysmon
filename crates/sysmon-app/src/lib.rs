@@ -21,6 +21,7 @@ pub mod agent;
 pub mod control;
 pub mod envelope;
 pub mod gui;
+pub mod history_desk;
 pub mod serve;
 
 /// The whole CLI: dispatch and exit code. `main` is one line over
@@ -120,6 +121,10 @@ USAGE
     sysmon specs [section]          what this machine is: the shareable spec sheet
     sysmon history [section] [--since 1h] [--specs] [--records]
                                     what it did: usage over a range, from disk
+    sysmon history --info | --export PATH | --clear --yes | --pack
+                                    the history store: size and growth,
+                                    a .tar.zst backup, delete it all,
+                                    pack sealed hours now
     sysmon schema                   machine-readable map of all of the above
     sysmon --version                print the version
 

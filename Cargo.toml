@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "3.4.0"
+version = "3.5.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/RamenFast/sysmon"
@@ -15,9 +15,17 @@ repository = "https://github.com/RamenFast/sysmon"
 [workspace.dependencies]
 sysmon-core = { path = "crates/sysmon-core" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: parse a float back to the exact f64 that was written
+# (the default parser can land 1 ULP off, which made a history reading
+# read back as 99.94000244140624 where 99.94000244140625 was recorded).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 libc = "0.2"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# The history archive (3.5): zstd for the packed days and the export,
+# tar for the export's container. zstd builds libzstd statically (cc);
+# tar without xattr (exports carry plain files).
+zstd = { version = "0.13", default-features = false }
+tar = { version = "0.4", default-features = false }
 # egui 0.33 ↔ wgpu 27 ↔ winit 0.30: the compatible set phosphor ships on
 # this machine — bump all together, never singly. The direct wgpu dep
 # exists to switch its BACKEND features on (eframe's "wgpu" feature

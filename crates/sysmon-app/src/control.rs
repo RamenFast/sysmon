@@ -94,6 +94,22 @@ pub trait Backend: Send + Sync {
         ))
     }
     fn request_quit(&self);
+    /// `quit` with its request: a window taking the socket over sends
+    /// `takeover_pid`, which a recording serve uses to stand by instead
+    /// of exiting.
+    fn request_quit_from(&self, request: &Value) {
+        let _ = request;
+        self.request_quit();
+    }
+    /// `history` (clear / pack): only an instance that is recording
+    /// can act, through its recorder's own thread.
+    fn history_op(&self, arguments: &Value) -> Result<Value, VerbError> {
+        let _ = arguments;
+        Err(VerbError::unavailable(
+            "this instance is not recording history",
+            "with no recorder holding the lock, `sysmon history --clear --yes` acts on the files itself",
+        ))
+    }
 }
 
 pub fn socket_directory() -> PathBuf {
@@ -229,7 +245,7 @@ fn handle_connection(stream: UnixStream, backend: Arc<dyn Backend>, shutdown: Ar
             return;
         }
         if done {
-            backend.request_quit();
+            backend.request_quit_from(&request);
             return;
         }
     }
@@ -263,11 +279,12 @@ fn dispatch(verb: &str, request: &Value, backend: &Arc<dyn Backend>) -> Value {
             )),
         },
         "quit" => Ok(json!({"quitting": true})),
+        "history" => backend.history_op(request),
         "raise" | "page" | "theme" | "palette" | "popout" | "popin" | "shot" | "compact"
         | "units" | "temperature" | "cpugraph" => backend.gui_verb(verb, request),
         other => Err(VerbError::bad_args(
             format!("unknown verb `{other}`"),
-            "verbs: status snapshot subscribe pause resume interval quit raise page theme \
+            "verbs: status snapshot subscribe pause resume interval quit history raise page theme \
              palette popout popin shot compact units temperature cpugraph",
         )),
     };
@@ -355,11 +372,17 @@ fn wants_from_request(request: &Value) -> Result<Wants, VerbError> {
 
 /// One request/reply on an already-connected stream.
 pub fn request_on(stream: UnixStream, request: &Value) -> Option<Value> {
+    request_on_waiting(stream, request, Duration::from_secs(5))
+}
+
+/// The same, waiting up to `wait` for the reply (a history pack on the
+/// recorder's thread can take a while).
+pub fn request_on_waiting(stream: UnixStream, request: &Value, wait: Duration) -> Option<Value> {
     let mut writer = stream.try_clone().ok()?;
     writer
         .set_write_timeout(Some(Duration::from_secs(2)))
         .ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
     writeln!(writer, "{request}").ok()?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();

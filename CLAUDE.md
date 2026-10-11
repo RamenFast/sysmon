@@ -53,6 +53,12 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
   real usage history (the window records it by default since 3.4). Never map a
   window on the user's real display; use Xvfb (`scripts/e2e.sh`
   shows the pattern).
+- **History law** (3.5): nothing deletes recorded history unless the
+  user asked (a keep, a size cap, Clear…). Packing is lossless and
+  verified before a source goes. `--clear` and the manage module touch
+  only the store's own file names inside its directory. Ben's real
+  history runs under a `sysmon-record` systemd user service; test on a
+  copy (`cp -a ~/.local/state/sysmon/history $scratch/sysmon/`).
 - **v1 compatibility**: `~/.config/sysmon/settings.json` must keep
   loading v1-era files (no `settings_version` key ⇒ v1; its
   `"blossom"` theme means the AMOLED look → `amoled`). Tests:
@@ -88,7 +94,8 @@ packaging/build-deb.sh && packaging/build-rpm.sh  # → packaging/dist/ (gitigno
 - Wire field names carry units (`_bytes`, `_bps`, `_percent`,
   `_celsius`, `_mhz`, `_seconds`). New snapshot fields need:
   `snapshot.rs` + `sysmon schema` + `docs/API.md`. A reading worth a
-  timeline also goes in `history::HistoryRecord` (+ `summary.rs`).
+  timeline also goes in `history::HistoryRecord` (+ `summary.rs::visit`,
+  which feeds both the summary and the hour rollups).
 - Per-process GPU memory comes from fdinfo `drm-total-vram −
   amd-evicted-vram`, never `drm-memory-vram` (drifts to terabytes on
   kernel 7.2; seam #196). fdinfo sizes carry units: parse them.

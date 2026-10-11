@@ -5,19 +5,31 @@
 //!
 //! One compact JSON line per sample ([`HistoryRecord`]), only the
 //! readings worth a timeline: CPU, memory, GPU (and the processes
-//! holding it), network, disks, temperatures and fans. Files are one
-//! UTC hour each under `$XDG_STATE_HOME/sysmon/history/`; a finished
-//! hour is gzipped, and the store is pruned by age *and* by a byte cap
-//! (`store.rs`), so it can never grow past what the user allowed.
+//! holding it), network, disks, temperatures and fans, under
+//! `$XDG_STATE_HOME/sysmon/history/`, in two tiers (3.5):
+//!
+//! - **hot**: one file per UTC hour, gzipped when the hour ends, for
+//!   the last 7 days (configurable);
+//! - **archive**: whole days older than that, repacked losslessly into
+//!   one zstd file per day, ~27% smaller than gzip (33× smaller than
+//!   the raw lines), kept until the user removes them. Nothing is deleted by age or size unless the user sets a
+//!   limit (`store.rs`).
 //!
 //! One writer at a time: the recorder holds an exclusive `flock` on
 //! the directory's `.lock`, so two SysMon windows never interleave
-//! lines. Readers need no lock (they skip a torn last line).
+//! lines, and only the writer packs. Readers need no lock (they skip a
+//! torn last line, and read an hour from whichever tier holds it).
 //!
 //! `summary.rs` turns a time range into min/avg/p95/max plus a compact
-//! timeline per reading; `text.rs` writes that as the plain text the
+//! timeline per reading; `rollup.rs` condenses each sealed hour so a
+//! month or a year summarizes fast; `read.rs` reads both tiers;
+//! `manage.rs` exports and clears; `text.rs` writes the plain text the
 //! copy buttons and `sysmon history` share.
 
+pub mod archive;
+pub mod manage;
+pub mod read;
+pub mod rollup;
 pub mod store;
 pub mod summary;
 pub mod text;
@@ -28,7 +40,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::snapshot::{SensorKind, SystemSnapshot};
 
-pub use store::{Limits, OpenError, Recorder, Recording, RecordingStatus, StoreInfo};
+pub use manage::{ClearReport, ExportReport};
+pub use read::{Growth, ReadStats, Recording, StoreInfo, growth, summarize_dir};
+pub use store::{Limits, MaintenanceReport, OpenError, PackScope, Recorder, RecordingStatus};
 pub use summary::{GpuProcessSummary, MetricSummary, Summary, summarize};
 
 /// Section names `sysmon history` and the copy buttons accept. They are

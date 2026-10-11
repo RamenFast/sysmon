@@ -452,11 +452,63 @@ fn history_records_with_serve_and_answers_every_shape() {
         (vec!["history", "--since", "1h", "--until", "2h"], 3),
         (vec!["history", "--specs"], 3),
         (vec!["history", "gpu", "cpu"], 3),
+        (vec!["history", "--clear"], 3),
+        (vec!["history", "--export"], 3),
+        (vec!["history", "--info", "--pack"], 3),
+        (vec!["history", "gpu", "--info"], 3),
+        (vec!["history", "--yes"], 3),
     ] {
         let (reply, code) = sandbox.run(&arguments);
         assert_eq!(code, expected, "{arguments:?} → {reply}");
         assert!(!reply["fix"].as_str().unwrap_or("").is_empty(), "{arguments:?} carried no fix");
     }
+
+    // 3.5: --info, --pack, --export, then --clear, with no recorder.
+    let (reply, code) = sandbox.run(&["history", "--info"]);
+    assert_eq!(code, 0, "{reply}");
+    assert!(reply["result"]["store"]["hot_files"].as_u64().unwrap() >= 1, "{reply}");
+    assert_eq!(reply["result"]["limits"]["keep_seconds"], Value::Null, "keep forever by default: {reply}");
+    assert_eq!(reply["result"]["limits"]["max_bytes"], Value::Null, "no cap by default: {reply}");
+    let (reply, code) = sandbox.run(&["history", "--pack"]);
+    assert_eq!(code, 0, "{reply}");
+    assert_eq!(reply["result"]["by"], "cli");
+    let export = sandbox.config_path.join("backup.tar.zst");
+    let (reply, code) = sandbox.run(&["history", "--export", export.to_str().unwrap()]);
+    assert_eq!(code, 0, "{reply}");
+    assert!(export.exists() && reply["result"]["export"]["bytes"].as_u64().unwrap() > 0, "{reply}");
+    let (reply, code) = sandbox.run(&["history", "--export", export.to_str().unwrap()]);
+    assert_eq!(code, 3, "an existing file is not replaced without --force: {reply}");
+    let (reply, code) = sandbox.run(&["history", "--clear", "--yes"]);
+    assert_eq!(code, 0, "{reply}");
+    assert!(reply["result"]["cleared"]["removed_files"].as_u64().unwrap() >= 1, "{reply}");
+    let (_, code) = sandbox.run(&["history", "gpu"]);
+    assert_eq!(code, 2, "cleared: nothing left to summarize");
+    assert!(export.exists(), "clear never touches anything outside the history dir");
+
+    // --clear while `serve --record` holds the lock: routed to the
+    // recorder over the socket, and it keeps recording after.
+    let mut serve = Command::new(binary())
+        .args(["serve", "--record", "--interval", "0.5"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", &state)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("serve --record");
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    let (reply, code) = sandbox.run(&["history", "--clear", "--yes"]);
+    let (packed, pack_code) = sandbox.run(&["history", "--pack"]);
+    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    let (after, after_code) = sandbox.run(&["history", "gpu", "--since", "5m"]);
+    let _ = Command::new(binary()).args(["ctl", "quit"]).env("XDG_RUNTIME_DIR", &sandbox.runtime_path).output();
+    let _ = serve.wait();
+    assert_eq!(code, 0, "{reply}");
+    assert_eq!(reply["result"]["by"], "recorder", "the recorder cleared its own store: {reply}");
+    assert_eq!(pack_code, 0, "{packed}");
+    assert_eq!(packed["result"]["by"], "recorder", "{packed}");
+    assert_eq!(after_code, 0, "{after}");
+    let samples = after["result"]["samples"].as_u64().unwrap();
+    assert!((1..=6).contains(&samples), "recording carried on from the clear, nothing older: {samples}");
 }
 
 /// The exits each verb publishes must be the ones it can produce.
@@ -885,6 +937,78 @@ fn background_mode_starts_and_quits_cleanly_from_a_wayland_session() {
         status.success(),
         "--background exited {status:?} on quit: {stderr}"
     );
+}
+
+/// 3.5: the headless recorder (`serve --record`, Ben's systemd user
+/// service) hands the history to a window and takes it back when the
+/// window closes. Before, the window's takeover ended serve for good
+/// and recording stopped until someone restarted it. The window runs
+/// on a private Xvfb display (`--background`), never a real screen.
+#[test]
+fn a_recording_serve_stands_by_for_a_window_and_resumes() {
+    if Command::new("xvfb-run").arg("--help").output().is_err() {
+        eprintln!("xvfb-run not installed — skipping");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let state = sandbox.config_path.join("state");
+    let lock = state.join("sysmon/history/.lock");
+    let holder = || std::fs::read_to_string(&lock).unwrap_or_default();
+    let wait_for = |what: &str, check: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !check() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    let mut serve = Command::new(binary())
+        .args(["serve", "--record", "--interval", "0.5"])
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", &state)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("serve --record");
+    let serve_pid = serve.id();
+    wait_for("serve to record", &|| holder().contains(&format!("pid {serve_pid} serve")));
+
+    let mut command = Command::new(binary());
+    command
+        .arg("--background")
+        .env("XDG_RUNTIME_DIR", &sandbox.runtime_path)
+        .env("XDG_CONFIG_HOME", &sandbox.config_path)
+        .env("XDG_STATE_HOME", &state)
+        .env_remove("WAYLAND_DISPLAY")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut gui = GroupGuard::spawn(command);
+    wait_for("the window to take the history", &|| holder().ends_with("gui\n"));
+    assert!(serve.try_wait().unwrap().is_none(), "serve stands by instead of exiting");
+    let (status, _) = sandbox.run(&["ctl", "status"]);
+    assert_eq!(status["result"]["mode"], "gui", "{status}");
+
+    let (_, code) = sandbox.run(&["ctl", "quit"]);
+    assert_eq!(code, 0);
+    let _ = gui.child.wait();
+    wait_for("serve to record again", &|| holder().contains(&format!("pid {serve_pid} serve")));
+    let (status, _) = sandbox.run(&["ctl", "status"]);
+    assert_eq!(status["result"]["mode"], "serve", "serve owns the socket again: {status}");
+    assert_eq!(status["result"]["history"]["recording"], true, "{status}");
+
+    // A plain `ctl quit` still ends it.
+    let (_, code) = sandbox.run(&["ctl", "quit"]);
+    assert_eq!(code, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut exited = None;
+    while exited.is_none() && std::time::Instant::now() < deadline {
+        exited = serve.try_wait().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if exited.is_none() {
+        let _ = serve.kill();
+    }
+    assert!(exited.is_some_and(|s| s.success()), "ctl quit ends a recording serve: {exited:?}");
 }
 
 /// `--background` forks xvfb-run → Xvfb + the GUI. A failing test that

@@ -281,7 +281,10 @@ fn ui_interactions_end_to_end() {
     }
     let section_copy = section_copy.expect("a card's copy sent CopyText within 10 s");
     assert!(section_copy.contains(" · Memory\n\n"), "titled by its section:\n{section_copy}");
-    assert!(section_copy.contains("Usage · last 1 h · "), "the default range is 1 h:\n{section_copy}");
+    // 3.5: the range is capped at what is on disk (floored at 5 min),
+    // so a history seconds old copies "last 5 min"; the 1 h default
+    // applies once an hour exists.
+    assert!(section_copy.contains("Usage · last 5 min · "), "a young history copies what exists:\n{section_copy}");
     assert!(
         section_copy.lines().any(|l| l.starts_with("RAM used ")),
         "the memory usage table is there:\n{section_copy}"
@@ -367,12 +370,66 @@ fn ui_interactions_end_to_end() {
     harness.run_steps(8);
     harness.get_by_label("30 d").click();
     harness.run_steps(8);
-    assert_eq!(harness.state().settings.history_retention_hours, 720.0, "retention chip applies");
+    assert_eq!(harness.state().settings.history_hot_hours, 720.0, "hourly-window chip applies");
     assert_eq!(
-        harness.state().shared().history.lock().unwrap().limits.retention_seconds,
+        harness.state().shared().history.lock().unwrap().limits.hot_seconds,
         720.0 * 3_600.0,
         "and reaches the recorder"
     );
+    // 3.5: keep forever and no cap are the defaults, and say so.
+    {
+        let limits = harness.state().shared().history.lock().unwrap().limits;
+        assert_eq!((limits.keep_seconds, limits.max_bytes), (None, None), "nothing is deleted by default");
+    }
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    harness.get_by_label("1 y").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().settings.history_keep_days, 365.0, "keep chip applies");
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    harness.get_by_label("forever").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().settings.history_keep_days, 0.0, "back to forever");
+
+    // Clear… asks first; Cancel keeps everything, Delete history clears
+    // the scratch history through the recorder.
+    let mut on_disk = 0;
+    sysmon_core::history::Recording::for_each(&scratch.join("state/sysmon/history"), 0.0, f64::MAX, |_| on_disk += 1);
+    assert!(on_disk > 0, "the window has recorded into the scratch dir");
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    // The menu scrolls (it is taller than a 780 px window): bring the
+    // button into view the way a screen reader would, then click it.
+    harness.get_by_label("Clear…").scroll_to_me();
+    harness.run_steps(8);
+    harness.get_by_label("Clear…").click();
+    harness.run_steps(8);
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(8);
+    let mut still = 0;
+    sysmon_core::history::Recording::for_each(&scratch.join("state/sysmon/history"), 0.0, f64::MAX, |_| still += 1);
+    assert!(still >= on_disk, "Cancel removed nothing");
+    harness.get_by_label("Display options").click();
+    harness.run_steps(8);
+    harness.get_by_label("Clear…").scroll_to_me();
+    harness.run_steps(8);
+    harness.get_by_label("Clear…").click();
+    harness.run_steps(8);
+    let clicked_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    harness.get_by_label("Delete history").click();
+    let waited = std::time::Instant::now();
+    let mut cleared = false;
+    while !cleared && waited.elapsed() < std::time::Duration::from_secs(10) {
+        harness.run_steps(4);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let history = scratch.join("state/sysmon/history");
+        // Everything recorded before the click is gone; a sample taken
+        // just before it may land just after (the sampler runs at 0.5 s).
+        let oldest = sysmon_core::history::Recording::oldest_ts(&history);
+        cleared = oldest.is_none_or(|oldest| oldest > clicked_at - 2.0);
+    }
+    assert!(cleared, "Delete history cleared the scratch history (recording carries on after)");
 
     // ---- compact mode through the menu -------------------------------
     harness.get_by_label("Display options").click();

@@ -121,8 +121,12 @@ slider picks: `sysmon history <section> --specs` prints the same text.
 ```bash
 sysmon history gpu --since 2h            # GPU over the last 2 h: min/avg/p95/max, timeline, programs
 sysmon history --since 7d --json | jq '.result.metrics[] | {key, max}'
+sysmon history gpu --since 1y            # as far back as it goes: the archive reads like the rest
 sysmon history gpu --specs --json | jq -j .result.text   # byte-for-byte a GPU pop-out's copy
 sysmon history gpu --since 30m --records | jq -c '{ts, busy: .gpu.busy_percent}'
+sysmon history --info                    # size per tier, how far back, growth per month and year
+sysmon history --export ~/backup/        # the whole history as one .tar.zst
+sysmon history --clear --yes             # delete it all (refused without --yes)
 ```
 
 `probe` is now; `history` is the past. SysMon records one line per
@@ -144,15 +148,56 @@ the card: peak, p95 and average VRAM, average and peak busy share, and
 how much of the range it was present for. That answers "how much did
 the game use while the model stayed loaded".
 
-Storage: one file per UTC hour under `$XDG_STATE_HOME/sysmon/history/`
-(default `~/.local/state/sysmon/history/`); a finished hour is gzipped.
-Measured here (24 temperatures, 8 fans, 5 disks, 10 GPU programs), a
-sample is 3.4 KB while its hour is open and 162 B once sealed, so a
-week at the 2 s default is about 49 MB. Two limits are kept: an age (default 7 days)
-and a size cap (default 256 MB, oldest hours first). One process
-writes at a time, through a lock file that names it (`result.recorder`).
-Readers need no lock and skip a torn last line, counted in
-`skipped_lines`.
+Storage (3.5): two tiers under `$XDG_STATE_HOME/sysmon/history/`
+(default `~/.local/state/sysmon/history/`), read as one.
+
+- **Hourly**: one file per UTC hour, gzipped when the hour ends, plus a
+  small `<hour>.rollup.zst` (the hour condensed, see below). Hours
+  stay hourly for 7 days (☰ → Usage history → *hourly for*).
+- **Archive**: once a whole UTC day is older than that, its hours are
+  repacked, losslessly, into `archive/<day>.jsonl.zst`: the same JSON
+  lines, oldest first, one zstd frame per hour at level 19, an index
+  and the hours' rollups in zstd skippable frames. `zstd -dc
+  archive/2026-10-03.jsonl.zst` prints the day's lines with no SysMon
+  needed. The day file is decoded back and checked line for line
+  before any hourly file is removed.
+
+**Nothing is deleted by age or size by default.** *keep* (forever, 1 y,
+90 d) and *size cap* (none, 1, 4, 16 GB) are opt-in; past 1 GB with no
+cap `status.history.warning` (and the menu) says so instead.
+
+Measured on this machine's real recording (24 temperatures, 8 fans, 5
+disks, 10 GPU programs; 2,781 samples over 4.6 hours, idle and
+gaming): a raw line is 3.4 KB; the gzip-sealed hours averaged 141 B a
+sample; the packed day file 103 B a sample (hour frames 94 B, rollups
+8.4 B, index 0.3 B), 33× smaller than the raw lines and 27% smaller
+than gzip. At the 5 s cadence Ben runs that is ~54 MB a month, ~650 MB
+a year; at the 2 s default ~135 MB a month, ~1.6 GB a year. The hot
+week adds ~18 MB at 5 s. `sysmon history --info`
+prints the projection from the newest archived day (or, before one
+exists, an estimate from the newest sealed hour).
+
+Rollups make long ranges fast: each sealed hour's readings are kept
+condensed (exact count, sum, min, max, latest, bytes moved, and the
+p95 sketch, plus the GPU programs and the sample gaps), and a summary
+merges an hour whole when it lies inside the range and inside one
+timeline block. The numbers are identical to reading every record
+(`--raw` does that, as a check; `rollup_hours` says how many hours were
+merged). Rollups are derived data, ~4% of the archive, rebuilt from
+the raw lines whenever one is missing or stale.
+
+One process writes at a time, through a lock file that names it
+(`result.recorder`); packing runs on that writer's own background
+thread at nice 19. Readers need no lock and skip a torn last line,
+counted in `skipped_lines`. `--clear` and `--pack` take the lock when
+it is free; when a recorder holds it they ask it over the socket
+(`{"verb":"history","op":"clear","yes":true}` or `"op":"pack"`), and it
+acts between two samples. Clearing removes only the store's own files
+(hourly files, rollups, archive days, its temp files); anything else
+in the directory is left and counted, and nothing outside it is
+touched. An export is laid out to restore with
+`tar --zstd -xf FILE -C ~/.local/state/sysmon` (stop the recorder
+first).
 
 ## Per-process GPU memory
 

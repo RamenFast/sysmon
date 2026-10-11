@@ -14,6 +14,7 @@ sysmon - compact system monitor with an agent-drivable API
 *sysmon* serve [--record [--interval _N_]]++
 *sysmon* specs [_section_] [--json]++
 *sysmon* history [_section_] [--since _D_] [--until _D_] [--specs] [--records] [--json]++
+*sysmon* history --info | --export _PATH_ | --clear --yes | --pack++
 *sysmon* schema
 
 # DESCRIPTION
@@ -84,18 +85,34 @@ networking first — without scraping a UI.
 	optional helpers it asks (vulkaninfo, glxinfo, swaymsg, pactl)
 	each run under a 3 s deadline.
 
-*history* [_section_] [--since _D_] [--until _D_] [--specs] [--records] [--blocks _N_] [--json]
+*history* [_section_] [--since _D_] [--until _D_] [--specs] [--records] [--blocks _N_] [--raw] [--json]
 	What the machine did over a time range, from the usage history
-	SysMon keeps on disk while its window (or *serve --record*) runs.
-	Per reading: min, avg, p95, max and a timeline; for the GPU, every
-	program that held it with its peak and average VRAM and busy
-	share. Times read as _90s_, _15m_, _2h_, _7d_, plain seconds, or a
-	unix time; *--since* defaults to 1 h. *--specs* puts the section's
-	specs above the usage, exactly what its pop-out's copy button
-	copies. *--records* prints every raw record in the range as NDJSON
-	instead. A timeline block with no samples is blank (JSON: null),
-	never zero. Sections: *all cpu memory gpu network disks sensors*.
-	Exits 2 when no history exists yet.
+	SysMon keeps on disk while its window (or *serve --record*) runs,
+	the hourly files and the packed archive read as one. Per reading:
+	min, avg, p95, max and a timeline; for the GPU, every program that
+	held it with its peak and average VRAM and busy share. Times read
+	as _90s_, _15m_, _2h_, _7d_, _1y_, plain seconds, or a unix time;
+	*--since* defaults to 1 h. *--specs* puts the section's specs above
+	the usage, exactly what its pop-out's copy button copies.
+	*--records* prints every raw record in the range as NDJSON instead.
+	*--raw* reads every record instead of merging sealed hours from
+	their rollups (same numbers; a check). A timeline block with no
+	samples is blank (JSON: null), never zero. Sections: *all cpu
+	memory gpu network disks sensors*. Exits 2 when no history exists
+	yet.
+
+*history* --info | --export _PATH_ [--force] | --clear --yes | --pack
+	The store itself. *--info*: size per tier, how far back it goes,
+	and its growth per month and per year at the cadence being
+	recorded. *--export*: the whole history as one _.tar.zst_ (a file,
+	or a directory for _sysmon-history-<date>.tar.zst_); an existing
+	file is replaced only with *--force*. Restore with *tar --zstd -xf*
+	_FILE_ *-C ~/.local/state/sysmon* after stopping the recorder.
+	*--clear --yes*: delete the whole history (refused without
+	*--yes*); only the store's own files go, nothing outside its
+	directory. *--pack*: pack every sealed hour into the archive now.
+	When a recorder holds the history, *--clear* and *--pack* ask it to
+	act, between two samples.
 
 *schema*
 	The machine-readable map of every command, section, field, and
@@ -133,10 +150,12 @@ _~/.config/sysmon/settings.json_
 	Preferences (v1 files are read and migrated in place).
 
 _~/.local/state/sysmon/history/_ (_$XDG_STATE_HOME_)
-	Usage history: one file per UTC hour, a finished hour gzipped
-	(~200 bytes a sample). Kept for 7 days and at most 256 MB by
-	default, the oldest hours removed first; both limits are in
-	Display options → Usage history. _.lock_ names the one writer.
+	Usage history. The last 7 days as one file per UTC hour (gzipped
+	when the hour ends, ~140 bytes a sample) with a small rollup each;
+	older days packed losslessly into _archive/<day>.jsonl.zst_ (~100
+	bytes a sample, readable with *zstd -dc*). Nothing is deleted by
+	age or size unless a keep or a size cap is set in Display options
+	→ Usage history. _.lock_ names the one writer.
 
 # EXAMPLES
 
@@ -157,6 +176,10 @@ How much GPU and VRAM each program used over the last two hours:
 
 The same as the GPU pop-out's copy button, to paste somewhere:
 	sysmon history gpu --specs --json | jq -j .result.text | wl-copy
+
+How big the history is and how fast it grows; then a backup:
+	sysmon history --info
+	sysmon history --export ~/sysmon-history.tar.zst
 
 # AUTHORS
 

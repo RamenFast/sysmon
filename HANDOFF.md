@@ -105,12 +105,24 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
-- **3.4 usage history** (`sysmon_core::history`, `sysmon history`,
-  `serve --record`): records while the window runs, default on, 7 d /
-  256 MB. Ideas: a Performance-page range picker that draws from the
-  disk history (today the graphs keep 150 samples in memory); a
-  `ctl` verb to bookmark a moment ("game started"); per-process CPU
-  and RAM in the record (only GPU programs today).
+- **3.5 long-term history** (`sysmon_core::history`): hourly gzip
+  files for 7 days, then whole days packed losslessly into
+  `archive/<day>.jsonl.zst` (zstd-19 frame per hour, index + rollups
+  in skippable frames, verified before sources go). Nothing is deleted
+  by default; keep (1 y / 90 d) and size cap (1/4/16 GB) are opt-in,
+  and past 1 GB with no cap the status warns. Each sealed hour has a
+  rollup (mergeable stats + sketch), so a year summarizes in ~0.7 s
+  with numbers equal to a record-by-record read (`--raw` checks).
+  Menu: size per tier + growth per month/year, Export… (.tar.zst),
+  Clear… (confirm). CLI: `history --info | --export | --clear --yes |
+  --pack`; a recorder holding the lock does clear/pack itself via the
+  socket `history` verb. `serve --record` now stands by while a window
+  records and resumes when it closes (Ben's `sysmon-record` user
+  service depends on it). Ideas: a Performance-page range picker that
+  draws from the disk history (rollups make it cheap); a `ctl` verb to
+  bookmark a moment ("game started"); per-process CPU and RAM in the
+  record (only GPU programs today); an optional per-minute downsample
+  only if a multi-year view ever needs it (lossless is enough today).
 - **Per-process VRAM** reads `drm-total-vram − amd-evicted-vram`.
   If a future kernel fixes `drm-resident-vram`, prefer it only after
   the accuracy check (Σ unshared ≤ card) proves it.

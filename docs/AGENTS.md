@@ -54,12 +54,15 @@ sysmon history gpu --since 2h       # min/avg/p95/max, a timeline, every program
 sysmon history --since 7d --json | jq '.result.metrics[] | {key, max}'
 sysmon history gpu --specs          # exactly what the GPU pop-out's copy button copies
 sysmon history gpu --since 30m --records   # raw records, NDJSON (event: "history")
+sysmon history --info --json | jq '.result.growth'   # per_month_bytes, per_year_bytes
+sysmon history --export ~/backup/   # one .tar.zst; --clear --yes deletes it all
 ```
 
 SysMon keeps a usage history on disk while its window runs, or while
-`sysmon serve --record` runs headless. `history` reads the files
-directly, so it needs no running instance. Exit 2 means nothing has
-recorded yet. A timeline block that is `null` means nothing was
+`sysmon serve --record` runs headless: hourly files for 7 days, then
+whole days packed losslessly into `archive/`, kept until someone
+removes them (3.5). `history` reads both tiers directly, so it needs
+no running instance. Exit 2 means nothing has recorded yet. A timeline block that is `null` means nothing was
 recording then; `covered_seconds` says how much of the range has data.
 `result.gpu_processes` answers "how much GPU and VRAM did each program
 use": peak and average VRAM, average and peak busy share, and how much

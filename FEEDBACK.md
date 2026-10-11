@@ -59,3 +59,7 @@ Rules:
 - 2026-10-10 [feature] a copy button in each pop-out window that copies its specs plus recent usage history, back as far as settings allow; the copied statistics must be easy to share, accurate and organized
 - 2026-10-10 [feature] a usage-history logging system built into sysmon (sensors, CPU, GPU, …), with a tooling surface Nexus can read ("a tooling surface for you to see")
 - 2026-10-10 [decision] yes to releasing 3.4.0 with these additions
+- 2026-10-10 [ask] how much disk space does the history use, is it a database (should it be), how much CPU/RAM, can it be more performant, can it be backed up / cleared, does it have the slider
+- 2026-10-10 [feature] yes to Clear and Export buttons for the usage history
+- 2026-10-10 [decision] old history must not auto-delete: "id want to see what happens when we keep collecting this info over a long time period, maybe after 7 days it compresses"; worried about SSD bloat and output that is hard to navigate, so the long-term tier must be dense and its growth visible
+- 2026-10-10 [decision] yes to releasing 3.5.0 with the tiered history

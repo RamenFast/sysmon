@@ -120,7 +120,7 @@ SysMon keeps a **usage history** on disk while it runs: CPU, memory,
 GPU (and every program holding it), network, disks, temperatures and
 fans, one line per sample. Each card has its own copy button (in a
 pop-out it sits beside the pin, with a slider for how far back to
-copy, from 5 minutes up to the whole history kept). It copies that
+copy, from 5 minutes up to the oldest record on disk). It copies that
 section's specs and then its usage over that range:
 
 ```
@@ -151,14 +151,27 @@ get its own row with its peak VRAM and busy share.)
 That answers how much of the GPU and its memory a game takes while a
 local model stays loaded. A gap in the recording is a blank in the
 timeline, never a zero. min, avg and max are exact; p95
-is within 0.5%. The history lives in `~/.local/state/sysmon/history/`,
-one file per hour, gzipped once the hour is over. Measured here, a
-sample is 3.4 KB while its hour is open and 162 bytes once sealed, so
-a week at the default 2 s is about 49 MB. It is kept for 7 days and
-at most 256 MB, oldest hours first; both limits are in ☰ → Usage
-history.
+is within 0.5%.
+
+**The history is kept, not rotated away (3.5).** It lives in
+`~/.local/state/sysmon/history/`: the last 7 days as one gzipped file
+per hour, and every older day packed, losslessly, into one
+`archive/<day>.jsonl.zst` (the same lines, about a quarter smaller;
+`zstd -dc` reads it without SysMon). Nothing is deleted by age or size
+unless you set a *keep* or a *size cap* in ☰ → Usage history; past
+1 GB with no cap the menu says so. The menu shows the size on disk,
+both tiers, and the growth per month and per year at your sampling
+rate. Measured on this machine's real recording: 103 bytes a sample
+once packed (3.4 KB raw, 141 B gzipped), so ~54 MB a month (~650 MB a
+year) at a 5 s interval, ~135 MB a month (~1.6 GB a year) at the
+default 2 s.
+**Export…** saves the whole history as one `.tar.zst`; **Clear…**
+deletes it, after showing what goes. The copy slider reaches back to
+the oldest record on disk, and a month or a year summarizes in about
+a second (each sealed hour is also kept condensed, for speed).
 `sysmon history gpu --since 2h` prints the same summary in a terminal,
-and `sysmon serve --record` keeps recording with no window open.
+`sysmon history --info` the store's size and growth, and
+`sysmon serve --record` keeps recording with no window open.
 
 ### Overview
 
@@ -270,10 +283,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.4.0_amd64.deb
+sudo apt install ./sysmon_3.5.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.4.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.5.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -283,7 +296,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.4.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.5.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully. Motherboard fan and voltage
