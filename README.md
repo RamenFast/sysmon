@@ -9,7 +9,7 @@ beside it (`free`, `turbostat`, `mpstat`, `sensors`, `iostat`, `pidstat`,
 `df`, firmware tables) on real hardware, idle, under load and under a
 known disk writer: **66 of 66 agree.**
 
-![the Performance page, wide, per-thread CPU graphs](docs/screenshot-performance-wide.png)
+![the Overview, wide: every CPU thread as its own coloured line](docs/screenshot-overview-wide.png)
 
 Every number the window shows is one command away:
 
@@ -54,37 +54,48 @@ becomes.
 
 ## What it shows
 
-### Performance (the front page)
+### Overview (the front page)
 
-The Windows XP Task Manager's Performance tab, in SysMon's own hand:
-an LED meter beside a scrolling scope graph for each resource, etched
-boxes of totals underneath, a status bar along the bottom. Everything
-on one screen, no scrolling to find a number, and the window opens
-here.
+Six cards, one per resource, each with its graph on a dark instrument
+field and the numbers under it. One column in a narrow window, two
+side by side from 880 px. A status bar along the bottom keeps the
+headline numbers in view while the cards scroll (`636 proc │ CPU 4% │
+GPU 3% │ 160°F · 71°C │ Commit 30.1 GB / 67.5 GB │ up 3d 04:12`).
 
-![performance, narrow](docs/screenshot-performance.png)
+![overview, narrow](docs/screenshot-overview.png)
 
-| Row | Meter | Graph |
+| Card | Graph | Readings |
 |---|---|---|
-| **CPU** | busy % | busy % with **kernel time** (system + irq + softirq) as a second trace, or **one small graph per thread** in `/proc/stat` order. A carved two-way switch picks; *auto* chooses by width |
-| **Memory** | used % | used, with cache beneath it |
-| **GPU** | busy % | busy, with VRAM as a second trace |
-| **Disk** | busiest drive's util % | read and write, autoscaled with the ceiling written in the corner (a spike never hides what follows) |
-| **Network** | share of the fastest link | down and up, same |
-| **Thermals** | CPU °F · °C | CPU and GPU temperature over time, the busy clock beside it. No warnings: the heat is shown next to the clock it costs, and the data speaks |
+| **GPU** | busy, with VRAM as a second trace | busy %, VRAM bar, core/VRAM clocks (averaged across the window, not one lucky read), power vs cap, edge + hot-spot + **VRM** temps, fan, **GTT**, top-3 GPU processes — amdgpu sysfs, `gpu_metrics` + DRM fdinfo |
+| **Memory** | used, with cache stacked above it | used / available / cached as a share bar, swap, and the three totals told apart: **installed** (your sticks, from firmware), **usable** (what the kernel gets), **reserved** (the difference); **commit charge** against its limit and SysMon's own peak since launch (labelled `Peak*`); **kernel memory** (slab, page tables, stacks). The subtitle names the sticks and the speed they actually run at. Top-3 by RSS |
+| **CPU** | three views, below | overall + per-thread bars, the **busy clock** (what the working cores actually delivered, the number turbostat calls Bzy_MHz), package temp, load, **IO wait** (kept out of busy %), **kernel time**, the kernel's thread count, ctx/s, top-3 by CPU |
+| **Network** | down and up, autoscaled with the ceiling written in the corner | live ↓/↑ (physical interfaces), totals, **per-interface rows with IPs and link speed**, top-3 by traffic with **↓/↑ split**, source disclosure |
+| **Disks** | read and write across drives, the busiest drive's util beside the legend | every real mounted drive: label, R/W rates, **util %**, usage bar |
+| **Sensors** | CPU and GPU temperature over time, the busy clock beside it | grouped by what they measure: CPU, each drive by model, motherboard. Plain names (*Die (Tctl)*, *Chiplet 1*, *Fan header 2*), a heat bar against each sensor's own limit, fans with drive % beside rpm (a fan driven at 50% that reads 0 rpm stands out), unconnected inputs folded away, battery when present. No warnings: the heat is shown next to the clock it costs, and the data speaks |
 
-Under the rows: **Totals** (processes, threads, ctx/s, uptime),
-**Physical memory** (installed, usable, available, cache), **Commit
-charge** (`Committed_AS`, `CommitLimit`, and SysMon's own peak since
-launch, labelled as such) and **Kernel memory** (slab, page tables,
-stacks). Every graph sits on a dark instrument field, tinted to the
-theme, with a graticule that moves one step per sample. Clicking a
-meter opens that card on the Overview; clicking a graph opens
-Processes sorted by that resource.
+**The CPU card has three views**, on a carved switch beside its
+legend. **threads** (the default) draws every thread as its own
+coloured line on one field; point at a line, or at a thread's bar
+underneath, and that thread comes forward while the rest dim. **total**
+is one trace, busy with kernel time beneath it. **grid** is a small
+graph per thread. `sysmon ctl cpugraph threads|total|grid` sets it from
+a script.
 
-The three new numbers (kernel time, commit charge, kernel memory) are
-audited like everything else: C7 against `mpstat`, M7/M8 against
-`/proc/meminfo`.
+Kernel time, commit charge and kernel memory are audited like
+everything else: C7 against `mpstat`, M7/M8 against `/proc/meminfo`.
+
+Temperatures read in **°F, °C, or both at once** ("131°F · 55°C"), and
+sizes in decimal GB by default (binary is one click away). Both live in
+the ☰ menu.
+
+Any card pops out into its own always-pinned window (⧉) — it keeps
+updating with the main window minimized, and **dropping it onto the
+main window docks it back**. Pop-outs are remembered across launches.
+Every SysMon window carries the app_id `sysmon`, so one compositor rule
+can float them all (Sway: `for_window [app_id="^sysmon$"] floating
+enable`).
+
+![sensors](docs/screenshot-sensors.png)
 
 The **copy button** (two sheets, top-left) puts a spec sheet on the
 clipboard, ready for a forum post or a bug report. It describes what
@@ -173,29 +184,6 @@ a second (each sealed hour is also kept condensed, for speed).
 `sysmon history --info` the store's size and growth, and
 `sysmon serve --record` keeps recording with no window open.
 
-### Overview
-
-![overview](docs/screenshot-overview-wide.png)
-
-| Card | Readings |
-|---|---|
-| **GPU** | busy %, VRAM bar, core/VRAM clocks (averaged across the window, not one lucky read), power vs cap, edge + hot-spot + **VRM** temps, fan, **GTT**, top-3 GPU processes — amdgpu sysfs, `gpu_metrics` + DRM fdinfo |
-| **Memory** | used / available / cached as a share bar, swap, and the three totals told apart: **installed** (your sticks, from firmware), **usable** (what the kernel gets), **reserved** (the difference). The subtitle names the sticks and the speed they actually run at. Top-3 by RSS |
-| **CPU** | overall + per-core bars, the **busy clock** (what the working cores actually delivered, the number turbostat calls Bzy_MHz), package temp, load, **IO wait** (kept out of busy %), ctx/s, top-3 by CPU |
-| **Network** | live ↓/↑ (physical interfaces), totals, **per-interface rows with IPs and link speed**, top-3 by traffic with **↓/↑ split**, source disclosure |
-| **Disks** | every real mounted drive: label, R/W rates, **util %**, usage bar |
-| **Sensors** | grouped by what they measure: CPU, each drive by model, motherboard. Plain names (*Die (Tctl)*, *Chiplet 1*, *Fan header 2*), a heat bar against each sensor's own limit, fans with drive % beside rpm (a fan driven at 50% that reads 0 rpm stands out), unconnected inputs folded away, battery when present |
-
-Temperatures read in **°F, °C, or both at once** ("131°F · 55°C"), and
-sizes in decimal GB by default (binary is one click away). Both live in
-the ☰ menu.
-
-Any card pops out into its own always-pinned window (⧉) — it keeps
-updating with the main window minimized, and **dropping it onto the
-main window docks it back**. Pop-outs are remembered across launches.
-
-![sensors](docs/screenshot-sensors.png)
-
 ### Processes, and the Inspector
 
 The Processes page: icon, name, PID, user, CPU %, memory, GPU %,
@@ -219,8 +207,8 @@ view — summed usage with color-coded share bars.
 
 ![processes](docs/screenshot-processes.png)
 
-Shortcuts: `Ctrl+1` Performance, `Ctrl+2` Overview, `Ctrl+3`
-Processes, `Ctrl+F` the filter, `P` pin.
+Shortcuts: `Ctrl+1` Overview, `Ctrl+2` Processes, `Ctrl+F` the
+filter, `P` pin.
 
 ## The API
 
@@ -283,10 +271,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.5.0_amd64.deb
+sudo apt install ./sysmon_3.6.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.5.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.6.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -296,7 +284,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.5.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.6.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, everything else degrades gracefully. Motherboard fan and voltage

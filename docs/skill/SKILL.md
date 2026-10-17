@@ -128,8 +128,8 @@ is identical either way.
 
 ```bash
 sysmon ctl status              # who owns the socket: mode gui|serve, pid, version, renderer
-sysmon ctl page performance    # performance | overview | processes
-sysmon ctl cpugraph per_thread # Performance page CPU graph: auto | combined | per_thread
+sysmon ctl page processes      # overview | processes (3.6 folded Performance into the Overview)
+sysmon ctl cpugraph threads    # the Overview's CPU card: total | threads (a line per thread) | grid
 sysmon ctl theme blossom_dark  # system blossom_dark blossom amoled light dark
                                #   funky paper basalt amber chromacore greyscale
                                # greyscale is the a11y floor; `system` picks it

@@ -154,15 +154,24 @@ src/gui/theme.rs       Palette table (10) + system-theme mapping via
                        style) + GraphPalette table (9) + companions
 src/gui/settings.rs    v1-compatible settings.json (era sniffed by absent
                        settings_version; v1 "blossom" → "amoled")
-src/gui/cards.rs       the six overview cards + card chrome (glyph_button
-                       hand-painted icons + stone carve, stat_grid,
+src/gui/cards.rs       the six overview cards, each in its own id scope +
+                       card chrome (glyph_button hand-painted icons + stone
+                       carve, stat_grid, graph legend rows, pid-keyed
                        top_process_row, process_context_menu) + AppAction
-src/gui/graphs.rs      History ring buffers + line/area/bars painters +
-                       per-core bars + level_bar (fills = per-segment
-                       trapezoids; one concave polygon renders as stripes)
+src/gui/overview.rs    the Overview's own pieces: CpuGraphMode (total ·
+                       threads · grid), the two-column breakpoint, the
+                       status bar (docs/dev/OVERVIEW-VIEW.md)
+src/gui/graphs.rs      History ring buffers + scope graphs on the dark
+                       field (fills = per-segment trapezoids; one concave
+                       polygon renders as stripes), the per-thread lines
+                       graph (nearest line under the pointer) and grid,
+                       per-core bars, legend, level/share bars
 src/gui/processes.rs   the table: filter, stable sort, 16 columns,
-                       virtualized rows
-src/gui/details.rs     per-process viewport incl. live connections
+                       virtualized rows; the body scopes the row-state
+                       tokens (row_hover/row_selected) so a hovered row
+                       never takes the ink-coloured scrollbar fill
+src/gui/details.rs     per-process viewport incl. live connections (every
+                       viewport carries app_id `sysmon`, gui::APP_ID)
 src/gui/specs.rs       the copy buttons: CopyJob (specs part + history
                        part) run off the UI thread by SpecsCopier
 src/gui/icons.rs       IconCache: AppIndex path → png (image crate) / svg

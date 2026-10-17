@@ -47,8 +47,8 @@ fn ui_interactions_end_to_end() {
         std::env::set_var("XDG_STATE_HOME", scratch.join("state"));
     }
 
-    // This test walks the Overview and the table; the Performance page
-    // has its own (ui_performance.rs).
+    // This test walks the Overview and the table; the Overview's graphs
+    // and CPU views have their own (ui_overview.rs).
     let settings = Settings { start_page: "overview".to_string(), ..Settings::default() };
     let shared = Arc::new(SharedUi::new(0.5));
     // The test keeps its own handle so it can freeze sampling at the

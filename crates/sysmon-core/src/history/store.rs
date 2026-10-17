@@ -877,6 +877,10 @@ mod tests {
         // A stale or repeated sample is not a new line.
         recorder.record(&record(start, 99.0)).unwrap();
         assert_eq!(all(&dir).0.len(), 10);
+        // The seal started a background pass; under load a drop can
+        // cancel it before the rollup (the next open would build it).
+        // Run the pass here so the check doesn't race that thread.
+        recorder.maintain_blocking(PackScope::Due);
         drop(recorder);
         assert!(dir.join("2026-10-10T22.rollup.zst").exists(), "the sealed hour got its rollup");
         let _ = fs::remove_dir_all(dir);

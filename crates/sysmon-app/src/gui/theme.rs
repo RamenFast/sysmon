@@ -304,8 +304,8 @@ pub fn palette_by_id(id: &str) -> Option<&'static Palette> {
 }
 
 impl Palette {
-    /// The instrument field every Performance-page trace is drawn on
-    /// (PERFORMANCE-VIEW.md): dark on every theme, tinted toward the
+    /// The instrument field every graph is drawn on
+    /// (OVERVIEW-VIEW.md): dark on every theme, tinted toward the
     /// theme. Dark themes darken their plane; light themes use their
     /// ink, which already carries the theme's hue (plum on Blossom,
     /// slate on Light). Always darker than any line drawn on it.
@@ -334,6 +334,54 @@ impl Palette {
     pub fn graticule(&self) -> Color32 {
         self.accent.gamma_multiply(0.22)
     }
+
+    /// A process row under the pointer (the table, the Overview's top
+    /// rows, the Inspector's children): the accent, faint. The table
+    /// used to borrow `widgets.hovered.bg_fill`, which is the INK (the
+    /// scrollbar handle's colour), so a hovered row was an ink slab
+    /// with ink text on it and read as blank (Ben, 3.6). A tint under
+    /// unchanged text keeps every row legible in every room.
+    pub fn row_hover(&self) -> Color32 {
+        self.accent.gamma_multiply(ROW_HOVER_ALPHA)
+    }
+
+    /// A selected (or inspected) row: the same accent, a step deeper
+    /// than hover. Its text stays the row's own ink.
+    pub fn row_selected(&self) -> Color32 {
+        self.accent.gamma_multiply(ROW_SELECTED_ALPHA)
+    }
+}
+
+const ROW_HOVER_ALPHA: f32 = 0.12;
+const ROW_SELECTED_ALPHA: f32 = 0.20;
+
+/// One colour per CPU thread for the Overview's thread lines, the
+/// per-thread bars under them and the mini-graph grid: thread `i`
+/// wears colour `i` in all three. Consecutive threads step the hue by
+/// the golden angle, so neighbours never look alike, and two value
+/// tiers alternate. The span follows the graph palette's family
+/// (Amber stays warm, Terminal green-cyan, Mono grey) so a themed room
+/// stays itself. Every colour is bright enough for the dark field the
+/// scope graphs are drawn on, which is dark in every room.
+pub fn thread_colors(graph_palette_id: &str, count: usize) -> Vec<Color32> {
+    use egui::ecolor::Hsva;
+    const GOLDEN: f32 = 0.381_966;
+    (0..count)
+        .map(|index| {
+            let step = (index as f32 * GOLDEN).fract();
+            let bright = index % 2 == 0;
+            match graph_palette_id {
+                "mono" => {
+                    // Value carries identity where hue may not.
+                    let value = 0.50 + 0.48 * step;
+                    Color32::from(Hsva::new(0.0, 0.0, value, 1.0))
+                }
+                "amber" => Color32::from(Hsva::new(0.02 + 0.13 * step, 0.78, if bright { 1.0 } else { 0.82 }, 1.0)),
+                "terminal" => Color32::from(Hsva::new(0.24 + 0.30 * step, 0.70, if bright { 0.96 } else { 0.80 }, 1.0)),
+                _ => Color32::from(Hsva::new(step, 0.56, if bright { 0.98 } else { 0.84 }, 1.0)),
+            }
+        })
+        .collect()
 }
 
 /// System mode: map the Cinnamon GTK theme to our nearest family.
@@ -899,6 +947,88 @@ mod a11y_tests {
         for palette in PALETTES.iter() {
             assert!(seen.insert(palette.id), "duplicate id {}", palette.id);
             assert!(palette_by_id(palette.id).is_some());
+        }
+    }
+
+    /// `over` painted onto `under` the way egui blends a premultiplied
+    /// colour (in gamma space): out = over + under × (1 − alpha).
+    fn composite(over: Color32, under: Color32) -> Color32 {
+        let keep = 1.0 - over.a() as f32 / 255.0;
+        let channel = |o: u8, u: u8| (o as f32 + u as f32 * keep).round().min(255.0) as u8;
+        Color32::from_rgb(channel(over.r(), under.r()), channel(over.g(), under.g()), channel(over.b(), under.b()))
+    }
+
+    /// The 3.6 hover bug, held shut: a hovered or selected process row
+    /// keeps its text readable on both table grounds (the plane and the
+    /// striped rows) in every room. Primary and secondary text clear
+    /// WCAG AA; the faint (muted) kernel-thread names keep most of the
+    /// contrast they have at rest: hover is gentle by design (Ben:
+    /// "less strong on the eyes"), selection a step firmer. The old
+    /// hover was the ink itself, 1:1 against the ink text.
+    #[test]
+    fn hovered_and_selected_rows_keep_their_text_readable() {
+        for palette in PALETTES.iter() {
+            for ground in [palette.plane, palette.surface_2] {
+                for (state, fill, muted_keeps) in
+                    [("hover", palette.row_hover(), 0.7), ("selected", palette.row_selected(), 0.5)]
+                {
+                    let row = composite(fill, ground);
+                    for (role, text) in [("ink", palette.ink), ("ink_2", palette.ink_2)] {
+                        let ratio = contrast(text, row);
+                        assert!(ratio >= 4.5, "{}: {role} on a {state} row is {ratio:.2}:1", palette.id);
+                    }
+                    let kept = contrast(palette.muted, row) / contrast(palette.muted, ground);
+                    // Greyscale's muted is near-ink (7–9:1 at rest), so a
+                    // proportional loss there still leaves AA text: the
+                    // absolute floor counts as kept.
+                    let still_aa = contrast(palette.muted, row) >= 4.5;
+                    assert!(
+                        kept >= muted_keeps || still_aa,
+                        "{}: muted text on a {state} row keeps only {:.0}% of its contrast",
+                        palette.id,
+                        kept * 100.0
+                    );
+                }
+                // …and the hover is actually visible against the ground.
+                assert_ne!(composite(palette.row_hover(), ground), ground, "{}: hover paints nothing", palette.id);
+            }
+            assert!(
+                palette.row_selected().a() > palette.row_hover().a(),
+                "{}: selection must read stronger than hover",
+                palette.id
+            );
+        }
+    }
+
+    /// Thread lines are drawn on the dark field: every thread colour
+    /// must hold 3:1 against it in every room, and the Mono family
+    /// (greyscale's companion) must stay colourless.
+    #[test]
+    fn thread_colours_read_on_the_field_and_mono_stays_grey() {
+        for graph_palette in GRAPH_PALETTES.iter() {
+            let colors = thread_colors(graph_palette.id, 32);
+            assert_eq!(colors.len(), 32);
+            for palette in PALETTES.iter() {
+                let field = composite(palette.field(), palette.plane);
+                for (index, color) in colors.iter().enumerate() {
+                    let ratio = contrast(*color, field);
+                    assert!(
+                        ratio >= 3.0,
+                        "{} on {}: thread {index} is {ratio:.2}:1 against the field",
+                        graph_palette.id,
+                        palette.id
+                    );
+                }
+            }
+        }
+        for color in thread_colors("mono", 32) {
+            let [r, g, b, _] = color.to_array();
+            assert!(r == g && g == b, "mono thread colour carries a hue: {color:?}");
+        }
+        // Neighbours differ: thread i and i+1 are never the same colour.
+        let colors = thread_colors("blossom", 32);
+        for pair in colors.windows(2) {
+            assert_ne!(pair[0], pair[1]);
         }
     }
 }

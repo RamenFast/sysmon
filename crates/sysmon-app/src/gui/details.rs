@@ -44,6 +44,8 @@ pub fn details_window(
     let mut keep_open = true;
     let builder = ViewportBuilder::default()
         .with_title(title)
+        // SysMon's app id, so the desktop floats it like the main window.
+        .with_app_id(super::APP_ID)
         .with_inner_size([440.0, 420.0])
         .with_min_inner_size([340.0, 240.0]);
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {
@@ -311,6 +313,7 @@ pub fn combined_details_window(
     let mut keep_open = true;
     let builder = ViewportBuilder::default()
         .with_title(format!("Combined ({}) — SysMon", pids.len()))
+        .with_app_id(super::APP_ID)
         .with_inner_size([460.0, 560.0])
         .with_min_inner_size([360.0, 300.0]);
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {

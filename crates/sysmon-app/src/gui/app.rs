@@ -23,16 +23,17 @@ use super::cards::{self, AppAction, CardContext};
 use super::details;
 use super::graphs::History;
 use super::icons::IconCache;
-use super::performance::{self, PerformanceContext};
+use super::overview::{self, CpuGraphMode};
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
 use super::settings::{CAP_CHOICES_MB, HOT_CHOICES_HOURS, KEEP_CHOICES_DAYS, SECTION_KEYS, Settings};
 use super::specs;
 use super::theme::{self, Palette};
 use super::widgets::{ButtonGlyph, glyph_button, menu_check_row, menu_chip, menu_option_row};
 
+/// The two pages. 3.6 folded the Performance page into the Overview
+/// (Ben: the two were redundant); its ids are gone from the wire.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
-    Performance,
     Overview,
     Processes,
 }
@@ -40,7 +41,6 @@ pub enum Page {
 impl Page {
     pub fn id(self) -> &'static str {
         match self {
-            Page::Performance => "performance",
             Page::Overview => "overview",
             Page::Processes => "processes",
         }
@@ -48,7 +48,6 @@ impl Page {
 
     pub fn from_id(id: &str) -> Option<Page> {
         match id {
-            "performance" => Some(Page::Performance),
             "overview" => Some(Page::Overview),
             "processes" => Some(Page::Processes),
             _ => None,
@@ -63,7 +62,6 @@ pub struct Histories {
     pub cpu: History,
     pub net_down: History,
     pub net_up: History,
-    // ── Performance page (PERFORMANCE-VIEW.md) ──
     /// One per thread, /proc/stat order.
     pub per_core: Vec<History>,
     pub cpu_kernel: History,
@@ -82,7 +80,7 @@ pub struct Histories {
 
 impl Histories {
     /// Push one sample of every graphed value. The sampler calls this
-    /// under the histories write lock; `ui_performance` calls it
+    /// under the histories write lock; `ui_overview` calls it
     /// directly so the test walks the real push path (reviewer R16).
     pub fn record(&mut self, snapshot: &SystemSnapshot) {
         if let Some(gpu) = &snapshot.gpu
@@ -297,7 +295,7 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
 
                     // Histories and `latest` are published under ONE
                     // guard: a frame that reads histories first and then
-                    // latest (performance()) sees the same sample in both
+                    // latest (overview()) sees the same sample in both
                     // (reviewer R4, FM V1). Readers take histories first.
                     {
                         let mut histories = shared.histories.write().unwrap();
@@ -353,9 +351,6 @@ pub struct SysMonApp {
     /// One-shot: scroll the Overview to this card (the Processes
     /// summary strip's way back).
     overview_scroll_to: Option<&'static str>,
-    /// The Performance page's CPU column width from the last frame
-    /// it drew (what `auto` resolved against).
-    last_performance_column_width: f32,
     /// ☰ → Usage history → Export…: the path step, then the write.
     export_dialog: Option<ExportDialog>,
     /// ☰ → Usage history → Clear…: the confirm step, with what goes.
@@ -436,7 +431,7 @@ impl SysMonApp {
         SysMonApp {
             shared,
             icon_cache: IconCache::new(),
-            page: Page::from_id(&settings.start_page).unwrap_or(Page::Performance),
+            page: Page::from_id(&settings.start_page).unwrap_or(Page::Overview),
             table_state,
             details_open: Vec::new(),
             combined_details_open: None,
@@ -453,7 +448,6 @@ impl SysMonApp {
             pending_screenshot: None,
             popout_drags: HashMap::new(),
             overview_scroll_to: None,
-            last_performance_column_width: 0.0,
             export_dialog: None,
             clear_dialog: None,
             clear_pending: None,
@@ -552,9 +546,8 @@ impl SysMonApp {
                         self.settings_menu(ui, &menu_response);
 
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.add_space((ui.available_width() / 2.0 - 130.0).max(0.0));
+                            ui.add_space((ui.available_width() / 2.0 - 80.0).max(0.0));
                             for (label, page) in [
-                                ("Performance", Page::Performance),
                                 ("Overview", Page::Overview),
                                 ("Processes", Page::Processes),
                             ] {
@@ -712,25 +705,6 @@ impl SysMonApp {
 
                 ui.separator();
                 heading(ui, "Window");
-                if menu_check_row(
-                    ui,
-                    palette,
-                    self.settings.cpu_graph_mode == "auto",
-                    "CPU graph: decide by width",
-                )
-                .on_hover_text("Performance page: per-thread graphs when the window is wide, one trace when narrow")
-                .clicked()
-                {
-                    // Unticking pins whatever the width currently shows,
-                    // so nothing jumps (R19).
-                    self.settings.cpu_graph_mode = if self.settings.cpu_graph_mode == "auto" {
-                        let column = self.last_performance_column_width;
-                        performance::CpuGraphMode::resolve("auto", column).id().to_string()
-                    } else {
-                        "auto".to_string()
-                    };
-                    settings_changed = true;
-                }
                 if menu_check_row(ui, palette, self.settings.always_on_top, "Always on top")
                     .clicked()
                 {
@@ -877,31 +851,23 @@ impl SysMonApp {
         }
     }
 
-    fn performance(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
+    /// The Overview: every visible card that isn't popped out, in one
+    /// column, or two once the window is wide (3.2's Performance page
+    /// did that; 3.6 folded it in here).
+    fn overview(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
         let palette = self.palette();
         // Histories first, then latest: the sampler writes both under
         // the histories guard, so this order sees one sample (V1).
         let histories = self.shared.histories.read().unwrap();
         let snapshot = self.shared.latest.read().unwrap().clone();
-        let mut cx = PerformanceContext {
-            palette,
-            settings: &self.settings,
-            display: self.settings.display(),
-            snapshot: &snapshot,
-            histories: &histories,
-            actions: actions_out,
-            wide: false,
-            cpu_column_width: 0.0,
-        };
-        performance::performance_page(ui, &mut cx);
-        self.last_performance_column_width = cx.cpu_column_width;
-    }
-
-    fn overview(&mut self, ui: &mut egui::Ui, actions_out: &mut Vec<AppAction>) {
-        let palette = self.palette();
-        let snapshot = self.shared.latest.read().unwrap().clone();
-        let histories = self.shared.histories.read().unwrap();
         let scroll_to = self.overview_scroll_to.take();
+        let sections: Vec<&'static str> = SECTION_KEYS
+            .iter()
+            .copied()
+            .filter(|section| {
+                self.settings.section_visible(section) && !self.settings.popped_out_sections.iter().any(|s| s == section)
+            })
+            .collect();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -911,21 +877,41 @@ impl SysMonApp {
                     palette,
                     &self.settings,
                     &snapshot,
+                    &histories,
                     &mut self.icon_cache,
                     actions_out,
                     &mut self.table_state.selected_pids,
                     self.settings.compact_mode,
                 );
-                for section in SECTION_KEYS {
-                    if !self.settings.section_visible(section) || cx.popped_out.iter().any(|s| s == section) {
-                        continue;
-                    }
+                let draw = |ui: &mut egui::Ui, cx: &mut CardContext, section: &'static str| {
                     let top = ui.cursor().min;
-                    cards::draw_card(ui, &mut cx, cards::card_for(section, &histories));
+                    cards::draw_card(ui, cx, section);
                     if scroll_to == Some(section) {
                         ui.scroll_to_rect(egui::Rect::from_min_max(top, ui.cursor().min), Some(Align::TOP));
                     }
                     ui.add_space(6.0);
+                };
+                if ui.available_width() >= overview::TWO_COLUMN_WIDTH && sections.len() > 1 {
+                    // Cards alternate between the columns in their
+                    // usual order: the left reads gpu, cpu, disks; the
+                    // right memory, network, sensors.
+                    let gap = 8.0;
+                    let column = (ui.available_width() - gap) / 2.0;
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        for side in 0..2 {
+                            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), Layout::top_down(Align::Min), |ui| {
+                                ui.set_width(column);
+                                for section in sections.iter().skip(side).step_by(2) {
+                                    draw(ui, &mut cx, section);
+                                }
+                            });
+                        }
+                    });
+                } else {
+                    for section in &sections {
+                        draw(ui, &mut cx, section);
+                    }
                 }
             });
     }
@@ -964,6 +950,11 @@ impl SysMonApp {
             let histories = shared.histories.read().unwrap();
             let builder = ViewportBuilder::default()
                 .with_title(title)
+                // One app id for every SysMon window, so the desktop
+                // treats a pop-out as SysMon's (Ben's Sway floats
+                // `app_id=sysmon`; without an id a Wayland pop-out had
+                // none and opened tiled).
+                .with_app_id(super::APP_ID)
                 .with_inner_size([380.0, 320.0])
                 .with_min_inner_size([300.0, 160.0])
                 .with_always_on_top();
@@ -1033,12 +1024,13 @@ impl SysMonApp {
                                     palette,
                                     &self.settings,
                                     &snapshot,
+                                    &histories,
                                     &mut self.icon_cache,
                                     actions_out,
                                     &mut self.table_state.selected_pids,
                                     false,
                                 );
-                                cards::draw_card(ui, &mut cx, cards::card_for(section, &histories));
+                                cards::draw_card(ui, &mut cx, section);
                             });
                     });
                 if ctx.input(|input| input.viewport().close_requested()) {
@@ -1519,7 +1511,7 @@ impl SysMonApp {
                 self.page = Page::Processes;
                 self.table_state.focus_filter = true;
             }
-            for (key, page) in [(Key::Num1, Page::Performance), (Key::Num2, Page::Overview), (Key::Num3, Page::Processes)] {
+            for (key, page) in [(Key::Num1, Page::Overview), (Key::Num2, Page::Processes)] {
                 if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, key)) {
                     self.page = page;
                     // One meaning everywhere (R20): the window reopens on
@@ -1587,20 +1579,25 @@ impl SysMonApp {
                         self.settings.save();
                         Ok(serde_json::json!({"page": page.id()}))
                     }
+                    None if value_or(&value) == "performance" => Err(VerbError::bad_args(
+                        "the Performance page was folded into the Overview in 3.6",
+                        "`sysmon ctl page overview` (pages: overview processes)",
+                    )),
                     None => Err(VerbError::bad_args(
                         format!("unknown page `{}`", value_or(&value)),
-                        "pages: performance overview processes",
+                        "pages: overview processes",
                     )),
                 },
-                "cpugraph" => match value_or(&value).as_str() {
-                    wanted @ ("auto" | "combined" | "per_thread") => {
-                        self.settings.cpu_graph_mode = wanted.to_string();
+                "cpugraph" => match CpuGraphMode::from_id(&value_or(&value)) {
+                    Some(mode) => {
+                        self.settings.cpu_graph_mode = mode.id().to_string();
                         self.settings.save();
-                        Ok(serde_json::json!({"cpugraph": wanted}))
+                        Ok(serde_json::json!({"cpugraph": mode.id()}))
                     }
-                    other => Err(VerbError::bad_args(
-                        format!("unknown CPU graph mode `{other}`"),
-                        "cpugraph: auto combined per_thread",
+                    None => Err(VerbError::bad_args(
+                        format!("unknown CPU graph view `{}`", value_or(&value)),
+                        "cpugraph: total threads grid (3.6 renamed them: combined is total; \
+                         per_thread is threads, a line each, or grid, a graph each)",
                     )),
                 },
                 "theme" => {
@@ -1892,16 +1889,17 @@ impl eframe::App for SysMonApp {
         self.top_bar(ctx);
 
         let palette = self.palette();
-        if self.page == Page::Performance {
+        if self.page == Page::Overview {
             let text = {
                 let snapshot = self.shared.latest.read().unwrap();
-                // The same breakpoint the page uses: the central panel's
-                // width is the viewport minus its 8 px side margins (R17).
-                let wide = ctx.input(|i| i.viewport().inner_rect.map(|r| r.width()).unwrap_or(0.0)) - 16.0
-                    >= performance::WIDE_BREAKPOINT;
-                performance::status_text(&snapshot, self.settings.display(), wide)
+                // The central panel's width: the window's content rect
+                // minus its 8 px side margins (R17). (The viewport's
+                // inner_rect is a backend report, absent in some
+                // backends and in the test harness.)
+                let wide = ctx.content_rect().width() - 16.0 >= overview::WIDE_STATUS_WIDTH;
+                overview::status_text(&snapshot, self.settings.display(), wide)
             };
-            performance::status_bar(ctx, palette, &text);
+            overview::status_bar(ctx, palette, &text);
         }
         egui::CentralPanel::default()
             .frame(
@@ -1910,7 +1908,6 @@ impl eframe::App for SysMonApp {
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ctx, |ui| match self.page {
-                Page::Performance => self.performance(ui, &mut frame_actions),
                 Page::Overview => self.overview(ui, &mut frame_actions),
                 Page::Processes => {
                     let snapshot = self.shared.latest.read().unwrap().clone();

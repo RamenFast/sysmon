@@ -27,6 +27,7 @@ use super::icons::{self, IconCache};
 use super::inspector::{self, InspectorState};
 use super::settings::Display;
 use super::theme::Palette;
+use super::widgets::paint_row_edge;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortColumn {
@@ -126,6 +127,10 @@ pub struct ProcessTableState {
     /// One row per application instead of per process.
     pub group_by_app: bool,
     pub inspector: InspectorState,
+    /// The row (index) the pointer was on last frame: it wears the hover
+    /// edge, on the same row egui_extras tints (it learns hover a frame
+    /// late too).
+    pub hovered_row: Option<usize>,
 }
 
 impl Default for ProcessTableState {
@@ -139,6 +144,7 @@ impl Default for ProcessTableState {
             reveal_pid: None,
             group_by_app: false,
             inspector: InspectorState::default(),
+            hovered_row: None,
         }
     }
 }
@@ -526,25 +532,49 @@ fn table(
                     }
                     header.col(|ui| header_cell(ui, palette, "Command", Some(SortColumn::Command), state));
                 })
-                .body(|body| {
+                .body(|mut body| {
+                    // Row states read the room's row tokens, scoped to
+                    // the body (the table's own scrollbar is drawn by
+                    // the scroll area outside it and keeps the ink
+                    // handle). egui_extras paints a hovered row with
+                    // `widgets.hovered.bg_fill`, which the theme sets
+                    // to the INK for scrollbar handles: an ink slab
+                    // under ink text, which is why hovered rows read as
+                    // blank (Ben, 3.6). Selected rows also keep their
+                    // own text colours instead of going accent-on-accent.
+                    {
+                        let visuals = body.ui_mut().visuals_mut();
+                        visuals.widgets.hovered.bg_fill = palette.row_hover();
+                        visuals.selection.bg_fill = palette.row_selected();
+                        visuals.selection.stroke.color = palette.ink;
+                    }
+                    let mut hovered_now = None;
                     body.rows(text_height, rows.len(), |mut row| {
                         let (record, count) = rows[row.index()];
                         let selection_slot = state.selected_pids.iter().position(|p| *p == record.pid);
                         let inspected = state.inspector.pid == Some(record.pid);
                         row.set_selected(selection_slot.is_some() || inspected);
+                        // Keyed by row index, like egui_extras' own hover
+                        // tint: in a live-sorted table the row under the
+                        // pointer is a place, not a process.
+                        let hovered_row = state.hovered_row == Some(row.index());
 
                         row.col(|ui| {
                             // Selected rows carry their color slot as a
                             // spine — the same color the combined
                             // details window will use for this process.
+                            // A hovered row that isn't selected wears a
+                            // thin accent edge in the same place. Both sit
+                            // inside the cell (the icon starts 2 px in):
+                            // with the Inspector docked the table clips at
+                            // the cell's left edge, and a mark outside it
+                            // never showed.
+                            let cell = ui.max_rect();
+                            let mark = Rect::from_min_max(pos2(cell.min.x, cell.min.y - 2.0), pos2(cell.max.x, cell.max.y + 2.0));
                             if let Some(slot) = selection_slot {
-                                let color = selection_color(graph_palette_id, palette.dark, slot);
-                                let cell = ui.max_rect();
-                                ui.painter().rect_filled(
-                                    Rect::from_min_max(pos2(cell.min.x - 2.0, cell.min.y - 2.0), pos2(cell.min.x + 1.0, cell.max.y + 2.0)),
-                                    0.0,
-                                    color,
-                                );
+                                paint_row_edge(ui.painter(), mark, selection_color(graph_palette_id, palette.dark, slot));
+                            } else if hovered_row {
+                                paint_row_edge(ui.painter(), mark, palette.accent);
                             }
                             let (icon_rect, _) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::hover());
                             icon_cache.paint(ui, icon_rect, record, palette.muted);
@@ -599,6 +629,9 @@ fn table(
                         });
 
                         let row_response = row.response();
+                        if row_response.hovered() {
+                            hovered_now = Some(row.index());
+                        }
                         if row_response.clicked() {
                             if modifiers.command || modifiers.ctrl {
                                 toggle_selection(&mut state.selected_pids, record.pid, actions);
@@ -615,6 +648,7 @@ fn table(
                         }
                         process_context_menu(&row_response, actions, record, &state.selected_pids, true);
                     });
+                    state.hovered_row = hovered_now;
                 });
         });
 }
