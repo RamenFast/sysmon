@@ -73,12 +73,14 @@ pub struct Settings {
     pub show_inspector: bool,
     /// Sensors card groups the user folded shut ("board", "drives"…).
     pub folded_sensor_groups: Vec<String>,
-    /// The page the window opens on: "performance" | "overview" |
-    /// "processes". New in 3.2 (older files open on Performance too:
-    /// it is the new front page).
+    /// The page the window opens on: "overview" | "processes". New in
+    /// 3.2; 3.6 folded the Performance page into the Overview, so a
+    /// saved "performance" opens the Overview.
     pub start_page: String,
-    /// Performance page CPU graph: "auto" (by width) | "combined" |
-    /// "per_thread". New in 3.2.
+    /// The Overview's CPU graph: "total" (one trace) | "threads" (a
+    /// coloured line per thread, the default) | "grid" (a small graph
+    /// per thread). New in 3.2 as auto/combined/per_thread; 3.6 maps
+    /// combined → total and the rest → threads.
     pub cpu_graph_mode: String,
     /// Usage history on disk (`sysmon_core::history`): record while the
     /// window runs. New in 3.4.
@@ -118,8 +120,8 @@ impl Default for Settings {
             group_by_app: false,
             show_inspector: true,
             folded_sensor_groups: Vec::new(),
-            start_page: "performance".to_string(),
-            cpu_graph_mode: "auto".to_string(),
+            start_page: "overview".to_string(),
+            cpu_graph_mode: "threads".to_string(),
             history_enabled: true,
             history_hot_hours: DEFAULT_HOT_HOURS,
             history_keep_days: 0.0,
@@ -226,12 +228,19 @@ impl Settings {
         if TemperatureScale::from_id(&settings.temperature_scale).is_none() {
             settings.temperature_scale = Settings::default().temperature_scale;
         }
-        if !matches!(settings.start_page.as_str(), "performance" | "overview" | "processes") {
+        // 3.6: the Performance page lives inside the Overview now, and
+        // the CPU graph's views were renamed. 3.2's "combined" is the
+        // whole-CPU trace (total); "auto" and "per_thread" become the
+        // coloured thread lines Ben asked for. Junk falls back the same
+        // way instead of leaving the app on no page.
+        if !matches!(settings.start_page.as_str(), "overview" | "processes") {
             settings.start_page = Settings::default().start_page;
         }
-        if !matches!(settings.cpu_graph_mode.as_str(), "auto" | "combined" | "per_thread") {
-            settings.cpu_graph_mode = Settings::default().cpu_graph_mode;
-        }
+        settings.cpu_graph_mode = match settings.cpu_graph_mode.as_str() {
+            "combined" => "total".to_string(),
+            mode if super::overview::CpuGraphMode::from_id(mode).is_some() => mode.to_string(),
+            _ => Settings::default().cpu_graph_mode,
+        };
         if !settings.history_hot_hours.is_finite() {
             settings.history_hot_hours = DEFAULT_HOT_HOURS;
         }
@@ -327,25 +336,43 @@ impl Settings {
 mod tests {
     use super::*;
 
-    /// A 3.1.0 file has neither key: it opens on the new front page
-    /// with the CPU graph decided by width. Edited junk falls back
-    /// the same way instead of leaving the app on no page.
+    /// A 3.1.0 file has neither key: it opens on the Overview with the
+    /// thread lines. Edited junk falls back the same way instead of
+    /// leaving the app on no page.
     #[test]
-    fn a_3_1_file_opens_on_performance_and_junk_falls_back() {
+    fn a_3_1_file_opens_on_the_overview_and_junk_falls_back() {
         let from_3_1 = r#"{"settings_version":2,"theme_mode":"amoled","temperature_scale":"both"}"#;
         let settings = Settings::from_json(from_3_1).unwrap();
-        assert_eq!(settings.start_page, "performance");
-        assert_eq!(settings.cpu_graph_mode, "auto");
+        assert_eq!(settings.start_page, "overview");
+        assert_eq!(settings.cpu_graph_mode, "threads");
         assert_eq!(settings.theme_mode, "amoled");
         assert_eq!(settings.temperature_scale, "both");
         let junk = r#"{"settings_version":2,"start_page":"kitchen","cpu_graph_mode":"sideways"}"#;
         let settings = Settings::from_json(junk).unwrap();
-        assert_eq!(settings.start_page, "performance");
-        assert_eq!(settings.cpu_graph_mode, "auto");
-        let kept = r#"{"settings_version":2,"start_page":"processes","cpu_graph_mode":"per_thread"}"#;
+        assert_eq!(settings.start_page, "overview");
+        assert_eq!(settings.cpu_graph_mode, "threads");
+        let kept = r#"{"settings_version":2,"start_page":"processes","cpu_graph_mode":"grid"}"#;
         let settings = Settings::from_json(kept).unwrap();
         assert_eq!(settings.start_page, "processes");
-        assert_eq!(settings.cpu_graph_mode, "per_thread");
+        assert_eq!(settings.cpu_graph_mode, "grid");
+    }
+
+    /// 3.6 folds the Performance page into the Overview: a 3.2–3.5
+    /// file (Ben's own: start page Overview, per_thread) loads onto the
+    /// new names without losing anything else.
+    #[test]
+    fn a_3_5_file_lands_on_the_folded_overview() {
+        let ben = r#"{"settings_version":2,"theme_mode":"amoled","start_page":"overview","cpu_graph_mode":"per_thread"}"#;
+        let settings = Settings::from_json(ben).unwrap();
+        assert_eq!(settings.start_page, "overview");
+        assert_eq!(settings.cpu_graph_mode, "threads", "per thread now means a coloured line per thread");
+        assert_eq!(settings.theme_mode, "amoled");
+        let on_performance = r#"{"settings_version":2,"start_page":"performance","cpu_graph_mode":"combined"}"#;
+        let settings = Settings::from_json(on_performance).unwrap();
+        assert_eq!(settings.start_page, "overview", "the Performance page is the Overview now");
+        assert_eq!(settings.cpu_graph_mode, "total", "combined is the whole-CPU trace");
+        let auto = r#"{"settings_version":2,"cpu_graph_mode":"auto"}"#;
+        assert_eq!(Settings::from_json(auto).unwrap().cpu_graph_mode, "threads");
     }
 
     /// Reviewer R3: one wrongly *typed* key (a number where a string
@@ -358,8 +385,8 @@ mod tests {
         let settings = Settings::from_json(file).unwrap();
         assert_eq!(settings.theme_mode, "light", "the good keys survive");
         assert_eq!(settings.update_interval_seconds, 1.0);
-        assert_eq!(settings.start_page, "performance", "the bad key falls back alone");
-        assert_eq!(settings.cpu_graph_mode, "auto");
+        assert_eq!(settings.start_page, "overview", "the bad key falls back alone");
+        assert_eq!(settings.cpu_graph_mode, "threads");
         assert!(!settings.use_binary_units);
         assert_eq!(settings.window_width, 430);
         // A float where an int goes is not an int: that key alone falls back.

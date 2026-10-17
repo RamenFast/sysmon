@@ -273,25 +273,41 @@ pub fn menu_check_row(ui: &mut Ui, palette: &Palette, checked: bool, label: &str
     menu_item(ui, palette, checked, label, MenuMark::Check, true)
 }
 
+/// A process row under the pointer (the table, the Overview's top
+/// rows, the Inspector's children): the room's soft tint plus a thin
+/// accent edge on the left, so the row the pointer is on reads at a
+/// glance without a bright slab under the text (Ben, 3.6).
+pub fn paint_row_hover(painter: &egui::Painter, rect: Rect, palette: &Palette, edge: bool) {
+    painter.rect_filled(rect, 0.0, palette.row_hover());
+    if edge {
+        paint_row_edge(painter, rect, palette.accent);
+    }
+}
+
+/// The 2 px edge a hovered row wears on its left side.
+pub fn paint_row_edge(painter: &egui::Painter, rect: Rect, color: Color32) {
+    painter.rect_filled(Rect::from_min_max(rect.min, pos2(rect.min.x + 2.0, rect.max.y)), 0.0, color);
+}
+
 
 // ------------------------------------------------------------ stone switch
 
-/// A two-position carved stone switch (the Performance page's CPU
-/// graph toggle). Both labels sit on one raised plate; the chosen
-/// side is sunk in and tinted toward the accent. Returns the newly
-/// chosen index when clicked.
-pub fn stone_switch(ui: &mut Ui, palette: &Palette, options: [&str; 2], selected: usize, tooltip: &str) -> Option<usize> {
+/// A carved stone switch: N positions on one raised plate (the CPU
+/// card's view switch: total · threads · grid). The chosen position is
+/// sunk in and tinted toward the accent. Returns the newly chosen
+/// index when clicked; a keyboard activation (no pointer) steps to the
+/// next position.
+pub fn stone_switch(ui: &mut Ui, palette: &Palette, options: &[&str], selected: usize, tooltip: &str) -> Option<usize> {
     let font = egui::FontId::monospace(10.5);
     let widths: Vec<f32> = options
         .iter()
         .map(|label| ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), palette.ink).size().x) + 14.0)
         .collect();
-    let size = vec2(widths[0] + widths[1], 18.0);
+    let size = vec2(widths.iter().sum(), 18.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    // The accessible name says which side is down (R15); a keyboard
-    // activation (no pointer) flips to the other side.
+    // The accessible name says which position is down (R15).
     {
-        let state = format!("{tooltip} (now: {})", options[selected]);
+        let state = format!("{tooltip} (now: {})", options.get(selected).copied().unwrap_or("?"));
         response.widget_info(move || {
             let mut info = egui::WidgetInfo::labeled(egui::WidgetType::Button, true, state.clone());
             info.selected = Some(true);
@@ -300,12 +316,19 @@ pub fn stone_switch(ui: &mut Ui, palette: &Palette, options: [&str; 2], selected
     }
     let response = response.on_hover_text(tooltip);
     let mut chosen = None;
-    if response.clicked() {
+    if response.clicked() && !options.is_empty() {
         let index = match response.interact_pointer_pos() {
             Some(pointer) => {
-                if pointer.x < rect.left() + widths[0] { 0 } else { 1 }
+                let mut edge = rect.left();
+                widths
+                    .iter()
+                    .position(|width| {
+                        edge += width;
+                        pointer.x < edge
+                    })
+                    .unwrap_or(options.len() - 1)
             }
-            None => 1 - selected,
+            None => (selected + 1) % options.len(),
         };
         if index != selected {
             chosen = Some(index);

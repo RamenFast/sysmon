@@ -9,7 +9,7 @@ as fixture (a monitor passing only synthetic data proves nothing).
 | settings migration | `cargo test -p sysmon-app --lib` | nothing |
 | accuracy cross-checks | `cargo test -p sysmon-core --test accuracy` | a live Linux box |
 | live probes (smoke, icons, net attribution) | `cargo test -p sysmon-core --test live_smoke --test live_icons --test live_net_attribution` | live box; net test wants WAN + skips offline |
-| UI interactions | `cargo test -p sysmon-app --test ui_kittest` | GPU or lavapipe (wgpu) |
+| UI interactions | `cargo test -p sysmon-app --test ui_kittest` (+ `ui_overview`, `ui_bridge`, `ui_menu_target`, `ui_row_hover`: the Overview's graphs and CPU views, the Overview ↔ Processes bridge, menu latching, row hover read back as pixels) | GPU or lavapipe (wgpu) |
 | full e2e | `scripts/e2e.sh out/ target/release/sysmon` | Xvfb, openbox, xdotool, imagemagick, jq, xclip |
 | history at scale (ignored) | `cargo test --release -p sysmon-core --test history_scale -- --ignored --nocapture` | a week at 2 s through the real store; a simulated 30-day and 1-year store (hot week + packed archive): `history gpu --since 30d` timed with and without rollups, which must agree (~8 min, writes ~1 GB of scratch) |
 
@@ -53,7 +53,8 @@ Patterns to keep:
 ## The e2e script (`scripts/e2e.sh`)
 
 One command, full live receipts: boots Xvfb + openbox, launches the
-GUI with scratch config/socket, screenshots all 10 themes × 2 pages
+GUI with scratch config/socket, screenshots all 11 themes × the
+Overview (threads, total and grid CPU views) and Processes
 through `ctl shot`, opens a pop-out and **docks it by drag-drop**,
 checks single-instance raise, probe-via-socket, tap streaming, exit
 codes, clean socket removal. Screenshots land in the output dir

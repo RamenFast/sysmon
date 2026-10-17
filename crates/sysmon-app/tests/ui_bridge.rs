@@ -134,13 +134,30 @@ fn overview_and_processes_flow_both_ways() {
     harness.run_steps(6);
 
     // ---- P5: clicking the CPU rank-1 row inspects *that* pid, even
-    // when the ranking moves before the app applies the click.
-    let row = harness
+    // when the ranking moves before the app applies the click. The
+    // pointer rests on orchard's row on the frame the user saw; the
+    // snapshot re-ranks; press and release then arrive together in the
+    // next frame (kittest's `click()` would spend a frame per event and
+    // paint the new ranking before the press, which is a different
+    // story). egui hit-tests the press against the frame that was
+    // painted, so only a row keyed by pid, not by slot, gets it.
+    let row_center = harness
         .query_all_by_role(Role::Button)
         .find(|n| n.accesskit_node().label().is_some_and(|l| l.ends_with(&format!("PID {ROOT}"))))
-        .expect("orchard's overview row");
-    row.click();
+        .expect("orchard's overview row")
+        .rect()
+        .center();
+    harness.input_mut().events.push(egui::Event::PointerMoved(row_center));
+    harness.run_steps(1);
     *control.latest.write().unwrap() = Arc::new(snapshot(HEAVY, 2.0));
+    for pressed in [true, false] {
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos: row_center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
     harness.run_steps(8);
     assert_eq!(harness.state().page, Page::Processes, "a row click opens Processes");
     assert_eq!(harness.state().table_state.inspector.pid, Some(ROOT), "P5: Inspector holds the clicked pid");

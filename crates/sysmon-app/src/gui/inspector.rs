@@ -315,14 +315,17 @@ pub fn inspector(
             section(ui, palette, Glyph::Tree, &format!("Children ({})", children.len()), |ui| {
                 for child in children.iter().take(12) {
                     // One click rect per row, painted — labels on top
-                    // would swallow the click.
-                    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
+                    // would swallow the click. Keyed by pid so a child
+                    // list that shifts between paint and click still
+                    // drills into the clicked child (P5's sibling).
+                    let (_, rect) = ui.allocate_space(vec2(ui.available_width(), 18.0));
+                    let response = ui.interact(rect, ui.id().with(("inspector_child", child.pid)), Sense::click());
                     let name = icons::display_name(child).to_string();
                     let a11y = format!("Inspect {name} — PID {}", child.pid);
                     response.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, a11y.clone()));
                     if ui.is_rect_visible(rect) {
                         if response.hovered() {
-                            ui.painter().rect_filled(rect, 0.0, palette.ink.gamma_multiply(0.06));
+                            super::widgets::paint_row_hover(ui.painter(), rect, palette, true);
                         }
                         let icon = egui::Rect::from_center_size(egui::pos2(rect.left() + 8.0, rect.center().y), vec2(13.0, 13.0));
                         icon_cache.paint(ui, icon, child, palette.muted);

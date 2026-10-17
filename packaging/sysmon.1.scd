@@ -59,7 +59,10 @@ networking first — without scraping a UI.
 	*interval* _seconds_; *page* overview|processes; *theme* _id_;
 	*palette* _id_; *popout*/*popin* _section_; *shot* [_path_]
 	(writes a PNG of the window and prints its path); *compact*
-	on|off; *units* decimal|binary. A GUI's *status* names the
+	on|off; *units* decimal|binary; *temperature*
+	celsius|fahrenheit|both; *cpugraph* total|threads|grid (the
+	Overview's CPU card: one trace, a coloured line per thread, or a
+	small graph per thread). A GUI's *status* names the
 	adapter the window renders on (_renderer_); a CPU-rasterizer
 	fallback — no usable Vulkan driver — adds _renderer_hint_ with
 	the fix, and the window says so at startup too. Degraded modes

@@ -81,12 +81,12 @@ display=":$((90 + RANDOM % 9))"
 Xvfb "${display}" -screen 0 1280x900x24 >/dev/null 2>&1 &
 pids+=("$!")
 sleep 1
-# Which page the window measures on (SYSMON_PERF_PAGE: performance |
-# overview | processes; 3.1 and older ignore the key and open the
-# Overview) and the Performance page's CPU graph (SYSMON_PERF_CPUGRAPH:
-# auto | combined | per_thread).
-perf_page="${SYSMON_PERF_PAGE:-performance}"
-perf_cpugraph="${SYSMON_PERF_CPUGRAPH:-auto}"
+# Which page the window measures on (SYSMON_PERF_PAGE: overview |
+# processes; 3.1 and older ignore the key and open the Overview) and the
+# Overview's CPU graph (SYSMON_PERF_CPUGRAPH: threads | total | grid;
+# 3.5 and older read threads/total/grid as unknown and fall back).
+perf_page="${SYSMON_PERF_PAGE:-overview}"
+perf_cpugraph="${SYSMON_PERF_CPUGRAPH:-threads}"
 printf '{"settings_version":2,"update_interval_seconds":1.0,"start_page":"%s","cpu_graph_mode":"%s"}' \
   "${perf_page}" "${perf_cpugraph}" >"${XDG_CONFIG_HOME}/sysmon/settings.json"
 DISPLAY="${display}" "${bin}" >/dev/null 2>&1 &

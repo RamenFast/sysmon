@@ -230,7 +230,8 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             "ctl needs a verb",
             "verbs: status quit pause resume interval <s> raise page <overview|processes> \
              theme <id> palette <id> popout <section> popin <section> shot [path] \
-             compact <on|off> units <decimal|binary> temperature <celsius|fahrenheit|both>",
+             compact <on|off> units <decimal|binary> temperature <celsius|fahrenheit|both> \
+             cpugraph <total|threads|grid>",
             EXIT_BAD_ARGS,
             force_json,
         );
@@ -1035,9 +1036,10 @@ fn build_schema() -> Value {
                         "resume":   {"value": null, "needs_gui": true},
                         "interval": {"value": {"type": "number", "minimum": 0.2, "maximum": 60.0}, "needs_gui": true},
                         "raise":    {"value": null, "needs_gui": true},
-                        "page":     {"value": {"enum": ["performance", "overview", "processes"]}, "needs_gui": true},
-                        "cpugraph": {"value": {"enum": ["auto", "combined", "per_thread"]}, "needs_gui": true,
-                                      "note": "Performance page CPU graph: auto picks per_thread when the column is ≥ 420 px wide"},
+                        "page":     {"value": {"enum": ["overview", "processes"]}, "needs_gui": true,
+                                      "note": "3.6 folded the Performance page into the Overview; `performance` exits 3 with the fix"},
+                        "cpugraph": {"value": {"enum": ["total", "threads", "grid"]}, "needs_gui": true,
+                                      "note": "the Overview CPU card's view: total = one trace (busy + kernel); threads = a coloured line per thread (default); grid = a small graph per thread"},
                         "theme":    {"value": {"enum": theme_enum}, "needs_gui": true},
                         "palette":  {"value": {"enum": palette_enum}, "needs_gui": true},
                         "popout":   {"value": {"enum": popout_enum}, "needs_gui": true},

@@ -14,24 +14,22 @@ use sysmon_core::units::{
     format_temperature_in,
 };
 
+use super::app::Histories;
 use super::glyphs::{self, Glyph};
-use super::graphs::{self, GraphConfig, GraphStyle, History};
+use super::graphs::{self, History, ScopeConfig};
 use super::icons::{self, IconCache};
+use super::overview::CpuGraphMode;
 use super::processes::SortColumn;
 use super::sensors_view;
 use super::settings::{Display, Settings};
 use super::theme::{
     GRAPH_SERIES_CPU, GRAPH_SERIES_GPU, GRAPH_SERIES_MEMORY, GRAPH_SERIES_NET_DOWN,
-    GRAPH_SERIES_NET_UP, Palette, card_frame, graph_color,
+    GRAPH_SERIES_NET_UP, Palette, card_frame, graph_color, thread_colors,
 };
-use super::widgets::{ButtonGlyph, glyph_button};
+use super::widgets::{ButtonGlyph, glyph_button, paint_row_hover, stone_switch};
 
 pub const FULL_GRAPH_HEIGHT: f32 = 66.0;
 pub const COMPACT_GRAPH_HEIGHT: f32 = 36.0;
-
-/// A Zen CPU's Tctl throttles near 90–95 °C and k10temp states no
-/// limit, so the card warns on its own from here.
-const CPU_HOT_CELSIUS: f32 = 85.0;
 
 /// Everything a card needs for one frame.
 pub struct CardContext<'a> {
@@ -40,6 +38,10 @@ pub struct CardContext<'a> {
     pub display: Display,
     pub compact: bool,
     pub snapshot: &'a SystemSnapshot,
+    /// Every graphed series, kept by the sampler (one sample per tick).
+    pub histories: &'a Histories,
+    /// The CPU card's view: total · threads · grid.
+    pub cpu_graph_mode: CpuGraphMode,
     pub icon_cache: &'a mut IconCache,
     pub actions: &'a mut Vec<AppAction>,
     pub popped_out: &'a [String],
@@ -76,7 +78,7 @@ pub enum AppAction {
     /// button; a pop-out has its own beside the pin).
     CopySection(&'static str),
     ToggleSensorGroup(String),
-    /// Performance page CPU graph: "auto" | "combined" | "per_thread".
+    /// The CPU card's view: "total" | "threads" | "grid".
     SetCpuGraphMode(&'static str),
     /// Surface a short toast (selection full, etc.).
     Notify(String),
@@ -106,41 +108,25 @@ pub fn toggle_selection(selected: &mut Vec<i32>, pid: i32, actions: &mut Vec<App
     }
 }
 
-/// Which card, with the histories it graphs.
-pub enum Card<'a> {
-    Gpu(&'a History),
-    Memory(&'a History),
-    Cpu(&'a History),
-    Network(&'a History, &'a History),
-    Disks,
-    Sensors,
-}
-
-/// The one place a card is drawn (overview and pop-outs alike).
-pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, card: Card) {
-    card_frame(cx.palette).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        match card {
-            Card::Gpu(history) => gpu_card(ui, cx, history),
-            Card::Memory(history) => memory_card(ui, cx, history),
-            Card::Cpu(history) => cpu_card(ui, cx, history),
-            Card::Network(down, up) => network_card(ui, cx, down, up),
-            Card::Disks => disks_card(ui, cx),
-            Card::Sensors => sensors_card(ui, cx),
-        }
+/// The one place a card is drawn (overview and pop-outs alike), by
+/// section key: gpu memory cpu network disks sensors.
+pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, section: &str) {
+    // Each card gets its own id scope: a child Ui's stable id doesn't
+    // differ between siblings, and rows inside are keyed by pid (P5),
+    // so the same process in two cards' top-3 would otherwise clash.
+    ui.push_id(section, |ui| {
+        card_frame(cx.palette).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match section {
+                "gpu" => gpu_card(ui, cx),
+                "memory" => memory_card(ui, cx),
+                "cpu" => cpu_card(ui, cx),
+                "network" => network_card(ui, cx),
+                "disks" => disks_card(ui, cx),
+                _ => sensors_card(ui, cx),
+            }
+        });
     });
-}
-
-/// The card for a section key, borrowing the right histories.
-pub fn card_for<'a>(section: &str, histories: &'a super::app::Histories) -> Card<'a> {
-    match section {
-        "gpu" => Card::Gpu(&histories.gpu),
-        "memory" => Card::Memory(&histories.memory),
-        "cpu" => Card::Cpu(&histories.cpu),
-        "network" => Card::Network(&histories.net_down, &histories.net_up),
-        "disks" => Card::Disks,
-        _ => Card::Sensors,
-    }
 }
 
 impl<'a> CardContext<'a> {
@@ -150,6 +136,7 @@ impl<'a> CardContext<'a> {
         palette: &'a Palette,
         settings: &'a Settings,
         snapshot: &'a SystemSnapshot,
+        histories: &'a Histories,
         icon_cache: &'a mut IconCache,
         actions: &'a mut Vec<AppAction>,
         selected: &'a mut Vec<i32>,
@@ -161,6 +148,8 @@ impl<'a> CardContext<'a> {
             display: settings.display(),
             compact,
             snapshot,
+            histories,
+            cpu_graph_mode: CpuGraphMode::from_id(&settings.cpu_graph_mode).unwrap_or(CpuGraphMode::Threads),
             icon_cache,
             actions,
             popped_out: &settings.popped_out_sections,
@@ -179,6 +168,36 @@ impl<'a> CardContext<'a> {
 
     fn temperature(&self, celsius: f32) -> String {
         format_temperature_in(celsius, self.display.temperature)
+    }
+
+    /// A series colour from the active graph palette.
+    fn series(&self, index: usize) -> Color32 {
+        graph_color(self.graph_palette_id, index, self.palette.dark)
+    }
+
+    /// The quieter sibling of a series colour (kernel time, VRAM):
+    /// mixed toward the ink that reads ON THE FIELD. On light themes
+    /// the page ink is the field colour itself, so mixing toward it
+    /// sank the second trace to 2:1 (reviewer R13).
+    fn sibling(&self, index: usize) -> Color32 {
+        self.series(index).lerp_to_gamma(self.palette.on_field(), 0.45)
+    }
+
+    /// Thermal traces: the theme's two signature text colours on dark
+    /// themes; on light themes those are dark on a dark field, so the
+    /// two warmest series colours stand in (R13).
+    fn thermal_colors(&self) -> (Color32, Color32) {
+        if self.palette.dark {
+            (self.palette.value, self.palette.title)
+        } else {
+            (self.series(GRAPH_SERIES_MEMORY), self.series(GRAPH_SERIES_GPU))
+        }
+    }
+
+    /// The greyscale room dashes the second trace: value alone has to
+    /// tell two lines apart there (V6).
+    fn dashed_second(&self) -> bool {
+        self.palette.id == "greyscale"
     }
 }
 
@@ -280,6 +299,93 @@ fn graph_height(cx: &CardContext) -> f32 {
     }
 }
 
+/// The row above a graph: what each colour means on the left, a card's
+/// own control or number on the right.
+fn graph_legend_row(ui: &mut Ui, cx: &mut CardContext, entries: &[(Color32, &str)], right: impl FnOnce(&mut Ui, &mut CardContext)) {
+    ui.horizontal(|ui| {
+        graphs::legend(ui, entries);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| right(ui, cx));
+    });
+}
+
+/// "busy 37%  kernel 9%": one readout per series, named.
+fn percent_formatter(labels: &'static [&'static str]) -> impl Fn(&[f64]) -> String {
+    move |values: &[f64]| {
+        values
+            .iter()
+            .zip(labels)
+            .map(|(value, label)| format!("{label} {value:.0}%"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    }
+}
+
+/// A two-series percentage scope (busy + its quieter sibling): the
+/// common case of the GPU card and the CPU's total view.
+fn percent_scope(
+    ui: &mut Ui,
+    cx: &CardContext,
+    name: &str,
+    series: [&History; 2],
+    colors: [Color32; 2],
+    labels: &'static [&'static str],
+) -> egui::Response {
+    graphs::scope_graph(
+        ui,
+        cx.palette,
+        &series,
+        &ScopeConfig {
+            name,
+            height: graph_height(cx),
+            fixed_maximum: Some(100.0),
+            minimum_autoscale: 100.0,
+            colors: &colors,
+            dashed_second: cx.dashed_second(),
+            ceiling_formatter: &|v| format!("{v:.0}%"),
+            hover_formatter: &percent_formatter(labels),
+            tag: None,
+            mini: false,
+            fill_all: false,
+        },
+    )
+}
+
+/// A two-series rate scope (down/up, read/write): autoscaled, the
+/// ceiling written in the corner so a flat line is never misread.
+fn rate_scope(
+    ui: &mut Ui,
+    cx: &CardContext,
+    name: &str,
+    series: [&History; 2],
+    colors: [Color32; 2],
+    labels: [&'static str; 2],
+    floor: f64,
+) -> egui::Response {
+    let units = cx.display.units;
+    let hover = move |values: &[f64]| {
+        format!("{} {}  {} {}", labels[0], format_rate(values[0], units), labels[1], format_rate(values[1], units))
+    };
+    let ceiling = move |v: f64| format_rate(v, units);
+    graphs::scope_graph(
+        ui,
+        cx.palette,
+        &series,
+        &ScopeConfig {
+            name,
+            height: graph_height(cx),
+            fixed_maximum: None,
+            minimum_autoscale: floor,
+            colors: &colors,
+            dashed_second: cx.dashed_second(),
+            ceiling_formatter: &ceiling,
+            hover_formatter: &hover,
+            tag: None,
+            mini: false,
+            fill_all: false,
+        },
+    )
+}
+
 /// A quiet "more ›" link under a top-3 list: the whole table, sorted
 /// by what this list ranks by. The bridge from Overview to Processes.
 fn more_link(ui: &mut Ui, cx: &mut CardContext, column: SortColumn, what: &str) {
@@ -306,7 +412,12 @@ fn more_link(ui: &mut Ui, cx: &mut CardContext, column: SortColumn, what: &str) 
 /// actions, click to inspect, Ctrl+click to multi-select.
 fn top_process_row(ui: &mut Ui, cx: &mut CardContext, rank: usize, record: &ProcessRecord, value_text: String) {
     let row_height = 18.0;
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
+    // The click target is keyed by pid, not by its slot: egui matches a
+    // click to the id under the pointer on the frame that was painted,
+    // so a re-rank landing between that paint and the click still
+    // inspects the process that was clicked (P5).
+    let (_, rect) = ui.allocate_space(vec2(ui.available_width(), row_height));
+    let response = ui.interact(rect, ui.id().with(("top_process_row", record.pid)), Sense::click());
     let name = icons::display_name(record).to_string();
     // Assistive tech (and kittest) sees each row as a named button.
     let a11y_label = format!("{name} — PID {}", record.pid);
@@ -321,7 +432,9 @@ fn top_process_row(ui: &mut Ui, cx: &mut CardContext, rank: usize, record: &Proc
                 .rect_filled(Rect::from_min_max(rect.min, pos2(rect.min.x + 3.0, rect.max.y)), 0.0, color);
         }
         if response.hovered() {
-            ui.painter().rect_filled(rect, 0.0, cx.palette.ink.gamma_multiply(0.05));
+            // The selected row already wears its slot colour's spine.
+            let selected = cx.selected.contains(&record.pid);
+            paint_row_hover(ui.painter(), rect, cx.palette, !selected);
         }
         let painter = ui.painter();
         let mut x = rect.left() + 2.0;
@@ -499,7 +612,7 @@ where
 
 // ------------------------------------------------------------------ cards
 
-fn gpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
+fn gpu_card(ui: &mut Ui, cx: &mut CardContext) {
     let Some(gpu) = cx.snapshot.gpu.clone() else {
         card_header(ui, cx, "gpu", "GPU", "", "—");
         return;
@@ -521,20 +634,11 @@ fn gpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
     }
     card_header(ui, cx, "gpu", "GPU", &gpu.device_name, &headline);
 
-    let color = graph_color(cx.graph_palette_id, GRAPH_SERIES_GPU, cx.palette.dark);
-    graphs::history_graph(
-        ui,
-        cx.palette,
-        &[history],
-        &GraphConfig {
-            style: GraphStyle::Line,
-            height: graph_height(cx),
-            fixed_maximum: Some(100.0),
-            minimum_autoscale: 1.0,
-            colors: &[color],
-            hover_formatter: &|values| format!("{:.0}% busy", values[0]),
-        },
-    );
+    let color = cx.series(GRAPH_SERIES_GPU);
+    let vram_color = cx.sibling(GRAPH_SERIES_GPU);
+    graph_legend_row(ui, cx, &[(color, "busy"), (vram_color, "VRAM")], |_, _| {});
+    let histories = cx.histories;
+    percent_scope(ui, cx, "GPU history", [&histories.gpu, &histories.vram], [color, vram_color], &["busy", "VRAM"]);
 
     if gpu.vram_total_bytes > 0 {
         let fraction = gpu.vram_used_bytes as f32 / gpu.vram_total_bytes as f32;
@@ -628,7 +732,7 @@ fn labelled_bar(ui: &mut Ui, palette: &Palette, label: &str, value: String, frac
     });
 }
 
-fn memory_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
+fn memory_card(ui: &mut Ui, cx: &mut CardContext) {
     let Some(memory) = cx.snapshot.memory.clone() else {
         card_header(ui, cx, "memory", "Memory", "", "—");
         return;
@@ -645,18 +749,29 @@ fn memory_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
     let subtitle = memory_subtitle(&memory, cx.display.units);
     card_header(ui, cx, "memory", "Memory", &subtitle, &headline);
 
-    let color = graph_color(cx.graph_palette_id, GRAPH_SERIES_MEMORY, cx.palette.dark);
-    graphs::history_graph(
+    let color = cx.series(GRAPH_SERIES_MEMORY);
+    let cache_color = color.gamma_multiply(0.55);
+    graph_legend_row(ui, cx, &[(color, "used"), (cache_color, "cache")], |_, _| {});
+    // Stacked (R8): the lower trace is used, the upper used + cache,
+    // and the band between them is the cache. The sampler keeps
+    // `memory_stacked` as that upper trace.
+    let histories = cx.histories;
+    graphs::scope_graph(
         ui,
         cx.palette,
-        &[history],
-        &GraphConfig {
-            style: GraphStyle::Bars,
+        &[&histories.memory_stacked, &histories.memory],
+        &ScopeConfig {
+            name: "Memory history",
             height: graph_height(cx),
             fixed_maximum: Some(100.0),
-            minimum_autoscale: 1.0,
-            colors: &[color],
-            hover_formatter: &|values| format!("{:.0}% used", values[0]),
+            minimum_autoscale: 100.0,
+            colors: &[cache_color, color],
+            dashed_second: cx.dashed_second(),
+            ceiling_formatter: &|v| format!("{v:.0}%"),
+            hover_formatter: &|values: &[f64]| format!("used {:.0}%  cache {:.0}%", values[1], values[0] - values[1]),
+            tag: None,
+            mini: false,
+            fill_all: true,
         },
     );
 
@@ -709,6 +824,26 @@ fn memory_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
         stats.push(stat("Buffers", cx.size(memory.buffers_bytes)));
         stats.push(stat("Dirty", cx.size(memory.dirty_bytes)));
     }
+    // Commit charge and kernel memory (the 3.2 Performance page's
+    // boxes, folded in): what processes were promised, and what the
+    // kernel keeps for itself.
+    stats.push((
+        "Commit",
+        format!("{} / {}", cx.size(memory.committed_bytes), cx.size(memory.commit_limit_bytes)),
+        Some(
+            "Committed_AS / CommitLimit: address space promised to processes, against a limit \
+             that is only advisory under the default overcommit heuristic"
+                .into(),
+        ),
+    ));
+    stats.push((
+        "Peak*",
+        cx.size(cx.histories.commit_peak_bytes.max(memory.committed_bytes)),
+        Some("* since SysMon launched: SysMon's own high-water mark of the commit charge, not a kernel figure".into()),
+    ));
+    stats.push(("Slab", cx.size(memory.slab_bytes), Some("every kernel slab cache, reclaimable and not".into())));
+    stats.push(("Page tables", cx.size(memory.page_tables_bytes), None));
+    stats.push(("Kernel stacks", cx.size(memory.kernel_stack_bytes), Some("KernelStack".into())));
     stat_grid(ui, cx.palette, &stats);
 
     top_list(ui, cx, SortColumn::Memory, "memory", |p| p.memory_rss_bytes as f64, |cx, record| {
@@ -756,46 +891,77 @@ fn installed_note(memory: &sysmon_core::snapshot::MemorySnapshot, installed: u64
     note
 }
 
-fn cpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
+fn cpu_card(ui: &mut Ui, cx: &mut CardContext) {
     let Some(cpu) = cx.snapshot.cpu.clone() else {
         card_header(ui, cx, "cpu", "CPU", "", "—");
         return;
     };
     // Headline clock: what the working cores run at (busy-weighted);
-    // the plain mean over 32 threads mostly measures parked ones.
+    // the plain mean over 32 threads mostly measures parked ones. The
+    // temperature sits beside it as data, never as a warning: Ben's
+    // cooler is known to be small and a high Tctl is expected (10-01).
     let mut headline = format_percent(cpu.overall_percent);
     if let Some(frequency) = cpu.frequency_busy_mhz.or(cpu.frequency_mhz) {
         headline += &format!(" · {}", format_frequency_mhz(frequency));
     }
-    let hot = cpu.temperature_celsius.is_some_and(|t| t >= CPU_HOT_CELSIUS);
     if let Some(temperature) = cpu.temperature_celsius {
         headline += &format!(" · {}", cx.temperature(temperature));
     }
     let subtitle = format!("{} threads", cpu.core_count);
     card_header(ui, cx, "cpu", "CPU", &subtitle, &headline);
-    if hot {
-        hot_note(ui, cx, cpu.temperature_celsius.unwrap_or(0.0), cpu.overall_percent);
-    }
 
-    let color = graph_color(cx.graph_palette_id, GRAPH_SERIES_CPU, cx.palette.dark);
-    graphs::history_graph(
-        ui,
-        cx.palette,
-        &[history],
-        &GraphConfig {
-            style: GraphStyle::Area,
-            height: graph_height(cx),
-            fixed_maximum: Some(100.0),
-            minimum_autoscale: 1.0,
-            colors: &[color],
-            hover_formatter: &|values| format!("{:.0}% overall", values[0]),
-        },
-    );
+    let busy_color = cx.series(GRAPH_SERIES_CPU);
+    let kernel_color = cx.sibling(GRAPH_SERIES_CPU);
+    let mode = cx.cpu_graph_mode;
+    // Thread i wears colour i in the lines, the bars and the grid.
+    let thread_palette = thread_colors(cx.graph_palette_id, cpu.per_core_percent.len());
+    let swatch = |index: usize| thread_palette.get(index).copied().unwrap_or(busy_color);
+    let legend: Vec<(Color32, &str)> = match mode {
+        CpuGraphMode::Total => vec![(busy_color, "busy"), (kernel_color, "kernel")],
+        CpuGraphMode::Threads => vec![(swatch(0), ""), (swatch(1), ""), (swatch(2), "a line per thread")],
+        CpuGraphMode::Grid => vec![(swatch(0), ""), (swatch(1), ""), (swatch(2), "a graph per thread")],
+    };
+    graph_legend_row(ui, cx, &legend, |ui, cx| {
+        let labels: Vec<&str> = CpuGraphMode::ALL.iter().map(|m| m.label()).collect();
+        if let Some(chosen) = stone_switch(
+            ui,
+            cx.palette,
+            &labels,
+            mode.index(),
+            "CPU graph: the whole CPU as one trace, every thread as its own line, or a small graph per thread",
+        ) {
+            cx.actions.push(AppAction::SetCpuGraphMode(CpuGraphMode::ALL[chosen].id()));
+        }
+    });
+
+    let histories = cx.histories;
+    let focus_id = ui.id().with("cpu_thread_focus");
+    match mode {
+        CpuGraphMode::Total => {
+            percent_scope(ui, cx, "CPU history", [&histories.cpu, &histories.cpu_kernel], [busy_color, kernel_color], &["busy", "kernel"]);
+        }
+        CpuGraphMode::Threads => {
+            // Taller than the other graphs: thirty-two lines need room
+            // to be told apart.
+            let height = (graph_height(cx) * 1.6).round();
+            graphs::thread_lines_graph(ui, cx.palette, &histories.per_core, &thread_palette, height, focus_id);
+        }
+        CpuGraphMode::Grid => {
+            graphs::per_thread_grid(ui, cx.palette, &histories.per_core, &thread_palette, graph_height(cx) * 2.0);
+        }
+    }
 
     if cx.compact {
         return;
     }
-    graphs::per_core_bars(ui, cx.palette, &cpu.per_core_percent, color);
+    match mode {
+        CpuGraphMode::Total => graphs::per_core_bars(ui, cx.palette, &cpu.per_core_percent, &[busy_color], None),
+        // The bars are the lines' legend: point at one to single that
+        // thread out above.
+        CpuGraphMode::Threads => graphs::per_core_bars(ui, cx.palette, &cpu.per_core_percent, &thread_palette, Some(focus_id)),
+        // The grid already shows every thread on its own.
+        CpuGraphMode::Grid => {}
+    }
     let processes = cx.snapshot.processes.as_ref().map(|p| p.len());
     stat_grid(
         ui,
@@ -814,7 +980,17 @@ fn cpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
             (
                 "Process count",
                 processes.map(|n| n.to_string()).unwrap_or("—".into()),
-                Some(format!("{} kernel tasks (threads) in total", cpu.tasks_total)),
+                None,
+            ),
+            (
+                "Threads",
+                cpu.tasks_total.to_string(),
+                Some("every task the kernel schedules, threads of all processes included (loadavg)".into()),
+            ),
+            (
+                "Kernel",
+                format!("{:.0}%", cpu.kernel_percent),
+                Some("time in the kernel: system + irq + softirq, part of busy".into()),
             ),
             stat("Ctx/s", format!("{:.0}", cpu.context_switches_per_second)),
             (
@@ -845,27 +1021,7 @@ fn cpu_card(ui: &mut Ui, cx: &mut CardContext, history: &History) {
     });
 }
 
-/// A calm, clear line when the CPU runs hot — light load at a high
-/// temperature usually means cooling (seating, paste, pump header),
-/// which software can't fix but should say.
-fn hot_note(ui: &mut Ui, cx: &CardContext, celsius: f32, busy: f32) {
-    ui.horizontal(|ui| {
-        glyphs::show(ui, Glyph::Thermometer, 12.0, cx.palette.accent);
-        let text = if busy < 30.0 {
-            format!("Running warm for {busy:.0}% load — worth checking the cooler")
-        } else {
-            "Running near its limit".to_string()
-        };
-        ui.label(RichText::new(text).color(cx.palette.accent).size(10.5)).on_hover_text(format!(
-            "{} on the die. Zen 3 throttles at 90 °C (194 °F). At light load this usually \
-             points at cooling: cooler seating and paste, or a pump on a fan header that \
-             isn't spinning (see Sensors → Motherboard).",
-            format_temperature_in(celsius, sysmon_core::units::TemperatureScale::Both)
-        ));
-    });
-}
-
-fn network_card(ui: &mut Ui, cx: &mut CardContext, down: &History, up: &History) {
+fn network_card(ui: &mut Ui, cx: &mut CardContext) {
     let Some(network) = cx.snapshot.network.clone() else {
         card_header(ui, cx, "network", "Network", "", "—");
         return;
@@ -873,28 +1029,11 @@ fn network_card(ui: &mut Ui, cx: &mut CardContext, down: &History, up: &History)
     let headline = format!("↓ {}   ↑ {}", cx.rate(network.download_bps), cx.rate(network.upload_bps));
     card_header(ui, cx, "network", "Network", "", &headline);
 
-    let down_color = graph_color(cx.graph_palette_id, GRAPH_SERIES_NET_DOWN, cx.palette.dark);
-    let up_color = graph_color(cx.graph_palette_id, GRAPH_SERIES_NET_UP, cx.palette.dark);
-    let units_for_hover = cx.display.units;
-    graphs::history_graph(
-        ui,
-        cx.palette,
-        &[down, up],
-        &GraphConfig {
-            style: GraphStyle::Line,
-            height: graph_height(cx),
-            fixed_maximum: None,
-            minimum_autoscale: 20.0 * 1024.0,
-            colors: &[down_color, up_color],
-            hover_formatter: &move |values| {
-                format!(
-                    "↓ {}   ↑ {}",
-                    format_rate(values[0], units_for_hover),
-                    format_rate(values.get(1).copied().unwrap_or(0.0), units_for_hover)
-                )
-            },
-        },
-    );
+    let down_color = cx.series(GRAPH_SERIES_NET_DOWN);
+    let up_color = cx.series(GRAPH_SERIES_NET_UP);
+    graph_legend_row(ui, cx, &[(down_color, "down"), (up_color, "up")], |_, _| {});
+    let histories = cx.histories;
+    rate_scope(ui, cx, "Network history", [&histories.net_down, &histories.net_up], [down_color, up_color], ["↓", "↑"], 20_000.0);
 
     if cx.compact {
         return;
@@ -989,6 +1128,18 @@ fn disks_card(ui: &mut Ui, cx: &mut CardContext) {
     let headline = format!("R {}   W {}", cx.rate(total_read), cx.rate(total_write));
     card_header(ui, cx, "disks", "Disks", "", &headline);
 
+    let read_color = cx.series(GRAPH_SERIES_NET_DOWN);
+    let write_color = cx.series(GRAPH_SERIES_NET_UP);
+    // The busiest drive's share of time with I/O in flight, beside the
+    // legend (3.2's Disk meter, as a number).
+    let busiest = disks.iter().map(|d| d.util_percent).fold(0.0f32, f32::max);
+    graph_legend_row(ui, cx, &[(read_color, "read"), (write_color, "write")], |ui, _| {
+        ui.label(RichText::new(format!("busiest {busiest:.0}%")).monospace().size(10.5).color(ui.visuals().weak_text_color()))
+            .on_hover_text("the busiest drive's share of the window with I/O in flight (iostat's %util)");
+    });
+    let histories = cx.histories;
+    rate_scope(ui, cx, "Disk history", [&histories.disk_read, &histories.disk_write], [read_color, write_color], ["read", "write"], 1.0e6);
+
     for disk in &disks {
         ui.horizontal(|ui| {
             glyphs::show(ui, Glyph::Drive, 12.0, cx.palette.muted);
@@ -1051,6 +1202,13 @@ fn disks_card(ui: &mut Ui, cx: &mut CardContext) {
 fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
     let Some(sensors) = cx.snapshot.sensors.clone() else {
         card_header(ui, cx, "sensors", "Sensors", "", "—");
+        // The thermal history reads the CPU and GPU snapshots, not the
+        // hwmon groups: it still has something to say without them.
+        let has_temperature = cx.snapshot.cpu.as_ref().is_some_and(|c| c.temperature_celsius.is_some())
+            || cx.snapshot.gpu.as_ref().is_some_and(|g| g.temperature_edge_celsius.is_some());
+        if has_temperature {
+            thermal_graph(ui, cx);
+        }
         return;
     };
     let groups = sensors_view::group_sensors(&sensors);
@@ -1067,6 +1225,7 @@ fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
     let headline = hottest.as_ref().map(|(c, _)| cx.temperature(*c)).unwrap_or("—".into());
     let subtitle = hottest.map(|(_, at)| format!("hottest: {at}")).unwrap_or_default();
     card_header(ui, cx, "sensors", "Sensors", &subtitle, &headline);
+    thermal_graph(ui, cx);
     if cx.compact {
         return;
     }
@@ -1110,4 +1269,71 @@ fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
             );
         });
     }
+}
+
+/// The CPU and GPU temperatures over the window, with the busy clock
+/// beside them as a number: the small cooler shows up here as data,
+/// never as a warning (Ben, 10-01). 0..100 °C, the scale everyone
+/// knows; a reading past 100 raises the ceiling and writes it in the
+/// corner (R22).
+fn thermal_graph(ui: &mut Ui, cx: &mut CardContext) {
+    let histories = cx.histories;
+    let cpu_temperature = &histories.cpu_temperature;
+    let gpu_temperature = &histories.gpu_temperature;
+    if cpu_temperature.is_empty() && gpu_temperature.is_empty() {
+        return;
+    }
+    let (cpu_color, gpu_color) = cx.thermal_colors();
+    let clock = cx.snapshot.cpu.as_ref().and_then(|cpu| cpu.frequency_busy_mhz.or(cpu.frequency_mhz));
+    let mut legend = Vec::new();
+    if !cpu_temperature.is_empty() {
+        legend.push((cpu_color, "CPU"));
+    }
+    if !gpu_temperature.is_empty() {
+        legend.push((gpu_color, "GPU"));
+    }
+    graph_legend_row(ui, cx, &legend, |ui, _| {
+        if let Some(mhz) = clock {
+            ui.label(RichText::new(format_frequency_mhz(mhz)).monospace().size(10.5).color(ui.visuals().weak_text_color()))
+                .on_hover_text("the CPU's busy clock now, beside its heat");
+        }
+    });
+    let mut series: Vec<&History> = Vec::new();
+    let mut colors = Vec::new();
+    let mut names: Vec<&'static str> = Vec::new();
+    for (history, color, name) in [(cpu_temperature, cpu_color, "CPU"), (gpu_temperature, gpu_color, "GPU")] {
+        if !history.is_empty() {
+            series.push(history);
+            colors.push(color);
+            names.push(name);
+        }
+    }
+    let scale = cx.display.temperature;
+    let hover = move |values: &[f64]| {
+        values
+            .iter()
+            .zip(&names)
+            .map(|(value, name)| format!("{name} {}", format_temperature_in(*value as f32, scale)))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    let hottest = cpu_temperature.max().max(gpu_temperature.max());
+    graphs::scope_graph(
+        ui,
+        cx.palette,
+        &series,
+        &ScopeConfig {
+            name: "Thermal history",
+            height: graph_height(cx),
+            fixed_maximum: if hottest > 100.0 { None } else { Some(100.0) },
+            minimum_autoscale: 100.0,
+            colors: &colors,
+            dashed_second: cx.dashed_second(),
+            ceiling_formatter: &|v| format!("{v:.0}°C"),
+            hover_formatter: &hover,
+            tag: None,
+            mini: false,
+            fill_all: false,
+        },
+    );
 }

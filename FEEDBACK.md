@@ -63,3 +63,7 @@ Rules:
 - 2026-10-10 [feature] yes to Clear and Export buttons for the usage history
 - 2026-10-10 [decision] old history must not auto-delete: "id want to see what happens when we keep collecting this info over a long time period, maybe after 7 days it compresses"; worried about SSD bloat and output that is hard to navigate, so the long-term tier must be dense and its growth visible
 - 2026-10-10 [decision] yes to releasing 3.5.0 with the tiered history
+- 2026-10-16 [ui] the Performance and Overview tabs are redundant: fold anything unique into the Overview and remove the Performance page
+- 2026-10-16 [feature] CPU graph like other task managers: a different coloured line per CPU thread in one graph view, instead of one collective usage bar; a button to switch views wherever that is ideal (design left to Nexus)
+- 2026-10-16 [bugfix] hovering a process row in the table makes its text impossible to read; fix the theming and make the hover highlight gentler on the eyes while staying legible
+- 2026-10-16 [feature] pop-out windows and windows a process action opens must never open tiled: SysMon and all its windows open floating by default

@@ -15,13 +15,19 @@ pub mod glyphs;
 pub mod graphs;
 pub mod icons;
 pub mod inspector;
-pub mod performance;
+pub mod overview;
 pub mod processes;
 pub mod sensors_view;
 pub mod settings;
 pub mod specs;
 pub mod theme;
 pub mod widgets;
+
+/// The Wayland app id (X11 WM_CLASS) every SysMon window carries: the
+/// main window, the pop-outs and the details windows alike, so the
+/// desktop can treat them as one app (Ben's Sway floats them all, and
+/// the bar's "Open system monitor" finds the window by it).
+pub const APP_ID: &str = "sysmon";
 
 use std::sync::Arc;
 
@@ -118,7 +124,7 @@ pub fn run(_arguments: &[String]) -> i32 {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("SysMon")
-        .with_app_id("sysmon")
+        .with_app_id(APP_ID)
         .with_inner_size([
             settings.window_width.max(340) as f32,
             settings.window_height.max(420) as f32,

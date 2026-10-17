@@ -105,6 +105,30 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.6 one Overview** (`docs/dev/OVERVIEW-VIEW.md`, revision 3): the
+  Performance page is gone; its graphs became the cards' graphs and
+  its boxes card stats. The CPU card switches total · threads · grid
+  (threads, a coloured line per thread, is the default; colours from
+  `theme::thread_colors`). Settings migrate (`combined` → `total`,
+  `auto`/`per_thread` → `threads`, start page `performance` →
+  `overview`); `ctl page performance` exits 3 with the fix. Process
+  rows hover with `Palette::row_hover()` and a 2 px accent edge; the
+  table body scopes the row tokens because the theme's
+  `widgets.hovered.bg_fill` is the ink (scrollbar handles). Top-3 and
+  Inspector-children rows take a pid-keyed click id (P5), and each
+  card has its own id scope (`push_id(section)`), because a child Ui's
+  stable id is the same for siblings. Every viewport carries app_id
+  `sysmon`; the greenhouse Sway config floats them. Edges: the process
+  table's own rows are still positional ids inside egui_extras (a
+  re-sort between paint and click can retarget a click; widening the
+  hit target to a pid would need our own table body).
+  Testing trap found on the way: a shell inside Ben's Sway session
+  inherits `LD_LIBRARY_PATH=/opt/swayfx-nexus/lib/...` (the sway-nexus
+  launcher exports it). An X11 SysMon launched with it mixes SwayFX's
+  libxkbcommon with the system libxkbcommon-x11 and segfaults on quit
+  or on a keymap reload (`xdotool type`), 3.5.0 and 3.6.0 alike; with
+  it unset both exit 0. e2e already unsets it; do the same in any
+  ad-hoc X11 harness.
 - **3.5 long-term history** (`sysmon_core::history`): hourly gzip
   files for 7 days, then whole days packed losslessly into
   `archive/<day>.jsonl.zst` (zstd-19 frame per hour, index + rollups
@@ -118,7 +142,7 @@ version. Version law: workspace == `--version` == filenames == tag.
   --pack`; a recorder holding the lock does clear/pack itself via the
   socket `history` verb. `serve --record` now stands by while a window
   records and resumes when it closes (Ben's `sysmon-record` user
-  service depends on it). Ideas: a Performance-page range picker that
+  service depends on it). Ideas: a range picker on the graphs that
   draws from the disk history (rollups make it cheap); a `ctl` verb to
   bookmark a moment ("game started"); per-process CPU and RAM in the
   record (only GPU programs today); an optional per-minute downsample

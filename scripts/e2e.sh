@@ -72,28 +72,31 @@ code=0; "$bin" ctl temperature kelvin >/dev/null 2>&1 || code=$?
 jq -e '.temperature_scale == "both"' "$config/sysmon/settings.json" >/dev/null || fail "scale persisted"
 pass "temperature: celsius/fahrenheit/both apply + persist, junk exits 3"
 
-say "cpugraph verb round-trips + persists"
-for mode in combined per_thread auto; do
+say "cpugraph verb round-trips + persists; the Performance page is folded in"
+for mode in total grid threads; do
   "$bin" ctl cpugraph "$mode" | jq -e --arg m "$mode" '.result.cpugraph == $m' >/dev/null || fail "ctl cpugraph $mode"
 done
 code=0; "$bin" ctl cpugraph sideways >/dev/null 2>&1 || code=$?
 [ "$code" = 3 ] || fail "bad cpugraph must exit 3 (got $code)"
-jq -e '.cpu_graph_mode == "auto"' "$config/sysmon/settings.json" >/dev/null || fail "cpugraph persisted"
-"$bin" ctl page performance | jq -e '.result.page == "performance"' >/dev/null || fail "ctl page performance"
-pass "cpugraph: combined/per_thread/auto apply + persist, junk exits 3; page performance"
+jq -e '.cpu_graph_mode == "threads"' "$config/sysmon/settings.json" >/dev/null || fail "cpugraph persisted"
+code=0; "$bin" ctl page performance >/dev/null 2>&1 || code=$?
+[ "$code" = 3 ] || fail "page performance must exit 3 now that it's folded in (got $code)"
+pass "cpugraph: total/grid/threads apply + persist, junk exits 3; page performance exits 3"
 
-say "screenshot every theme × three pages (+ both CPU graph modes)"
+say "screenshot every theme × two pages (+ the Overview's three CPU views)"
 for theme in blossom_dark blossom amoled light dark funky paper basalt amber chromacore greyscale; do
   "$bin" ctl theme "$theme" >/dev/null
-  for page in performance overview processes; do
+  for page in overview processes; do
     "$bin" ctl page "$page" >/dev/null
-    if [ "$page" = performance ]; then
-      "$bin" ctl cpugraph per_thread >/dev/null
-      sleep 1.2
-      shot=$("$bin" ctl shot | jq -r .result.path)
-      [ -s "$shot" ] || fail "shot $theme/performance-per_thread"
-      cp "$shot" "$out/$theme-performance-per_thread.png"
-      "$bin" ctl cpugraph combined >/dev/null
+    if [ "$page" = overview ]; then
+      for mode in total grid; do
+        "$bin" ctl cpugraph "$mode" >/dev/null
+        sleep 1.2
+        shot=$("$bin" ctl shot | jq -r .result.path)
+        [ -s "$shot" ] || fail "shot $theme/overview-$mode"
+        cp "$shot" "$out/$theme-overview-$mode.png"
+      done
+      "$bin" ctl cpugraph threads >/dev/null
     fi
     sleep 1.2
     shot=$("$bin" ctl shot | jq -r .result.path)
@@ -101,8 +104,7 @@ for theme in blossom_dark blossom amoled light dark funky paper basalt amber chr
     cp "$shot" "$out/$theme-$page.png"
   done
 done
-"$bin" ctl cpugraph auto >/dev/null
-pass "44 theme/page screenshots"
+pass "44 theme/page screenshots (overview threads/total/grid + processes)"
 
 say "pop-out + drag-dock"
 "$bin" ctl theme blossom_dark >/dev/null
