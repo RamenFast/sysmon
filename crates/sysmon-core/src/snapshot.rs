@@ -32,6 +32,11 @@ pub struct SystemSnapshot {
     /// flattens away — absence of an AMD GPU is reported inside.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuSnapshot>,
+    /// The first NVIDIA card, through NVML (new in 3.7). Same shape as
+    /// `gpu`; `available: false` when there is no NVIDIA card, driver
+    /// or libnvidia-ml.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub nvidia: Option<GpuSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,7 +236,23 @@ pub struct GpuSnapshot {
     pub fan_rpm: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fan_max_rpm: Option<u32>,
-    /// Processes holding DRM fds on this card, busiest first.
+    /// NVIDIA: the share of the sample period device memory was read
+    /// or written (nvidia-smi's `utilization.memory`). New in 3.7.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub memory_busy_percent: Option<f32>,
+    /// NVIDIA: memory the driver and firmware set aside, outside
+    /// `vram_used_bytes` (nvidia-smi's "Reserved" row). New in 3.7.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub vram_reserved_bytes: Option<u64>,
+    /// NVIDIA: the die sensor (`NVML_TEMPERATURE_GPU`, nvidia-smi's
+    /// "GPU Current Temp"). AMD reports edge/junction instead. New in 3.7.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub temperature_core_celsius: Option<f32>,
+    /// NVIDIA: the fan's target speed, % of its maximum. New in 3.7.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fan_percent: Option<f32>,
+    /// Processes using this card, busiest first: DRM fd holders on
+    /// AMD, NVML's running-process lists on NVIDIA.
     pub processes: Vec<GpuProcessUsage>,
 }
 
@@ -545,6 +566,8 @@ pub struct Wants {
     pub cpu: bool,
     pub memory: bool,
     pub gpu: bool,
+    /// The NVIDIA card (NVML). New in 3.7.
+    pub nvidia: bool,
     pub network: bool,
     pub disks: bool,
     pub processes: bool,
@@ -562,6 +585,7 @@ impl Wants {
             cpu: true,
             memory: true,
             gpu: true,
+            nvidia: true,
             network: true,
             disks: true,
             processes: true,
@@ -583,6 +607,7 @@ impl Wants {
             "cpu" => wants.cpu = true, // its temperature reads the CPU chip alone
             "memory" => wants.memory = true,
             "gpu" => wants.gpu = true,
+            "nvidia" => wants.nvidia = true,
             "network" => {
                 wants.network = true;
                 wants.per_process_net = true;
@@ -610,6 +635,7 @@ impl Wants {
             cpu: self.cpu || other.cpu,
             memory: self.memory || other.memory,
             gpu: self.gpu || other.gpu,
+            nvidia: self.nvidia || other.nvidia,
             network: self.network || other.network,
             disks: self.disks || other.disks,
             processes: self.processes || other.processes,

@@ -129,13 +129,13 @@ USAGE
     sysmon --version                print the version
 
 SECTIONS
-    all system cpu memory gpu network disks processes sensors connections
+    all system cpu memory gpu nvidia network disks processes sensors connections
 
 SPEC SECTIONS
     system cpu memory graphics storage network audio
 
 HISTORY SECTIONS
-    all cpu memory gpu network disks sensors
+    all cpu memory gpu nvidia network disks sensors
 
 CTL VERBS
     status quit pause resume interval <s> raise page <p> theme <t>

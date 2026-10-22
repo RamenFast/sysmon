@@ -105,6 +105,21 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.7 the NVIDIA card** (section `nvidia`, `collect/nvidia.rs`): the
+  RTX 3070 beside the R9700 is compute-only (no nvidia-drm, no DRM
+  node), so NVML is the only source; opened by dlopen on the first
+  sample that wants it. Overview: the card rides in the AMD card's slot,
+  under it (`app.rs::overview_slots`), so a machine without one lays
+  out as before and no other card changes column; no menu row without a
+  card. History records it (`nvidia` record, `nvidia.*` metrics,
+  `nvidia_programs` in rollups, serde-defaulted, so 3.6 rollups and the
+  archive read unchanged). The spec sheet now walks PCI display class
+  too (it said "every PCI display device" and missed the 3070), with the
+  slot's PCIe generation from NVML (an idle card drops to Gen 1).
+  Accuracy: `nvidia_matches_nvidia_smi`. Edges: the Processes table's
+  GPU % / VRAM columns are still the AMD card's; the NVIDIA card has no
+  "more" link for that reason. Only NVML index 0 is read.
+
 - **3.6 one Overview** (`docs/dev/OVERVIEW-VIEW.md`, revision 3): the
   Performance page is gone; its graphs became the cards' graphs and
   its boxes card stats. The CPU card switches total · threads · grid
@@ -154,7 +169,7 @@ version. Version law: workspace == `--version` == filenames == tag.
   exists. Diet: `sysmon tap network -i 2`; click-through:
   `probe network` top_processes + `probe connections`. See
   docs/API.md "For the future Cinnamon bar".
-- NVIDIA/Intel GPU cards (honest empty state today).
+- Intel GPU cards (honest empty state today); NVIDIA landed in 3.7.
 - Wayland drag-dock (needs a compositor-side story; toggle works).
 - RSS trim: worth trying eframe's glow backend behind a feature flag
   and re-measuring (wgpu costs ~40 MB of the 148 MB llvmpipe RSS).

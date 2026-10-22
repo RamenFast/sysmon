@@ -357,7 +357,7 @@ fn wants_from_request(request: &Value) -> Result<Wants, VerbError> {
                 None => {
                     return Err(VerbError::bad_args(
                         format!("unknown section `{name}`"),
-                        "sections: all system cpu memory gpu network disks processes sensors \
+                        "sections: all system cpu memory gpu nvidia network disks processes sensors \
                          connections",
                     ));
                 }

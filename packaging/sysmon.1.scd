@@ -19,8 +19,8 @@ sysmon - compact system monitor with an agent-drivable API
 
 # DESCRIPTION
 
-SysMon watches an AMD-GPU Linux desktop: GPU, memory, CPU, network,
-disks, and sensors as live cards with history graphs, per-process
+SysMon watches an AMD-GPU Linux desktop: GPU (and an NVIDIA card
+beside it, read through NVML), memory, CPU, network, disks, and sensors as live cards with history graphs, per-process
 top lists with real application icons, and a full sortable process
 table with end/kill/renice actions. Any card pops out into its own
 always-on-top window; drag it back onto the main window to dock it.
@@ -47,7 +47,9 @@ networking first — without scraping a UI.
 	piped; human summary on a terminal). Asks the live instance when
 	one is running; otherwise samples in-process, twice, 250 ms
 	apart, so rates are real. Sections: *all system cpu memory gpu
-	network disks processes sensors connections*.
+	nvidia network disks processes sensors connections*. *nvidia* is
+	the first NVIDIA card through libnvidia-ml (opened at run time;
+	_available_ is false where there is none).
 
 *tap* [_sections_...] [--interval _N_]
 	Stream snapshots as NDJSON, one per line, at the given cadence
@@ -78,7 +80,8 @@ networking first — without scraping a UI.
 *specs* [_section_] [--json]
 	What this machine is, rather than what it is doing: OS, desktop,
 	board and firmware; CPU topology, clocks, caches and instruction
-	sets; memory modules; each GPU with its architecture, PCIe link,
+	sets; memory modules; each GPU (a compute-only NVIDIA card too,
+	its details from NVML) with its architecture, PCIe link,
 	power cap and driver stack; displays; every physical drive;
 	network; audio. On a terminal it prints the plain-text sheet the
 	GUI's copy buttons copy, which leaves out the hostname, serials,
@@ -92,7 +95,7 @@ networking first — without scraping a UI.
 	What the machine did over a time range, from the usage history
 	SysMon keeps on disk while its window (or *serve --record*) runs,
 	the hourly files and the packed archive read as one. Per reading:
-	min, avg, p95, max and a timeline; for the GPU, every program that
+	min, avg, p95, max and a timeline; for each GPU, every program that
 	held it with its peak and average VRAM and busy share. Times read
 	as _90s_, _15m_, _2h_, _7d_, _1y_, plain seconds, or a unix time;
 	*--since* defaults to 1 h. *--specs* puts the section's specs above
@@ -101,7 +104,7 @@ networking first — without scraping a UI.
 	*--raw* reads every record instead of merging sealed hours from
 	their rollups (same numbers; a check). A timeline block with no
 	samples is blank (JSON: null), never zero. Sections: *all cpu
-	memory gpu network disks sensors*. Exits 2 when no history exists
+	memory gpu nvidia network disks sensors*. Exits 2 when no history exists
 	yet.
 
 *history* --info | --export _PATH_ [--force] | --clear --yes | --pack

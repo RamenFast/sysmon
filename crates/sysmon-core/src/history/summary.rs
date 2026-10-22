@@ -26,7 +26,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::HistoryRecord;
+use super::{GpuRecord, HistoryRecord};
 use super::rollup::HourRollup;
 
 /// Timeline resolution: blocks per range.
@@ -139,6 +139,9 @@ pub struct Summary {
     pub metrics: Vec<MetricSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gpu_processes: Vec<GpuProcessSummary>,
+    /// The NVIDIA card's programs (3.7), the same shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub nvidia_processes: Vec<GpuProcessSummary>,
     /// Lines on disk that could not be read (a torn tail).
     pub skipped_lines: usize,
     /// Hours merged from their rollups instead of read record by
@@ -399,6 +402,28 @@ pub(crate) fn visit(record: &HistoryRecord, section: &str, scratch: &mut String,
         sink.ceiling("gpu.busy_percent", 100.0);
         sink.ceiling("gpu.vram_used_bytes", gpu.vram_total_bytes as f64);
     }
+    if wants(section, "nvidia")
+        && let Some(gpu) = &record.nvidia
+    {
+        // Labelled apart from the AMD card's, so "all" never shows two
+        // lines both called "GPU busy".
+        sink.value("nvidia.busy_percent", &|| "NVIDIA busy".into(), Unit::Percent, f64::from(gpu.busy_percent));
+        sink.value("nvidia.vram_used_bytes", &|| "NVIDIA VRAM used".into(), Unit::Bytes, gpu.vram_used_bytes as f64);
+        if let Some(watts) = gpu.power_watts {
+            sink.value("nvidia.power_watts", &|| "NVIDIA power".into(), Unit::Watts, f64::from(watts));
+        }
+        if let Some(mhz) = gpu.core_clock_mhz {
+            sink.value("nvidia.core_clock_mhz", &|| "NVIDIA core clock".into(), Unit::Mhz, f64::from(mhz));
+        }
+        if let Some(celsius) = gpu.core_celsius {
+            sink.value("nvidia.core_celsius", &|| "NVIDIA temp".into(), Unit::Celsius, f64::from(celsius));
+        }
+        if let Some(rpm) = gpu.fan_rpm {
+            sink.value("nvidia.fan_rpm", &|| "NVIDIA fan".into(), Unit::Rpm, f64::from(rpm));
+        }
+        sink.ceiling("nvidia.busy_percent", 100.0);
+        sink.ceiling("nvidia.vram_used_bytes", gpu.vram_total_bytes as f64);
+    }
     if wants(section, "network")
         && let Some(network) = &record.network
     {
@@ -430,10 +455,11 @@ pub(crate) fn visit(record: &HistoryRecord, section: &str, scratch: &mut String,
     }
 }
 
-/// The GPU's programs in one sample, grouped by name: (name, vram,
-/// busy, gtt, pids), names in order.
-pub(crate) fn sample_programs(record: &HistoryRecord) -> Vec<(&str, f64, f64, f64, Vec<i32>)> {
-    let Some(gpu) = &record.gpu else { return Vec::new() };
+/// One GPU's programs in one sample (`record.gpu` or
+/// `record.nvidia`), grouped by name: (name, vram, busy, gtt, pids),
+/// names in order.
+pub(crate) fn sample_programs(gpu: Option<&GpuRecord>) -> Vec<(&str, f64, f64, f64, Vec<i32>)> {
+    let Some(gpu) = gpu else { return Vec::new() };
     let mut this_sample: BTreeMap<&str, (f64, f64, f64, Vec<i32>)> = BTreeMap::new();
     for process in &gpu.processes {
         let entry = this_sample.entry(process.name.as_str()).or_default();
@@ -566,6 +592,35 @@ impl ReadingSink for RecordSink<'_> {
     }
 }
 
+/// One GPU's programs over the range, biggest peak VRAM first.
+fn program_summaries(programs: BTreeMap<String, ProgramStats>, samples: usize) -> Vec<GpuProcessSummary> {
+    let mut summaries: Vec<GpuProcessSummary> = programs
+        .into_iter()
+        .filter(|(_, program)| program.vram.count > 0)
+        .map(|(name, program)| {
+            let vram = Accumulator { stats: program.vram, ..Accumulator::new(String::new(), Unit::Bytes, 1) }
+                .finish(String::new());
+            let busy = Accumulator { stats: program.busy, ..Accumulator::new(String::new(), Unit::Percent, 1) }
+                .finish(String::new());
+            GpuProcessSummary {
+                name,
+                pids: program.pids,
+                samples: vram.samples,
+                present_percent: if samples > 0 { vram.samples as f64 / samples as f64 * 100.0 } else { 0.0 },
+                vram_avg_bytes: vram.avg,
+                vram_p95_bytes: vram.p95,
+                vram_max_bytes: vram.max,
+                busy_avg_percent: busy.avg,
+                busy_p95_percent: busy.p95,
+                busy_max_percent: busy.max,
+                gtt_max_bytes: program.gtt_max,
+            }
+        })
+        .collect();
+    summaries.sort_by(|a, b| b.vram_max_bytes.total_cmp(&a.vram_max_bytes).then(a.name.cmp(&b.name)));
+    summaries
+}
+
 /// A summary being built from records and hour rollups, fed oldest
 /// first.
 pub struct Summarizer {
@@ -576,6 +631,7 @@ pub struct Summarizer {
     block_seconds: f64,
     metrics: Metrics,
     programs: BTreeMap<String, ProgramStats>,
+    nvidia_programs: BTreeMap<String, ProgramStats>,
     samples: usize,
     covered: f64,
     previous_ts: Option<f64>,
@@ -598,6 +654,7 @@ impl Summarizer {
             block_seconds: span / blocks as f64,
             metrics: Metrics { order: Vec::new(), by_key: HashMap::new(), blocks },
             programs: BTreeMap::new(),
+            nvidia_programs: BTreeMap::new(),
             samples: 0,
             covered: 0.0,
             previous_ts: None,
@@ -652,11 +709,15 @@ impl Summarizer {
         let block = self.block_of(record.ts);
         let mut sink = RecordSink { metrics: &mut self.metrics, block, window };
         visit(record, &self.section, &mut self.scratch, &mut sink);
-        if wants(&self.section, "gpu") {
-            for (name, vram, busy, gtt, pids) in sample_programs(record) {
-                let program = match self.programs.get_mut(name) {
+        for (part, gpu) in [("gpu", record.gpu.as_ref()), ("nvidia", record.nvidia.as_ref())] {
+            if !wants(&self.section, part) {
+                continue;
+            }
+            let programs = if part == "gpu" { &mut self.programs } else { &mut self.nvidia_programs };
+            for (name, vram, busy, gtt, pids) in sample_programs(gpu) {
+                let program = match programs.get_mut(name) {
                     Some(program) => program,
-                    None => self.programs.entry(name.to_string()).or_default(),
+                    None => programs.entry(name.to_string()).or_default(),
                 };
                 program.add_sample(vram, busy, gtt, &pids, window);
             }
@@ -694,12 +755,16 @@ impl Summarizer {
                 accumulator.raise_ceiling(ceiling);
             }
         }
-        if wants(&self.section, "gpu") {
-            for (name, program) in &rollup.programs {
-                match self.programs.get_mut(name) {
+        for (part, from) in [("gpu", &rollup.programs), ("nvidia", &rollup.nvidia_programs)] {
+            if !wants(&self.section, part) {
+                continue;
+            }
+            let programs = if part == "gpu" { &mut self.programs } else { &mut self.nvidia_programs };
+            for (name, program) in from {
+                match programs.get_mut(name) {
                     Some(existing) => existing.merge(program),
                     None => {
-                        self.programs.insert(name.clone(), program.clone());
+                        programs.insert(name.clone(), program.clone());
                     }
                 }
             }
@@ -708,31 +773,8 @@ impl Summarizer {
 
     pub fn finish(self) -> Summary {
         let samples = self.samples;
-        let mut gpu_processes: Vec<GpuProcessSummary> = self
-            .programs
-            .into_iter()
-            .filter(|(_, program)| program.vram.count > 0)
-            .map(|(name, program)| {
-                let vram = Accumulator { stats: program.vram, ..Accumulator::new(String::new(), Unit::Bytes, 1) }
-                    .finish(String::new());
-                let busy = Accumulator { stats: program.busy, ..Accumulator::new(String::new(), Unit::Percent, 1) }
-                    .finish(String::new());
-                GpuProcessSummary {
-                    name,
-                    pids: program.pids,
-                    samples: vram.samples,
-                    present_percent: if samples > 0 { vram.samples as f64 / samples as f64 * 100.0 } else { 0.0 },
-                    vram_avg_bytes: vram.avg,
-                    vram_p95_bytes: vram.p95,
-                    vram_max_bytes: vram.max,
-                    busy_avg_percent: busy.avg,
-                    busy_p95_percent: busy.p95,
-                    busy_max_percent: busy.max,
-                    gtt_max_bytes: program.gtt_max,
-                }
-            })
-            .collect();
-        gpu_processes.sort_by(|a, b| b.vram_max_bytes.total_cmp(&a.vram_max_bytes).then(a.name.cmp(&b.name)));
+        let gpu_processes = program_summaries(self.programs, samples);
+        let nvidia_processes = program_summaries(self.nvidia_programs, samples);
 
         let mut metrics = self.metrics;
         let percent_keys: Vec<String> = metrics.order.iter().filter(|key| key.ends_with("_percent")).cloned().collect();
@@ -753,6 +795,7 @@ impl Summarizer {
             timeline_block_seconds: self.block_seconds,
             metrics: metrics.order.iter().map(|key| metrics.by_key[key].finish(key.clone())).collect(),
             gpu_processes,
+            nvidia_processes,
             skipped_lines: self.skipped_lines,
             rollup_hours: self.rollup_hours,
         }

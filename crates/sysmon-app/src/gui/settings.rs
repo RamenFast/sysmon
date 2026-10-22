@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use sysmon_core::units::{TemperatureScale, Units};
 
-pub const SECTION_KEYS: [&str; 6] = ["gpu", "memory", "cpu", "network", "disks", "sensors"];
+/// Card sections in Overview order. "nvidia" (3.7) is drawn only on a
+/// machine with an NVIDIA card, in the AMD card's slot under it.
+pub const SECTION_KEYS: [&str; 7] = ["gpu", "nvidia", "memory", "cpu", "network", "disks", "sensors"];
 
 /// Usage history (3.5): hours stay hourly gzip files for a week, then
 /// whole days are packed losslessly into the archive, and nothing is

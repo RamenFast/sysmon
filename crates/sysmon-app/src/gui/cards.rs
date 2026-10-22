@@ -8,7 +8,7 @@
 
 use egui::{Align, Color32, Layout, Rect, RichText, Sense, Ui, pos2, vec2};
 
-use sysmon_core::snapshot::{ProcessNetSource, ProcessRecord, SystemSnapshot};
+use sysmon_core::snapshot::{GpuSnapshot, ProcessNetSource, ProcessRecord, SystemSnapshot};
 use sysmon_core::units::{
     self, format_frequency_mhz, format_percent, format_power, format_rate, format_size,
     format_temperature_in,
@@ -109,7 +109,7 @@ pub fn toggle_selection(selected: &mut Vec<i32>, pid: i32, actions: &mut Vec<App
 }
 
 /// The one place a card is drawn (overview and pop-outs alike), by
-/// section key: gpu memory cpu network disks sensors.
+/// section key: gpu nvidia memory cpu network disks sensors.
 pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, section: &str) {
     // Each card gets its own id scope: a child Ui's stable id doesn't
     // differ between siblings, and rows inside are keyed by pid (P5),
@@ -119,6 +119,7 @@ pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, section: &str) {
             ui.set_width(ui.available_width());
             match section {
                 "gpu" => gpu_card(ui, cx),
+                "nvidia" => nvidia_card(ui, cx),
                 "memory" => memory_card(ui, cx),
                 "cpu" => cpu_card(ui, cx),
                 "network" => network_card(ui, cx),
@@ -633,24 +634,8 @@ fn gpu_card(ui: &mut Ui, cx: &mut CardContext) {
         headline += &format!(" · {}", cx.temperature(edge));
     }
     card_header(ui, cx, "gpu", "GPU", &gpu.device_name, &headline);
-
-    let color = cx.series(GRAPH_SERIES_GPU);
-    let vram_color = cx.sibling(GRAPH_SERIES_GPU);
-    graph_legend_row(ui, cx, &[(color, "busy"), (vram_color, "VRAM")], |_, _| {});
     let histories = cx.histories;
-    percent_scope(ui, cx, "GPU history", [&histories.gpu, &histories.vram], [color, vram_color], &["busy", "VRAM"]);
-
-    if gpu.vram_total_bytes > 0 {
-        let fraction = gpu.vram_used_bytes as f32 / gpu.vram_total_bytes as f32;
-        labelled_bar(
-            ui,
-            cx.palette,
-            "VRAM",
-            format!("{} / {}", cx.size(gpu.vram_used_bytes), cx.size(gpu.vram_total_bytes)),
-            fraction,
-            color,
-        );
-    }
+    gpu_usage(ui, cx, &gpu, "GPU history", [&histories.gpu, &histories.vram]);
 
     if cx.compact {
         return;
@@ -701,7 +686,33 @@ fn gpu_card(ui: &mut Ui, cx: &mut CardContext) {
         stats.push(("VRM", cx.temperature(hottest), Some(format!("voltage regulators, hottest shown: {vrm_note}"))));
     }
     stat_grid(ui, cx.palette, &stats);
+    // The table's VRAM column is this card's, so "more" can sort by it.
+    gpu_process_rows(ui, cx, &gpu, true);
+}
 
+/// A GPU card's graph (busy + VRAM %) and its VRAM bar, the same on
+/// the AMD and NVIDIA cards.
+fn gpu_usage(ui: &mut Ui, cx: &mut CardContext, gpu: &GpuSnapshot, name: &str, series: [&History; 2]) {
+    let color = cx.series(GRAPH_SERIES_GPU);
+    let vram_color = cx.sibling(GRAPH_SERIES_GPU);
+    graph_legend_row(ui, cx, &[(color, "busy"), (vram_color, "VRAM")], |_, _| {});
+    percent_scope(ui, cx, name, series, [color, vram_color], &["busy", "VRAM"]);
+
+    if gpu.vram_total_bytes > 0 {
+        let fraction = gpu.vram_used_bytes as f32 / gpu.vram_total_bytes as f32;
+        labelled_bar(
+            ui,
+            cx.palette,
+            "VRAM",
+            format!("{} / {}", cx.size(gpu.vram_used_bytes), cx.size(gpu.vram_total_bytes)),
+            fraction,
+            color,
+        );
+    }
+}
+
+/// The card's top three programs: busy and VRAM, by pid.
+fn gpu_process_rows(ui: &mut Ui, cx: &mut CardContext, gpu: &GpuSnapshot, more: bool) {
     if let Some(records) = &cx.snapshot.processes {
         let rows: Vec<(ProcessRecord, String)> = gpu
             .processes
@@ -715,10 +726,80 @@ fn gpu_card(ui: &mut Ui, cx: &mut CardContext) {
         for (index, (record, value)) in rows.iter().enumerate() {
             top_process_row(ui, cx, index + 1, record, value.clone());
         }
-        if !rows.is_empty() {
+        if more && !rows.is_empty() {
             more_link(ui, cx, SortColumn::Vram, "VRAM");
         }
     }
+}
+
+/// The NVIDIA card (3.7), read through NVML. The Overview draws it
+/// only when the card answers; a pop-out can outlive it (a driver
+/// unloaded), and says so.
+fn nvidia_card(ui: &mut Ui, cx: &mut CardContext) {
+    let Some(gpu) = cx.snapshot.nvidia.clone().filter(|gpu| gpu.available) else {
+        card_header(ui, cx, "nvidia", "NVIDIA", "", "—");
+        ui.label(
+            RichText::new("The NVIDIA card isn't answering: no driver, or no libnvidia-ml.")
+                .color(cx.palette.muted)
+                .italics()
+                .size(11.0),
+        );
+        return;
+    };
+    let mut headline = format_percent(gpu.busy_percent);
+    if let Some(core) = gpu.temperature_core_celsius {
+        headline += &format!(" · {}", cx.temperature(core));
+    }
+    // The title already says NVIDIA.
+    let subtitle = gpu.device_name.strip_prefix("NVIDIA ").unwrap_or(&gpu.device_name).to_string();
+    card_header(ui, cx, "nvidia", "NVIDIA", &subtitle, &headline);
+    let histories = cx.histories;
+    gpu_usage(ui, cx, &gpu, "NVIDIA history", [&histories.nvidia, &histories.nvidia_vram]);
+
+    if cx.compact {
+        return;
+    }
+    let power = match (gpu.power_draw_watts, gpu.power_cap_watts) {
+        (Some(draw), Some(cap)) => format!("{} / {}", format_power(draw), format_power(cap)),
+        (Some(draw), None) => format_power(draw),
+        _ => "—".to_string(),
+    };
+    // RPM where the driver reports it, the target % beside it; "—"
+    // when neither is readable ("0 rpm" would claim a stopped fan).
+    let fan = match (gpu.fan_rpm, gpu.fan_percent) {
+        (Some(rpm), Some(percent)) => format!("{rpm} rpm · {percent:.0}%"),
+        (Some(rpm), None) => format!("{rpm} rpm"),
+        (None, Some(percent)) => format!("{percent:.0}%"),
+        (None, None) => "—".to_string(),
+    };
+    let clock_note = "the current clock, one read (NVML)".to_string();
+    let stats = vec![
+        (
+            "Core",
+            gpu.core_clock_mhz.map(format_frequency_mhz).unwrap_or("—".into()),
+            Some(clock_note.clone()),
+        ),
+        (
+            "VRAM Clk",
+            gpu.memory_clock_mhz.map(format_frequency_mhz).unwrap_or("—".into()),
+            Some(clock_note),
+        ),
+        stat("Power", power),
+        (
+            "Mem Bus",
+            gpu.memory_busy_percent.map(format_percent).unwrap_or("—".into()),
+            Some("share of the last sample period the card's memory was being read or written".into()),
+        ),
+        stat("Fan", fan),
+        (
+            "Reserved",
+            gpu.vram_reserved_bytes.map(|bytes| cx.size(bytes)).unwrap_or("—".into()),
+            Some("set aside by the driver and firmware, outside the VRAM in use".into()),
+        ),
+    ];
+    stat_grid(ui, cx.palette, &stats);
+    // The table's VRAM column is the AMD card's, so no "more" here.
+    gpu_process_rows(ui, cx, &gpu, false);
 }
 
 /// "VRAM ▕████░░░░▏ 1.2 GB / 34.2 GB" — label, a level bar, a value.
@@ -1205,7 +1286,8 @@ fn sensors_card(ui: &mut Ui, cx: &mut CardContext) {
         // The thermal history reads the CPU and GPU snapshots, not the
         // hwmon groups: it still has something to say without them.
         let has_temperature = cx.snapshot.cpu.as_ref().is_some_and(|c| c.temperature_celsius.is_some())
-            || cx.snapshot.gpu.as_ref().is_some_and(|g| g.temperature_edge_celsius.is_some());
+            || cx.snapshot.gpu.as_ref().is_some_and(|g| g.temperature_edge_celsius.is_some())
+            || cx.snapshot.nvidia.as_ref().is_some_and(|g| g.temperature_core_celsius.is_some());
         if has_temperature {
             thermal_graph(ui, cx);
         }
@@ -1280,10 +1362,16 @@ fn thermal_graph(ui: &mut Ui, cx: &mut CardContext) {
     let histories = cx.histories;
     let cpu_temperature = &histories.cpu_temperature;
     let gpu_temperature = &histories.gpu_temperature;
-    if cpu_temperature.is_empty() && gpu_temperature.is_empty() {
+    let nvidia_temperature = &histories.nvidia_temperature;
+    if cpu_temperature.is_empty() && gpu_temperature.is_empty() && nvidia_temperature.is_empty() {
         return;
     }
     let (cpu_color, gpu_color) = cx.thermal_colors();
+    // A hue of its own: a graph palette is a two-hue room (Blossom is
+    // pink and gold) and the CPU and GPU lines hold both, so a sibling
+    // shade read as a second pink. The per-thread colours step the
+    // golden angle off the palette and hold ≥ 3:1 on the field.
+    let nvidia_color = super::theme::thread_colors(cx.graph_palette_id, 2)[1];
     let clock = cx.snapshot.cpu.as_ref().and_then(|cpu| cpu.frequency_busy_mhz.or(cpu.frequency_mhz));
     let mut legend = Vec::new();
     if !cpu_temperature.is_empty() {
@@ -1291,6 +1379,9 @@ fn thermal_graph(ui: &mut Ui, cx: &mut CardContext) {
     }
     if !gpu_temperature.is_empty() {
         legend.push((gpu_color, "GPU"));
+    }
+    if !nvidia_temperature.is_empty() {
+        legend.push((nvidia_color, "NVIDIA"));
     }
     graph_legend_row(ui, cx, &legend, |ui, _| {
         if let Some(mhz) = clock {
@@ -1301,7 +1392,11 @@ fn thermal_graph(ui: &mut Ui, cx: &mut CardContext) {
     let mut series: Vec<&History> = Vec::new();
     let mut colors = Vec::new();
     let mut names: Vec<&'static str> = Vec::new();
-    for (history, color, name) in [(cpu_temperature, cpu_color, "CPU"), (gpu_temperature, gpu_color, "GPU")] {
+    for (history, color, name) in [
+        (cpu_temperature, cpu_color, "CPU"),
+        (gpu_temperature, gpu_color, "GPU"),
+        (nvidia_temperature, nvidia_color, "NVIDIA"),
+    ] {
         if !history.is_empty() {
             series.push(history);
             colors.push(color);
@@ -1317,7 +1412,7 @@ fn thermal_graph(ui: &mut Ui, cx: &mut CardContext) {
             .collect::<Vec<_>>()
             .join("  ")
     };
-    let hottest = cpu_temperature.max().max(gpu_temperature.max());
+    let hottest = cpu_temperature.max().max(gpu_temperature.max()).max(nvidia_temperature.max());
     graphs::scope_graph(
         ui,
         cx.palette,

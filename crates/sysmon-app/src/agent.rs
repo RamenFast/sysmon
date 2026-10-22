@@ -19,7 +19,7 @@ use crate::control;
 use crate::envelope::{self, EXIT_BAD_ARGS, EXIT_OK, EXIT_RUNTIME, EXIT_UNAVAILABLE};
 
 const SECTION_NAMES: &str =
-    "all system cpu memory gpu network disks processes sensors connections";
+    "all system cpu memory gpu nvidia network disks processes sensors connections";
 
 fn parse_section_args(arguments: &[String]) -> Result<(Vec<String>, bool, Option<f64>), String> {
     let mut sections = Vec::new();
@@ -382,7 +382,7 @@ pub fn run_specs(arguments: &[String]) -> i32 {
 
 // ---------------------------------------------------------------- history
 
-const HISTORY_SECTION_NAMES: &str = "all cpu memory gpu network disks sensors";
+const HISTORY_SECTION_NAMES: &str = "all cpu memory gpu nvidia network disks sensors";
 
 /// "90s", "15m", "2h", "7d", "1y", a bare number of seconds, or a unix time
 /// (a number above 1e9) → seconds back from `now`.
@@ -898,6 +898,7 @@ fn build_schema() -> Value {
                             "timeline_block_seconds": {"type": "number"},
                             "metrics": {"type": "array", "description": "[{key (`<section>.<reading>_<unit>`, e.g. gpu.vram_used_bytes, sensors.k10temp Tctl_celsius), label, unit (percent|bytes|bps|celsius|watts|mhz|rpm|load), samples, min, avg, p95, max, latest, total_bytes? (rates: bytes moved over the range), ceiling? (100 for a percent, the card/RAM size for memory), timeline: [mean per block | null where nothing was recorded]}]. min/avg/max/latest exact; p95 from a log-bucket sketch, within 0.5% of the exact nearest-rank p95"},
                             "gpu_processes": {"type": "array", "description": "[{name, pids[], samples, present_percent, vram_avg_bytes, vram_p95_bytes, vram_max_bytes, busy_avg_percent, busy_p95_percent, busy_max_percent, gtt_max_bytes}] — programs grouped by name per sample, biggest peak VRAM first. A buffer two programs share counts in both"},
+                            "nvidia_processes": {"type": "array", "description": "the NVIDIA card's programs, the same shape (sections nvidia and all; new in 3.7)"},
                             "skipped_lines": {"type": "integer", "description": "unreadable lines on disk (a torn tail after a crash), reported rather than hidden"},
                             "rollup_hours": {"type": "integer", "description": "hours merged whole from their rollups instead of read record by record (0 with --raw); the numbers are the same either way"},
                             "store": {"type": "object", "description": "the whole history on disk: as `store` in store_ops.info"},
@@ -991,6 +992,7 @@ fn build_schema() -> Value {
                             "cpu": {"type": ["object", "null"]},
                             "memory": {"type": ["object", "null"]},
                             "gpu": {"type": ["object", "null"]},
+                            "nvidia": {"type": ["object", "null"]},
                             "network": {"type": ["object", "null"]},
                             "disks": {"type": ["array", "null"]},
                             "processes": {"type": ["array", "null"]},
@@ -1091,7 +1093,7 @@ fn build_schema() -> Value {
                             "system": {"type": "object", "description": "os, os_base?, kernel, architecture, hostname (JSON only, never in text), session_type?, desktop?, model?, board?, firmware?, firmware_date? (ISO), boot_mode (UEFI|BIOS), secure_boot?"},
                             "cpu": {"type": "object", "description": "model?, sockets?, cores? (physical), threads (logical), base_mhz? (ACPI CPPC nominal), max_mhz?, boost_enabled?, cache_l1d_bytes? | cache_l1i_bytes? | cache_l2_bytes? | cache_l3_bytes? (machine totals, shared caches counted once), frequency_driver?, governor?, energy_preference?, features[]"},
                             "memory": {"type": "object", "description": "modules[] (the memory section's module shape, plus form_factor?, rank?, manufacturer?), slots?, installed_bytes?, usable_bytes (MemTotal), swap_bytes"},
-                            "gpus": {"type": "array", "description": "[{name, pci_id, pci_address, driver?, vram_bytes?, architecture? (e.g. gfx1201), family? (e.g. RDNA 4), compute_units?, pcie_link? {generation, width, device_max_generation?, device_max_width?} (the slowest hop to the CPU), power_cap_watts?, power_cap_max_watts?, vulkan? {version, driver}, opengl? {version, driver}, compute_stack?}] — every PCI display device; software renderers are never listed"},
+                            "gpus": {"type": "array", "description": "[{name, pci_id, pci_address, driver?, vram_bytes?, architecture? (AMD ISA e.g. gfx1201, NVIDIA compute capability e.g. sm_86), family? (e.g. RDNA 4, Ampere), compute_units? (AMD), cuda_cores? (NVIDIA, 3.7), pcie_link? {generation, width, device_max_generation?, device_max_width?} (the slowest hop to the CPU), power_cap_watts?, power_cap_max_watts?, vulkan? {version, driver}, opengl? {version, driver}, compute_stack?}] — every PCI display device; software renderers are never listed"},
                             "displays": {"type": "array", "description": "[{connector, make?, model?, diagonal_inches?, width_px?, height_px?, refresh_hz?, scale?, mode_source: active (the compositor's running mode) | preferred (EDID only — the panel's preference, not necessarily in use)}]"},
                             "drives": {"type": "array", "description": "[{name, model?, kind (NVMe SSD | SATA SSD | SATA HDD | USB | SD/eMMC), size_bytes, rpm?, link?, removable, filesystems: [{device, fs_type?, mount_points[]}]}] — physical drives, mounted or not"},
                             "network": {"type": "array", "description": "[{name, kind (Ethernet | Wi-Fi), model?, driver?, link_up, speed_mbps?, duplex?}] — physical interfaces only, no addresses"},
@@ -1167,6 +1169,20 @@ fn build_schema() -> Value {
                 "clock_source": "\"mean of N reads\" or \"instant read\" (a window's first sample)",
                 "fan_rpm | fan_max_rpm": "hwmon fan1",
                 "processes": "[{pid, busy_percent, vram_bytes, gtt_bytes, vram_shared_bytes, vram_evicted_bytes}] via DRM fdinfo, each client once, busiest first. vram_bytes = drm-total-vram − amd-evicted-vram (buffers in VRAM now; never drm-memory-vram, which drifts to terabytes on kernel 7.2). A shared buffer counts in every process that maps it, so the sum can exceed vram_used_bytes by the shared part",
+            },
+            "nvidia": {
+                "(shape)": "the gpu section's shape, read through NVML (libnvidia-ml.so.1, opened at run time); the first NVIDIA card. New in 3.7",
+                "available": "false ⇒ no NVIDIA card, driver or libnvidia-ml (all other fields empty)",
+                "device_name": "NVML's name, verbatim (\"NVIDIA GeForce RTX 3070\")",
+                "busy_percent": "nvmlDeviceGetUtilizationRates .gpu: share of the driver's last sample period a kernel ran (nvidia-smi utilization.gpu)",
+                "memory_busy_percent": "the same call's .memory: device memory read or written (nvidia-smi utilization.memory)",
+                "vram_used_bytes | vram_total_bytes": "nvmlMemory_v2: used leaves out the driver's reserve, as nvidia-smi's Used row does",
+                "vram_reserved_bytes": "the driver and firmware's reserve (nvidia-smi's Reserved row); absent on a driver without nvmlMemory_v2, whose used then includes it",
+                "temperature_core_celsius": "the die sensor (NVML_TEMPERATURE_GPU)",
+                "power_draw_watts | power_cap_watts": "nvmlDeviceGetPowerUsage (a 1 s average on Ampere and newer) / the enforced power limit",
+                "core_clock_mhz | memory_clock_mhz": "current graphics / memory clock, one read (clock_source \"instant read\")",
+                "fan_percent | fan_rpm": "the fan's target speed, % / its RPM where the driver reports it",
+                "processes": "[{pid, busy_percent, vram_bytes}] from NVML's compute + graphics process lists (a pid in both counts its memory once); busy = the driver's newest per-process sample since the previous read (0 on the first). vram_bytes is 0 where NVML withholds it (another user's process)",
             },
             "network": {
                 "download_bps | upload_bps": "physical interfaces only (a device symlink in /sys/class/net)",
@@ -1283,6 +1299,30 @@ fn render_human(snapshot: &Value, via: &str) {
             );
         } else {
             line("device", "no AMD GPU on this machine".to_string());
+        }
+    }
+    if let Some(gpu) = snapshot.get("nvidia").filter(|s| !s.is_null()) {
+        out!("nvidia");
+        if gpu["available"].as_bool() == Some(true) {
+            line("device", gpu["device_name"].as_str().unwrap_or("?").to_string());
+            let mut busy = units::format_percent(value_f64(&gpu["busy_percent"]) as f32);
+            if let Some(core) = gpu["temperature_core_celsius"].as_f64() {
+                busy += &format!(" · {}", units::format_temperature(core as f32));
+            }
+            if let Some(power) = gpu["power_draw_watts"].as_f64() {
+                busy += &format!(" · {}", units::format_power(power as f32));
+            }
+            line("busy", busy);
+            line(
+                "vram",
+                format!(
+                    "{} of {}",
+                    units::format_size(value_u64(&gpu["vram_used_bytes"]), units),
+                    units::format_size(value_u64(&gpu["vram_total_bytes"]), units),
+                ),
+            );
+        } else {
+            line("device", "no NVIDIA GPU on this machine".to_string());
         }
     }
     if let Some(network) = snapshot.get("network").filter(|s| !s.is_null()) {

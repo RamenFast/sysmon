@@ -37,8 +37,9 @@ its socket (`result.via == "socket"`); otherwise probe samples
 in-process, twice, 250 ms apart, so rates are real
 (`result.via == "direct"`).
 
-Sections: `all system cpu memory gpu network disks processes sensors
-connections`.
+Sections: `all system cpu memory gpu nvidia network disks processes sensors
+connections`. `nvidia` (3.7) is the first NVIDIA card, read through
+NVML; see [The NVIDIA card](#the-nvidia-card).
 
 ## Door 2 — `sysmon tap` (stream)
 
@@ -91,7 +92,9 @@ sysmon specs --json | jq -j .result.text   # byte-for-byte what the top bar's co
 `probe` answers *how busy*; `specs` answers *which hardware, which
 firmware, which driver stack*: CPU topology, base and max clocks,
 caches and instruction sets; every memory module with maker, part
-number and rank; each GPU with its architecture, compute units, the
+number and rank; each GPU (a compute-only NVIDIA card included: it has
+no DRM node, so it is found on the PCI bus and NVML fills in its VRAM,
+CUDA cores, power limit and CUDA stack) with its architecture, compute units, the
 PCIe link it actually gets (the slowest hop to the CPU, beside what
 the card supports), power cap, Vulkan/OpenGL driver and compute stack;
 the displays at their running mode; every physical drive, mounted or
@@ -134,7 +137,8 @@ sample while its window runs (Display options → Usage history), or
 while `sysmon serve --record` runs headless: CPU (busy, kernel, iowait,
 busy clock, temperature, load), memory (used, cache, swap, commit), GPU
 (busy, VRAM, GTT, power, clocks, temperatures, fan, and the programs
-holding it), network rates, per-disk rates and busy share, and every
+holding it), the NVIDIA card the same way (section `nvidia`, its
+programs as `nvidia_processes`), network rates, per-disk rates and busy share, and every
 plausible temperature and fan.
 
 Per reading the summary gives min, avg, p95, max, the latest value, and
@@ -211,6 +215,31 @@ as a window surface the compositor maps, counts in both and is reported
 as `vram_shared_bytes`, so the sum over processes can exceed the card's
 `vram_used_bytes` by the shared part. `vram_evicted_bytes` are buffers
 that want VRAM but were moved to system RAM: the sign of VRAM pressure.
+
+## The NVIDIA card
+
+`nvidia` has the `gpu` section's shape, read through NVML
+(`libnvidia-ml.so.1`, the library nvidia-smi reads), opened with dlopen
+on the first sample that asks for it, so SysMon builds and runs without
+it and a probe of another section never loads it. No library, no
+driver or no card: `available: false`. A recorder started before the
+driver has brought the card up tries again every 15th sample.
+
+- `busy_percent` / `memory_busy_percent`: NVML's utilization over the
+  driver's last sample period (nvidia-smi `utilization.gpu` / `.memory`).
+- `vram_used_bytes` comes from `nvmlMemory_v2`, which leaves out the
+  driver's reserve, as nvidia-smi's Used row does; the reserve is
+  `vram_reserved_bytes`.
+- `temperature_core_celsius` (the die sensor), `power_draw_watts` (a
+  1 s average on Ampere and newer), `power_cap_watts` (the enforced
+  limit), current clocks (`clock_source: "instant read"`),
+  `fan_percent` and `fan_rpm`.
+- `processes[]`: the compute and graphics process lists, a pid in both
+  counted once; `busy_percent` is the driver's newest sample for the
+  process since the previous read (0 on the first). Another user's
+  process can have its memory withheld: `vram_bytes` 0.
+
+The Processes table's GPU % and VRAM columns stay the AMD card's.
 
 ## The socket
 

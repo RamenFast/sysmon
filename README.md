@@ -42,7 +42,9 @@ new engine.
 - Drag-a-pop-out-back-to-dock needs X11 (button state); on Wayland
   use the ⧉ toggle or close the pop-out. Everything else is
   display-server-agnostic.
-- NVIDIA/Intel GPUs: still an honest "no AMD GPU" card, like v1.
+- NVIDIA: since 3.7 an NVIDIA card gets its own card under the GPU card
+  (read through NVML; a compute-only card beside an AMD one is the case
+  it was built for). Intel GPUs: still an honest "no AMD GPU" card.
 - v3 changed the wire in one way worth knowing: `ts` is now ISO-8601
   with a UTC offset rather than a float (the epoch rides along as
   `ts_epoch`), error envelopes carry an `exit` code, and every NDJSON
@@ -271,10 +273,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.6.0_amd64.deb
+sudo apt install ./sysmon_3.7.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.6.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.7.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -284,10 +286,11 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.6.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.7.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
-card, everything else degrades gracefully. Motherboard fan and voltage
+card, the NVIDIA card the proprietary driver's libnvidia-ml, and
+everything else degrades gracefully. Motherboard fan and voltage
 sensors need your board's Super-I/O driver loaded (on most AMD boards,
 `sudo modprobe nct6775`); drive temperatures need `drivetemp`.
 

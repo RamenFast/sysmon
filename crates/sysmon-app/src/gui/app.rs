@@ -73,9 +73,33 @@ pub struct Histories {
     pub disk_write: History,
     pub cpu_temperature: History,
     pub gpu_temperature: History,
+    /// The NVIDIA card (3.7): busy, VRAM %, die temperature.
+    pub nvidia: History,
+    pub nvidia_vram: History,
+    pub nvidia_temperature: History,
     pub busy_clock: History,
     /// Highest Committed_AS seen since launch (SysMon's own mark).
     pub commit_peak_bytes: u64,
+}
+
+/// Whether this machine's latest sample has an NVIDIA card to show.
+fn nvidia_present(snapshot: &SystemSnapshot) -> bool {
+    snapshot.nvidia.as_ref().is_some_and(|gpu| gpu.available)
+}
+
+/// The Overview's slots: one card each, except that the NVIDIA card
+/// rides in the AMD card's slot, stacked under it. So a machine without
+/// one lays out exactly as before, and every other card keeps its
+/// column when one appears.
+pub(crate) fn overview_slots(sections: &[&'static str]) -> Vec<Vec<&'static str>> {
+    let mut slots: Vec<Vec<&'static str>> = Vec::new();
+    for &section in sections {
+        match slots.last_mut() {
+            Some(slot) if section == "nvidia" && slot[0] == "gpu" => slot.push(section),
+            _ => slots.push(vec![section]),
+        }
+    }
+    slots
 }
 
 impl Histories {
@@ -92,6 +116,17 @@ impl Histories {
             }
             if let Some(t) = gpu.temperature_edge_celsius {
                 self.gpu_temperature.push(t as f64);
+            }
+        }
+        if let Some(gpu) = &snapshot.nvidia
+            && gpu.available
+        {
+            self.nvidia.push(gpu.busy_percent as f64);
+            if gpu.vram_total_bytes > 0 {
+                self.nvidia_vram.push(gpu.vram_used_bytes as f64 / gpu.vram_total_bytes as f64 * 100.0);
+            }
+            if let Some(t) = gpu.temperature_core_celsius {
+                self.nvidia_temperature.push(t as f64);
             }
         }
         if let Some(memory) = &snapshot.memory {
@@ -736,7 +771,7 @@ impl SysMonApp {
                 heading(ui, "Usage history");
                 if menu_check_row(ui, palette, self.settings.history_enabled, "Record usage history")
                     .on_hover_text(
-                        "CPU, memory, GPU and its programs, network, disks and sensors, \
+                        "CPU, memory, the GPUs and their programs, network, disks and sensors, \
                          one line per sample, kept on disk for the copy buttons and `sysmon history`",
                     )
                     .clicked()
@@ -824,10 +859,16 @@ impl SysMonApp {
 
                 ui.separator();
                 heading(ui, "Overview sections");
+                let nvidia_here = nvidia_present(&self.shared.latest.read().unwrap());
                 for key in SECTION_KEYS {
+                    // No NVIDIA card, no row for one.
+                    if key == "nvidia" && !nvidia_here {
+                        continue;
+                    }
                     let visible = self.settings.section_visible(key);
                     let label = match key {
                         "gpu" => "GPU",
+                        "nvidia" => "NVIDIA",
                         "memory" => "Memory",
                         "cpu" => "CPU",
                         "network" => "Network",
@@ -861,13 +902,16 @@ impl SysMonApp {
         let histories = self.shared.histories.read().unwrap();
         let snapshot = self.shared.latest.read().unwrap().clone();
         let scroll_to = self.overview_scroll_to.take();
+        let nvidia_here = nvidia_present(&snapshot);
         let sections: Vec<&'static str> = SECTION_KEYS
             .iter()
             .copied()
+            .filter(|section| *section != "nvidia" || nvidia_here)
             .filter(|section| {
                 self.settings.section_visible(section) && !self.settings.popped_out_sections.iter().any(|s| s == section)
             })
             .collect();
+        let slots = overview_slots(&sections);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -891,10 +935,11 @@ impl SysMonApp {
                     }
                     ui.add_space(6.0);
                 };
-                if ui.available_width() >= overview::TWO_COLUMN_WIDTH && sections.len() > 1 {
-                    // Cards alternate between the columns in their
-                    // usual order: the left reads gpu, cpu, disks; the
-                    // right memory, network, sensors.
+                if ui.available_width() >= overview::TWO_COLUMN_WIDTH && slots.len() > 1 {
+                    // Slots alternate between the columns in their
+                    // usual order: the left reads gpu (with the NVIDIA
+                    // card under it), cpu, disks; the right memory,
+                    // network, sensors.
                     let gap = 8.0;
                     let column = (ui.available_width() - gap) / 2.0;
                     ui.horizontal_top(|ui| {
@@ -902,8 +947,10 @@ impl SysMonApp {
                         for side in 0..2 {
                             ui.allocate_ui_with_layout(egui::vec2(column, 0.0), Layout::top_down(Align::Min), |ui| {
                                 ui.set_width(column);
-                                for section in sections.iter().skip(side).step_by(2) {
-                                    draw(ui, &mut cx, section);
+                                for slot in slots.iter().skip(side).step_by(2) {
+                                    for section in slot {
+                                        draw(ui, &mut cx, section);
+                                    }
                                 }
                             });
                         }
@@ -933,6 +980,7 @@ impl SysMonApp {
             let viewport_id = ViewportId::from_hash_of(("popout", section));
             let title = match section {
                 "gpu" => "GPU — SysMon",
+                "nvidia" => "NVIDIA — SysMon",
                 "memory" => "Memory — SysMon",
                 "cpu" => "CPU — SysMon",
                 "network" => "Network — SysMon",
@@ -1653,7 +1701,7 @@ impl SysMonApp {
                         }
                         None => Err(VerbError::bad_args(
                             format!("unknown section `{wanted}`"),
-                            "sections: gpu memory cpu network disks sensors",
+                            "sections: gpu nvidia memory cpu network disks sensors",
                         )),
                     }
                 }
@@ -2011,5 +2059,25 @@ impl eframe::App for SysMonApp {
 
     fn on_exit(&mut self) {
         self.settings.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overview_slots;
+
+    #[test]
+    fn the_nvidia_card_rides_in_the_amd_cards_slot() {
+        let all = ["gpu", "nvidia", "memory", "cpu", "network", "disks", "sensors"];
+        assert_eq!(
+            overview_slots(&all),
+            vec![vec!["gpu", "nvidia"], vec!["memory"], vec!["cpu"], vec!["network"], vec!["disks"], vec!["sensors"]],
+            "six slots: the columns alternate exactly as they did before the card existed"
+        );
+        let without = ["gpu", "memory", "cpu", "network", "disks", "sensors"];
+        assert_eq!(overview_slots(&without).len(), 6, "no NVIDIA card: one slot per card, as in 3.6");
+        // The AMD card hidden or popped out: the NVIDIA card takes the
+        // slot alone and nothing is lost.
+        assert_eq!(overview_slots(&["nvidia", "memory"]), vec![vec!["nvidia"], vec!["memory"]]);
     }
 }

@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::{SensorKind, SystemSnapshot};
+use crate::snapshot::{GpuSnapshot, SensorKind, SystemSnapshot};
 
 pub use manage::{ClearReport, ExportReport};
 pub use read::{Growth, ReadStats, Recording, StoreInfo, growth, summarize_dir};
@@ -47,7 +47,7 @@ pub use summary::{GpuProcessSummary, MetricSummary, Summary, summarize};
 
 /// Section names `sysmon history` and the copy buttons accept. They are
 /// the pop-out sections, so each pop-out copies its own.
-pub const HISTORY_SECTIONS: [&str; 6] = ["cpu", "memory", "gpu", "network", "disks", "sensors"];
+pub const HISTORY_SECTIONS: [&str; 7] = ["cpu", "memory", "gpu", "nvidia", "network", "disks", "sensors"];
 
 /// GPU processes kept per sample: the biggest VRAM holders and anything
 /// busy. A game, the model and the compositor fit with room to spare.
@@ -70,6 +70,9 @@ pub struct HistoryRecord {
     pub memory: Option<MemoryRecord>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub gpu: Option<GpuRecord>,
+    /// The NVIDIA card (3.7): the same record shape as `gpu`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub nvidia: Option<GpuRecord>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub network: Option<NetworkRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -116,6 +119,9 @@ pub struct GpuRecord {
     pub junction_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub memory_celsius: Option<f32>,
+    /// NVIDIA's die sensor (3.7); AMD records edge/junction instead.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub core_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub core_clock_mhz: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -204,48 +210,18 @@ impl HistoryRecord {
                 committed_bytes: memory.committed_bytes,
             });
         }
-        if let Some(gpu) = snapshot.gpu.as_ref().filter(|gpu| gpu.available) {
-            let name_of = |pid: i32| -> String {
-                snapshot
-                    .processes
-                    .as_ref()
-                    .and_then(|records| records.iter().find(|r| r.pid == pid))
-                    .map(|r| if r.display_name.is_empty() { r.name.clone() } else { r.display_name.clone() })
-                    .or_else(|| process_display_name(pid))
-                    .unwrap_or_else(|| format!("pid {pid}"))
-            };
-            // Biggest VRAM holders first, then anything busy that the
-            // cut would have dropped.
-            let mut by_vram: Vec<_> = gpu.processes.iter().filter(|p| p.vram_bytes >= 1 << 20 || p.busy_percent >= 0.5).collect();
-            by_vram.sort_by_key(|p| std::cmp::Reverse(p.vram_bytes));
-            let mut kept: Vec<_> = by_vram.iter().take(GPU_PROCESSES_PER_SAMPLE).copied().collect();
-            for busy in by_vram.iter().skip(GPU_PROCESSES_PER_SAMPLE).filter(|p| p.busy_percent >= 1.0) {
-                kept.push(busy);
-            }
-            record.gpu = Some(GpuRecord {
-                busy_percent: tenth(gpu.busy_percent),
-                vram_used_bytes: gpu.vram_used_bytes,
-                vram_total_bytes: gpu.vram_total_bytes,
-                gtt_used_bytes: gpu.gtt_used_bytes,
-                power_watts: gpu.power_draw_watts.map(tenth),
-                edge_celsius: gpu.temperature_edge_celsius.map(tenth),
-                junction_celsius: gpu.temperature_junction_celsius.map(tenth),
-                memory_celsius: gpu.temperature_memory_celsius.map(tenth),
-                core_clock_mhz: gpu.core_clock_mhz.map(|mhz| mhz.round() as f32),
-                memory_clock_mhz: gpu.memory_clock_mhz.map(|mhz| mhz.round() as f32),
-                fan_rpm: gpu.fan_rpm,
-                processes: kept
-                    .into_iter()
-                    .map(|p| GpuProcessRecord {
-                        pid: p.pid,
-                        name: name_of(p.pid),
-                        busy_percent: tenth(p.busy_percent),
-                        vram_bytes: p.vram_bytes,
-                        gtt_bytes: p.gtt_bytes,
-                    })
-                    .collect(),
-            });
-        }
+        let name_of = |pid: i32| -> String {
+            snapshot
+                .processes
+                .as_ref()
+                .and_then(|records| records.iter().find(|r| r.pid == pid))
+                .map(|r| if r.display_name.is_empty() { r.name.clone() } else { r.display_name.clone() })
+                .or_else(|| process_display_name(pid))
+                .unwrap_or_else(|| format!("pid {pid}"))
+        };
+        record.gpu = snapshot.gpu.as_ref().filter(|gpu| gpu.available).map(|gpu| gpu_record(gpu, &name_of));
+        record.nvidia = snapshot.nvidia.as_ref().filter(|gpu| gpu.available).map(|gpu| gpu_record(gpu, &name_of));
+
         if let Some(network) = &snapshot.network {
             record.network = Some(NetworkRecord {
                 download_bps: network.download_bps.round(),
@@ -280,6 +256,42 @@ impl HistoryRecord {
             }
         }
         record
+    }
+}
+
+/// A GPU section's record: its readings, and the programs worth a
+/// line (the biggest VRAM holders first, then anything busy the cut
+/// would have dropped). The same shape for the AMD and NVIDIA cards.
+fn gpu_record(gpu: &GpuSnapshot, name_of: &dyn Fn(i32) -> String) -> GpuRecord {
+    let mut by_vram: Vec<_> = gpu.processes.iter().filter(|p| p.vram_bytes >= 1 << 20 || p.busy_percent >= 0.5).collect();
+    by_vram.sort_by_key(|p| std::cmp::Reverse(p.vram_bytes));
+    let mut kept: Vec<_> = by_vram.iter().take(GPU_PROCESSES_PER_SAMPLE).copied().collect();
+    for busy in by_vram.iter().skip(GPU_PROCESSES_PER_SAMPLE).filter(|p| p.busy_percent >= 1.0) {
+        kept.push(busy);
+    }
+    GpuRecord {
+        busy_percent: tenth(gpu.busy_percent),
+        vram_used_bytes: gpu.vram_used_bytes,
+        vram_total_bytes: gpu.vram_total_bytes,
+        gtt_used_bytes: gpu.gtt_used_bytes,
+        power_watts: gpu.power_draw_watts.map(tenth),
+        edge_celsius: gpu.temperature_edge_celsius.map(tenth),
+        junction_celsius: gpu.temperature_junction_celsius.map(tenth),
+        memory_celsius: gpu.temperature_memory_celsius.map(tenth),
+        core_celsius: gpu.temperature_core_celsius.map(tenth),
+        core_clock_mhz: gpu.core_clock_mhz.map(|mhz| mhz.round() as f32),
+        memory_clock_mhz: gpu.memory_clock_mhz.map(|mhz| mhz.round() as f32),
+        fan_rpm: gpu.fan_rpm,
+        processes: kept
+            .into_iter()
+            .map(|p| GpuProcessRecord {
+                pid: p.pid,
+                name: name_of(p.pid),
+                busy_percent: tenth(p.busy_percent),
+                vram_bytes: p.vram_bytes,
+                gtt_bytes: p.gtt_bytes,
+            })
+            .collect(),
     }
 }
 
@@ -355,6 +367,43 @@ mod tests {
             assert_eq!(utc_civil(start), (y, m, d, h));
             assert_eq!(utc_civil(start + 3_599.9), (y, m, d, h), "same hour to its last instant");
         }
+    }
+
+    #[test]
+    fn the_nvidia_card_is_recorded_apart_and_an_absent_one_not_at_all() {
+        let snapshot = SystemSnapshot {
+            ts: 1_791_673_200.0,
+            gpu: Some(GpuSnapshot { available: true, busy_percent: 12.0, ..Default::default() }),
+            nvidia: Some(GpuSnapshot {
+                available: true,
+                busy_percent: 64.06,
+                vram_used_bytes: 785 << 20,
+                vram_total_bytes: 8 << 30,
+                temperature_core_celsius: Some(35.04),
+                power_draw_watts: Some(21.19),
+                processes: vec![GpuProcessUsage { pid: 4_044_381, vram_bytes: 776 << 20, ..Default::default() }],
+                ..Default::default()
+            }),
+            processes: Some(vec![ProcessRecord {
+                pid: 4_044_381,
+                name: "audiocpp_server".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let record = HistoryRecord::from_snapshot(&snapshot);
+        let nvidia = record.nvidia.as_ref().expect("an NVIDIA record");
+        assert_eq!(nvidia.busy_percent, 64.1);
+        assert_eq!(nvidia.core_celsius, Some(35.0), "the die sensor, to 0.1");
+        assert_eq!(nvidia.power_watts, Some(21.2));
+        assert_eq!(nvidia.processes.len(), 1);
+        assert_eq!(nvidia.processes[0].name, "audiocpp_server");
+        assert_eq!(record.gpu.as_ref().unwrap().busy_percent, 12.0, "the AMD card keeps its own record");
+
+        let absent = SystemSnapshot { nvidia: Some(GpuSnapshot::default()), ..snapshot };
+        assert!(HistoryRecord::from_snapshot(&absent).nvidia.is_none(), "available: false records nothing");
+        let line = serde_json::to_string(&HistoryRecord::from_snapshot(&absent)).unwrap();
+        assert!(!line.contains("nvidia"), "a card-less machine writes 3.6's bytes");
     }
 
     #[test]

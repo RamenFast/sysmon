@@ -264,7 +264,8 @@ fn graphics_rows(sheet: &mut Sheet, specs: &SystemSpecs) {
         let architecture = match (&gpu.family, &gpu.architecture) {
             (Some(family), Some(isa)) => Some(format!("{family} ({isa})")),
             (None, Some(isa)) => Some(isa.clone()),
-            _ => None,
+            (Some(family), None) => Some(family.clone()),
+            (None, None) => None,
         };
         let link = gpu.pcie_link.as_ref().map(|link| {
             let mut text = format!("PCIe {}.0 x{}", link.generation, link.width);
@@ -286,6 +287,7 @@ fn graphics_rows(sheet: &mut Sheet, specs: &SystemSpecs) {
         sheet.more(join([
             architecture,
             gpu.compute_units.map(|cu| format!("{cu} CUs")),
+            gpu.cuda_cores.map(|cores| format!("{cores} CUDA cores")),
             link,
             power,
         ]));
@@ -499,6 +501,7 @@ mod tests {
                 architecture: Some("gfx1201".to_string()),
                 family: Some("RDNA 4".to_string()),
                 compute_units: Some(64),
+                cuda_cores: None,
                 pcie_link: Some(PcieLink {
                     generation: 4,
                     width: 16,
@@ -516,6 +519,22 @@ mod tests {
                     driver: "Mesa 25.2.8-0ubuntu0.24.04.2 (radeonsi)".to_string(),
                 }),
                 compute_stack: Some("ROCm 7.14.1".to_string()),
+            }, GpuSpec {
+                // The compute-only card beside it: no DRM node, no
+                // Vulkan ICD, everything else from NVML (3.7).
+                name: "NVIDIA GeForce RTX 3070".to_string(),
+                pci_id: "10de:2484".to_string(),
+                pci_address: "0000:03:00.0".to_string(),
+                driver: Some("nvidia".to_string()),
+                vram_bytes: Some(8_589_934_592),
+                architecture: Some("sm_86".to_string()),
+                family: Some("Ampere".to_string()),
+                cuda_cores: Some(5888),
+                pcie_link: Some(PcieLink { generation: 4, width: 4, device_max_generation: None, device_max_width: Some(16) }),
+                power_cap_watts: Some(220.0),
+                power_cap_max_watts: Some(240.0),
+                compute_stack: Some("CUDA 13.4 · driver 615.71.09".to_string()),
+                ..Default::default()
             }],
             displays: vec![DisplaySpec {
                 connector: "DP-1".to_string(),
@@ -619,6 +638,10 @@ mod tests {
             "          Vulkan 1.4.318 · Mesa 25.2.8-0ubuntu0.24.04.2 (RADV)",
             "          OpenGL 4.6 · Mesa 25.2.8-0ubuntu0.24.04.2 (radeonsi)",
             "          ROCm 7.14.1",
+            "GPU       NVIDIA GeForce RTX 3070 · 8.6 GB (8.0 GiB) VRAM",
+            "          Ampere (sm_86) · 5888 CUDA cores · PCIe 4.0 x4 (card supports x16) · 220 W cap (max 240 W)",
+            "          nvidia driver · PCI 10de:2484",
+            "          CUDA 13.4 · driver 615.71.09",
             "Display   HP X32 · 31.6\" · 2560×1440 @ 164.83 Hz",
             "Storage   CT2000P3PSSD8 · NVMe SSD · 2.0 TB · PCIe 4.0 x4",
             "            vfat (EFI) · btrfs (system, home, data)",

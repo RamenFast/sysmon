@@ -58,6 +58,13 @@ src/collect/gpu.rs     amdgpu sysfs card metrics + per-process DRM fdinfo
                        vram − amd-evicted-vram, units honored, never the
                        drifting drm-memory-vram; negative cache so non-GPU
                        pids are re-checked every 5th sample)
+src/collect/nvidia.rs  the NVIDIA card through NVML: libnvidia-ml.so.1 by
+                       dlopen (no crate), structs copied from nvml.h with
+                       their sizes pinned in tests; the session opens on
+                       the first collect (NVML maps ~27 MB) and retries
+                       every 15th while absent; Session is Send because
+                       NVML is documented thread-safe. Also the spec
+                       sheet's NVIDIA details (`spec()`)
 src/collect/sensors.rs hwmon walk + /sys/class/power_supply battery
 src/history/           usage history on disk (3.4; two tiers 3.5). mod.rs:
                        HistoryRecord, one compact line per sample.

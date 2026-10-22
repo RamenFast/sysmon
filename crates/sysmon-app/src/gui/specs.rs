@@ -36,7 +36,7 @@ pub fn spec_section_for_popout(popout: &str) -> Option<&'static str> {
     Some(match popout {
         "cpu" => "cpu",
         "memory" => "memory",
-        "gpu" => "graphics",
+        "gpu" | "nvidia" => "graphics",
         "disks" => "storage",
         "network" => "network",
         _ => return None,
@@ -47,6 +47,7 @@ pub fn spec_section_for_popout(popout: &str) -> Option<&'static str> {
 pub fn section_title(section: &str) -> &'static str {
     match section {
         "gpu" => "GPU",
+        "nvidia" => "NVIDIA",
         "memory" => "Memory",
         "cpu" => "CPU",
         "network" => "Network",

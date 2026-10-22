@@ -12,6 +12,7 @@ pub mod gpu;
 pub mod memory;
 pub mod net;
 pub mod net_process;
+pub mod nvidia;
 pub mod process;
 pub(crate) mod read;
 pub mod sensors;
@@ -47,6 +48,7 @@ pub struct Sampler {
     cpu: cpu::CpuCollector,
     memory: memory::MemoryCollector,
     gpu: gpu::GpuCollector,
+    nvidia: nvidia::NvidiaCollector,
     disk: disk::DiskCollector,
     net: net::NetCollector,
     net_process: net_process::NetProcessCollector,
@@ -83,6 +85,7 @@ impl Sampler {
             cpu,
             memory: memory::MemoryCollector::new(),
             gpu: gpu::GpuCollector::new(),
+            nvidia: nvidia::NvidiaCollector::new(),
             disk: disk::DiskCollector::new(),
             net: net::NetCollector::new(),
             net_process: net_process::NetProcessCollector::new(options.enable_nethogs, 1),
@@ -177,6 +180,11 @@ impl Sampler {
         }
         if wants.gpu {
             snapshot.gpu = Some(self.gpu.collect(now));
+        }
+        // Not a rate section: NVML measures busy over the driver's own
+        // sample period, and memory is a level.
+        if wants.nvidia {
+            snapshot.nvidia = Some(self.nvidia.collect());
         }
         if wants.network {
             snapshot.network = Some(self.net.collect(now));
