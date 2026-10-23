@@ -105,6 +105,16 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.7.1 pop-outs fit their card** (`app.rs::PopoutFit`): a pop-out
+  asks for its card's size (width from `CardContext::want_width`, which
+  the header and `stat_grid` report while drawing; height from the
+  scroll content) once the first full sample is in, re-asks if Sway
+  drops a request, and stops for good once the user resizes it.
+  `stat_grid` drops to one pair a row when two would squeeze (the CPU
+  card's "Avg clock2.71 GHz" at 380 px). Wayland reports no
+  `inner_rect`: compare against `ctx.content_rect()`. Debug:
+  `SYSMON_DEBUG_FIT=1`.
+
 - **3.7 the NVIDIA card** (section `nvidia`, `collect/nvidia.rs`): the
   RTX 3070 beside the R9700 is compute-only (no nvidia-drm, no DRM
   node), so NVML is the only source; opened by dlopen on the first

@@ -383,6 +383,8 @@ pub struct SysMonApp {
     pending_screenshot: Option<PendingScreenshot>,
     /// Drag state per popped-out section (drag-anywhere → dock).
     popout_drags: HashMap<&'static str, PopoutDrag>,
+    /// Fit-to-content state per popped-out section.
+    popout_fits: HashMap<&'static str, PopoutFit>,
     /// One-shot: scroll the Overview to this card (the Processes
     /// summary strip's way back).
     overview_scroll_to: Option<&'static str>,
@@ -405,6 +407,67 @@ type PendingScreenshot = (
     std::sync::mpsc::Sender<Result<serde_json::Value, crate::control::VerbError>>,
     Option<String>,
 );
+
+/// A pop-out sizes itself to its card (no scrollbar, no spare room)
+/// until the user resizes it by hand; from then on it keeps their size.
+#[derive(Clone, Copy, Default)]
+struct PopoutFit {
+    /// First frame of this pop-out.
+    opened: Option<Instant>,
+    /// The inner size last asked of the compositor, when, and how many
+    /// times in a row.
+    requested: Option<egui::Vec2>,
+    sent_at: Option<Instant>,
+    sends: u8,
+    /// The window reached `requested` at least once.
+    settled: bool,
+    /// The size moved away from a settled request: the user's now.
+    user_sized: bool,
+}
+
+impl PopoutFit {
+    /// The size to ask for this frame, if any. Width grows at once but
+    /// shrinks only past a margin, so a value gaining and losing a digit
+    /// between samples doesn't make the window breathe.
+    fn next_request(&mut self, current: Option<egui::Vec2>, desired: egui::Vec2) -> Option<egui::Vec2> {
+        if let (Some(requested), Some(current)) = (self.requested, current) {
+            let reached = (current - requested).abs().max_elem() <= 2.0;
+            if reached {
+                self.settled = true;
+            } else if self.settled {
+                self.user_sized = true;
+            }
+        }
+        if self.user_sized {
+            return None;
+        }
+        let target = match self.requested {
+            None => desired,
+            Some(requested) => egui::vec2(
+                if desired.x > requested.x + 1.0 || desired.x < requested.x - 24.0 { desired.x } else { requested.x },
+                if (desired.y - requested.y).abs() > 2.0 { desired.y } else { requested.y },
+            ),
+        };
+        if self.requested == Some(target) {
+            // A request that lands while the compositor is still
+            // configuring the last one can be dropped (seen on Sway:
+            // a second size within a frame or two never arrived). Ask
+            // again a few times, then accept what the desktop gives
+            // (a tiling layout owns the size).
+            let stale = self.sent_at.is_some_and(|at| at.elapsed() > Duration::from_millis(400));
+            if self.settled || !stale || self.sends >= 4 {
+                return None;
+            }
+            self.sends += 1;
+        } else {
+            self.sends = 1;
+        }
+        self.requested = Some(target);
+        self.sent_at = Some(Instant::now());
+        self.settled = false;
+        Some(target)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct PopoutDrag {
@@ -482,6 +545,7 @@ impl SysMonApp {
             command_rx,
             pending_screenshot: None,
             popout_drags: HashMap::new(),
+            popout_fits: HashMap::new(),
             overview_scroll_to: None,
             export_dialog: None,
             clear_dialog: None,
@@ -971,6 +1035,9 @@ impl SysMonApp {
             .copied()
             .filter(|key| self.settings.popped_out_sections.iter().any(|s| s == key))
             .collect();
+        // A section docked by any path (button, drag, ctl) fits afresh
+        // when it pops out again.
+        self.popout_fits.retain(|key, _| popped.contains(key));
         if popped.is_empty() {
             return;
         }
@@ -1003,7 +1070,7 @@ impl SysMonApp {
                 // `app_id=sysmon`; without an id a Wayland pop-out had
                 // none and opened tiled).
                 .with_app_id(super::APP_ID)
-                .with_inner_size([380.0, 320.0])
+                .with_inner_size([440.0, 400.0])
                 .with_min_inner_size([300.0, 160.0])
                 .with_always_on_top();
             ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {
@@ -1065,7 +1132,8 @@ impl SysMonApp {
                                 );
                             }
                         });
-                        egui::ScrollArea::vertical()
+                        let scroll_top = ui.cursor().top();
+                        let scroll = egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 let mut cx = CardContext::new(
@@ -1078,8 +1146,46 @@ impl SysMonApp {
                                     &mut self.table_state.selected_pids,
                                     false,
                                 );
-                                cards::draw_card(ui, &mut cx, section);
+                                let chrome = cards::draw_card(ui, &mut cx, section);
+                                chrome + cx.want_width.get()
                             });
+                        // The window the card asks for: its content
+                        // width plus the panel margins, and the whole
+                        // card's height under the button row, capped
+                        // by the monitor (a tall Sensors card scrolls).
+                        let margin = 8.0;
+                        let monitor = ctx
+                            .input(|input| input.viewport().monitor_size)
+                            .unwrap_or(egui::vec2(1920.0, 1080.0));
+                        let desired = egui::vec2(
+                            (scroll.inner + 2.0 * margin).ceil().clamp(300.0, monitor.x * 0.9),
+                            (scroll_top + scroll.content_size.y + margin).ceil().clamp(160.0, monitor.y * 0.85),
+                        );
+                        // The viewport's own size: Wayland reports no
+                        // inner_rect, so egui's content rect is the one
+                        // reading every backend has.
+                        let current = Some(ctx.content_rect().size());
+                        let fit = self.popout_fits.entry(section).or_default();
+                        // Fit to a full card: before the first complete
+                        // sample a card is a stub (and the top-3 list
+                        // arrives a sample late), so fitting earlier
+                        // shrinks the window and grows it straight back.
+                        let opened = *fit.opened.get_or_insert_with(Instant::now);
+                        let ready = snapshot.processes.is_some() || opened.elapsed() > Duration::from_secs(3);
+                        let request = if ready { fit.next_request(current, desired) } else { None };
+                        if std::env::var_os("SYSMON_DEBUG_FIT").is_some() {
+                            eprintln!("fit[{section}] current={current:?} desired={desired:?} request={request:?} settled={} user={}", fit.settled, fit.user_sized);
+                        }
+                        if let Some(size) = request {
+                            ctx.send_viewport_cmd_to(viewport_id, ViewportCommand::InnerSize(size));
+                        }
+                        if !fit.settled && !fit.user_sized {
+                            // Come back to measure at the new size (or
+                            // ask again) without waiting for a sample. An
+                            // immediate viewport draws inside the root's
+                            // frame, so the root is the one to wake.
+                            ctx.request_repaint_after_for(Duration::from_millis(450), ViewportId::ROOT);
+                        }
                     });
                 if ctx.input(|input| input.viewport().close_requested()) {
                     close_requested = true;
@@ -1134,6 +1240,7 @@ impl SysMonApp {
             if close_requested {
                 self.settings.popped_out_sections.retain(|s| s != section);
                 self.popout_drags.remove(section);
+                self.popout_fits.remove(section);
                 self.settings.save();
             }
         }
@@ -2079,5 +2186,23 @@ mod tests {
         // The AMD card hidden or popped out: the NVIDIA card takes the
         // slot alone and nothing is lost.
         assert_eq!(overview_slots(&["nvidia", "memory"]), vec![vec!["nvidia"], vec!["memory"]]);
+    }
+
+    #[test]
+    fn a_popout_fits_its_card_until_the_user_resizes_it() {
+        use super::PopoutFit;
+        use egui::vec2;
+        let mut fit = PopoutFit::default();
+        // First frame: ask for the card's size.
+        assert_eq!(fit.next_request(Some(vec2(440.0, 400.0)), vec2(451.0, 392.0)), Some(vec2(451.0, 392.0)));
+        // Reached: settled, nothing more to ask.
+        assert_eq!(fit.next_request(Some(vec2(451.0, 392.0)), vec2(451.0, 392.0)), None);
+        assert!(fit.settled);
+        // A digit less in a value doesn't shrink the width; a new row grows the height.
+        assert_eq!(fit.next_request(Some(vec2(451.0, 392.0)), vec2(445.0, 414.0)), Some(vec2(451.0, 414.0)));
+        assert_eq!(fit.next_request(Some(vec2(451.0, 414.0)), vec2(445.0, 414.0)), None);
+        // The user drags it bigger: their size from now on.
+        assert_eq!(fit.next_request(Some(vec2(600.0, 600.0)), vec2(451.0, 300.0)), None);
+        assert!(fit.user_sized);
     }
 }

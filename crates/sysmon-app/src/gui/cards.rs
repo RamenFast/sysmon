@@ -51,6 +51,10 @@ pub struct CardContext<'a> {
     /// Sensors-card group fold state (read-only here; toggles go out
     /// as actions).
     pub folded_sensor_groups: &'a [String],
+    /// The width this card's content needs to lay out without
+    /// squeezing (header and stat grid report into it while drawing).
+    /// A pop-out sizes its window from it.
+    pub want_width: std::cell::Cell<f32>,
 }
 
 /// Deferred effects a frame's widgets request.
@@ -110,12 +114,17 @@ pub fn toggle_selection(selected: &mut Vec<i32>, pid: i32, actions: &mut Vec<App
 
 /// The one place a card is drawn (overview and pop-outs alike), by
 /// section key: gpu nvidia memory cpu network disks sensors.
-pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, section: &str) {
+/// Returns the card's horizontal chrome (frame margin + stroke): the
+/// pop-out adds it to `cx.want_width` to size its window.
+pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, section: &str) -> f32 {
+    let outer_width = ui.available_width();
+    let mut inner_width = outer_width;
     // Each card gets its own id scope: a child Ui's stable id doesn't
     // differ between siblings, and rows inside are keyed by pid (P5),
     // so the same process in two cards' top-3 would otherwise clash.
     ui.push_id(section, |ui| {
         card_frame(cx.palette).show(ui, |ui| {
+            inner_width = ui.available_width();
             ui.set_width(ui.available_width());
             match section {
                 "gpu" => gpu_card(ui, cx),
@@ -128,6 +137,16 @@ pub fn draw_card(ui: &mut Ui, cx: &mut CardContext, section: &str) {
             }
         });
     });
+    outer_width - inner_width
+}
+
+/// Raise the card's wanted content width to at least `width`.
+fn want_width(want: &std::cell::Cell<f32>, width: f32) {
+    want.set(want.get().max(width));
+}
+
+fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x)
 }
 
 impl<'a> CardContext<'a> {
@@ -156,6 +175,7 @@ impl<'a> CardContext<'a> {
             popped_out: &settings.popped_out_sections,
             selected,
             folded_sensor_groups: &settings.folded_sensor_groups,
+            want_width: std::cell::Cell::new(0.0),
         }
     }
 
@@ -213,6 +233,20 @@ fn card_header(
     subtitle: &str,
     headline: &str,
 ) {
+    // What the row needs before the subtitle starts truncating to
+    // nothing: glyph, title, a stub of subtitle, headline, two buttons.
+    let headline_font = egui::FontId::monospace(12.5);
+    let spacing = ui.spacing().item_spacing.x;
+    let subtitle_stub = if !subtitle.is_empty() && !cx.compact { 60.0 + spacing } else { 0.0 };
+    want_width(
+        &cx.want_width,
+        14.0 + text_width(ui, title, egui::FontId::proportional(13.0))
+            + subtitle_stub
+            + text_width(ui, headline, headline_font)
+            + 2.0 * 26.0
+            + 24.0
+            + 3.0 * spacing,
+    );
     ui.horizontal(|ui| {
         glyphs::show(ui, glyphs::for_section(section_key), 14.0, cx.palette.title);
         ui.label(RichText::new(title).color(cx.palette.title).strong().size(13.0));
@@ -265,13 +299,34 @@ fn card_header(
     });
 }
 
-/// Two-column grid of dim label / mono value pairs (v1's StatGrid).
+/// Grid of dim label / mono value pairs (v1's StatGrid): two pairs a
+/// row when they fit, one when the card is too narrow (two squeezed
+/// pairs ran a label into the value beside it). Reports the two-pair
+/// width into `want`, so a pop-out opens wide enough for it.
 /// A value may carry a hover note (label, value, Some(why)).
-fn stat_grid(ui: &mut Ui, palette: &Palette, stats: &[(&str, String, Option<String>)]) {
-    let column_count = 2;
-    egui::Grid::new(ui.next_auto_id())
+fn stat_grid(
+    ui: &mut Ui,
+    palette: &Palette,
+    want: &std::cell::Cell<f32>,
+    stats: &[(&str, String, Option<String>)],
+) {
+    const GAP: f32 = 10.0;
+    // Headroom for values that grow a digit between samples (Ctx/s).
+    const SLACK: f32 = 8.0;
+    let mut columns = [0.0f32; 4];
+    for (index, (label, value, _)) in stats.iter().enumerate() {
+        let column = (index % 2) * 2;
+        columns[column] = columns[column].max(text_width(ui, label, egui::FontId::monospace(10.5)));
+        columns[column + 1] = columns[column + 1].max(text_width(ui, value, egui::FontId::monospace(11.5)));
+    }
+    let two_pairs = columns.iter().sum::<f32>() + 3.0 * GAP + SLACK;
+    want_width(want, two_pairs);
+    let column_count = if ui.available_width() >= two_pairs { 2 } else { 1 };
+    // The id carries the layout: a grid remembers column widths, and
+    // one-pair widths would misplace the first two-pair frame.
+    egui::Grid::new(ui.next_auto_id().with(column_count))
         .num_columns(column_count * 2)
-        .spacing(vec2(10.0, 2.0))
+        .spacing(vec2(GAP, 2.0))
         .show(ui, |ui| {
             for (index, (label, value, note)) in stats.iter().enumerate() {
                 ui.label(RichText::new(*label).color(palette.muted).monospace().size(10.5));
@@ -685,7 +740,7 @@ fn gpu_card(ui: &mut Ui, cx: &mut CardContext) {
     if let Some(hottest) = hottest_vrm {
         stats.push(("VRM", cx.temperature(hottest), Some(format!("voltage regulators, hottest shown: {vrm_note}"))));
     }
-    stat_grid(ui, cx.palette, &stats);
+    stat_grid(ui, cx.palette, &cx.want_width, &stats);
     // The table's VRAM column is this card's, so "more" can sort by it.
     gpu_process_rows(ui, cx, &gpu, true);
 }
@@ -797,7 +852,7 @@ fn nvidia_card(ui: &mut Ui, cx: &mut CardContext) {
             Some("set aside by the driver and firmware, outside the VRAM in use".into()),
         ),
     ];
-    stat_grid(ui, cx.palette, &stats);
+    stat_grid(ui, cx.palette, &cx.want_width, &stats);
     // The table's VRAM column is the AMD card's, so no "more" here.
     gpu_process_rows(ui, cx, &gpu, false);
 }
@@ -925,7 +980,7 @@ fn memory_card(ui: &mut Ui, cx: &mut CardContext) {
     stats.push(("Slab", cx.size(memory.slab_bytes), Some("every kernel slab cache, reclaimable and not".into())));
     stats.push(("Page tables", cx.size(memory.page_tables_bytes), None));
     stats.push(("Kernel stacks", cx.size(memory.kernel_stack_bytes), Some("KernelStack".into())));
-    stat_grid(ui, cx.palette, &stats);
+    stat_grid(ui, cx.palette, &cx.want_width, &stats);
 
     top_list(ui, cx, SortColumn::Memory, "memory", |p| p.memory_rss_bytes as f64, |cx, record| {
         cx.size(record.memory_rss_bytes)
@@ -1047,6 +1102,7 @@ fn cpu_card(ui: &mut Ui, cx: &mut CardContext) {
     stat_grid(
         ui,
         cx.palette,
+        &cx.want_width,
         &[
             (
                 "Load",
@@ -1122,6 +1178,7 @@ fn network_card(ui: &mut Ui, cx: &mut CardContext) {
     stat_grid(
         ui,
         cx.palette,
+        &cx.want_width,
         &[
             stat("Total ↓", cx.size(network.total_received_bytes)),
             stat("Total ↑", cx.size(network.total_sent_bytes)),
