@@ -339,7 +339,7 @@ pub fn for_process_state(state: &str) -> Glyph {
 /// The glyph for a card's section key.
 pub fn for_section(section: &str) -> Glyph {
     match section {
-        "gpu" => Glyph::Gpu,
+        "gpu" | "nvidia" => Glyph::Gpu,
         "memory" => Glyph::Memory,
         "cpu" => Glyph::Cpu,
         "network" => Glyph::Network,

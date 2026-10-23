@@ -528,9 +528,19 @@ fn table(
             table
                 .header(text_height, |mut header| {
                     for (title, sort_column, _) in &columns {
-                        header.col(|ui| header_cell(ui, palette, title, Some(*sort_column), state));
+                        header.col(|ui| {
+                            let response = header_cell(ui, palette, title, Some(*sort_column), state);
+                            if *sort_column == SortColumn::Cpu {
+                                response.on_hover_text(
+                                    "100% is one whole CPU, so a process with several busy threads passes 100%. \
+                                     Click a row: the Inspector's Threads & CPUs shows which CPUs.",
+                                );
+                            }
+                        });
                     }
-                    header.col(|ui| header_cell(ui, palette, "Command", Some(SortColumn::Command), state));
+                    header.col(|ui| {
+                        header_cell(ui, palette, "Command", Some(SortColumn::Command), state);
+                    });
                 })
                 .body(|mut body| {
                     // Row states read the room's row tokens, scoped to
@@ -689,7 +699,7 @@ fn range_select(state: &mut ProcessTableState, visible: &[&ProcessRecord], click
 /// target, every sortable column shows the ▲▼ pair (painted — the
 /// glyphs aren't in the proportional font), and the active direction
 /// carries the accent.
-fn header_cell(ui: &mut Ui, palette: &Palette, title: &str, sort_column: Option<SortColumn>, state: &mut ProcessTableState) {
+fn header_cell(ui: &mut Ui, palette: &Palette, title: &str, sort_column: Option<SortColumn>, state: &mut ProcessTableState) -> egui::Response {
     let is_active = sort_column == Some(state.sort_column);
     let width = ui.available_width().max(24.0);
     let (rect, response) = ui.allocate_exact_size(vec2(width, 18.0), Sense::click());
@@ -739,6 +749,7 @@ fn header_cell(ui: &mut Ui, palette: &Palette, title: &str, sort_column: Option<
             state.sort_descending = column.defaults_descending();
         }
     }
+    response
 }
 
 fn mono_cell(row: &mut egui_extras::TableRow, text: String, right: bool) {

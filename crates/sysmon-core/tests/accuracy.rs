@@ -147,18 +147,22 @@ fn cpu_busy_registers_a_pinned_core_and_stays_consistent() {
 
 #[test]
 fn own_rss_matches_ps() {
-    // ps first, sample immediately after: allocations between the
-    // two reads stay under the tolerance.
+    // ps before and after the sample brackets ours. Other tests in this
+    // binary run on sibling threads of this same process, and one of
+    // them loads NVML (~30 MB in one step, 3.7), so a single ps read
+    // can land on either side of that step. The tolerance is unchanged.
     let pid = std::process::id() as i32;
-    let ps_rss_kib: u64 = shell(&format!("ps -o rss= -p {pid}"))
-        .trim()
-        .parse()
-        .expect("ps rss");
+    let ps_rss = || -> u64 {
+        let kib: u64 = shell(&format!("ps -o rss= -p {pid}")).trim().parse().expect("ps rss");
+        kib * 1024
+    };
+    let before = ps_rss();
 
     let mut wants = Wants::none();
     wants.processes = true;
     wants.gpu = true;
     let snapshot = sampled(wants, 50);
+    let after = ps_rss();
     let me = snapshot
         .processes
         .as_ref()
@@ -167,16 +171,15 @@ fn own_rss_matches_ps() {
         .find(|p| p.pid == pid)
         .expect("own process record");
 
-    let ps_rss = ps_rss_kib * 1024;
+    let (low, high) = (before.min(after), before.max(after));
     // 8 MiB or 10%: the test allocates while running. (Since 3.1 the
     // value comes from statm, the counter ps itself reads; before, the
     // approximate stat field ran up to 6 MiB low on busy processes.)
-    let tolerance = (ps_rss / 10).max(8 << 20);
+    let tolerance = (high / 10).max(8 << 20);
     assert!(
-        me.memory_rss_bytes.abs_diff(ps_rss) < tolerance,
-        "own RSS ours {} vs ps {}",
+        me.memory_rss_bytes + tolerance > low && me.memory_rss_bytes < high + tolerance,
+        "own RSS ours {} vs ps {before} before / {after} after",
         me.memory_rss_bytes,
-        ps_rss
     );
     assert_eq!(me.user, shell("id -un").trim(), "own user must match id -un");
 }
@@ -521,6 +524,67 @@ fn gpu_has_a_real_name() {
     assert!(!bare_id && !name.is_empty(), "GPU named by a bare id: {name:?}");
 }
 
+/// The NVIDIA card against nvidia-smi, the driver's own tool (it reads
+/// the same NVML, so this pins that SysMon asks the right calls and
+/// decodes them right, not a second physics). Skips where nvidia-smi
+/// finds no card; fails where it finds one and SysMon doesn't.
+#[test]
+fn nvidia_matches_nvidia_smi() {
+    let query = "nvidia-smi -i 0 --format=csv,noheader,nounits \
+                 --query-gpu=name,memory.total,memory.reserved,memory.used,temperature.gpu,power.limit 2>/dev/null";
+    let row = shell(query);
+    let fields: Vec<&str> = row.trim().split(", ").collect();
+    let mut wants = Wants::none();
+    wants.nvidia = true;
+    let ours = sampled(wants, 50).nvidia.expect("nvidia section");
+    if fields.len() != 6 {
+        assert!(!ours.available, "SysMon found an NVIDIA card nvidia-smi can't read: {}", ours.device_name);
+        eprintln!("no NVIDIA card for nvidia-smi — skipping");
+        return;
+    }
+    assert!(ours.available, "nvidia-smi reads {:?}, SysMon says unavailable", fields[0]);
+    let mib = |field: &str| field.parse::<u64>().expect("MiB field");
+    let (smi_total, smi_reserved, smi_used) = (mib(fields[1]), mib(fields[2]), mib(fields[3]));
+    const MIB: u64 = 1 << 20;
+
+    assert_eq!(ours.device_name, fields[0], "the card's name, verbatim");
+    // Static: equal to the MiB nvidia-smi rounds to.
+    assert_eq!(ours.vram_total_bytes / MIB, smi_total, "total VRAM");
+    let reserved = ours.vram_reserved_bytes.expect("driver has nvmlMemory_v2");
+    assert!((reserved / MIB).abs_diff(smi_reserved) <= 1, "reserve: ours {} MiB vs {smi_reserved}", reserved / MIB);
+    // Allocations move between two reads; 2% of the card covers a
+    // working desktop's churn. The driver's reserve is 3.6% of an
+    // 8 GB card, so reading v1 (reserve folded into used) fails here.
+    let tolerance = smi_total / 50;
+    assert!(
+        (ours.vram_used_bytes / MIB).abs_diff(smi_used) <= tolerance,
+        "used: ours {} MiB vs nvidia-smi {smi_used} MiB (tolerance {tolerance})",
+        ours.vram_used_bytes / MIB
+    );
+    // The die warms or cools a degree or two between reads under load.
+    if let (Some(celsius), Ok(smi)) = (ours.temperature_core_celsius, fields[4].parse::<f32>()) {
+        assert!((celsius - smi).abs() <= 3.0, "die temp: ours {celsius} vs {smi}");
+    }
+    // The enforced limit is a setting: equal to nvidia-smi's 0.01 W.
+    if let (Some(cap), Ok(smi)) = (ours.power_cap_watts, fields[5].parse::<f32>()) {
+        assert!((cap - smi).abs() < 0.02, "power limit: ours {cap} vs {smi}");
+    }
+
+    // Every compute process nvidia-smi lists is ours, memory within
+    // the same churn (a process can grow between the two reads).
+    let apps = shell("nvidia-smi -i 0 --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null");
+    for line in apps.lines().filter(|l| !l.trim().is_empty()) {
+        let (pid, used) = line.split_once(", ").expect("pid, used");
+        let pid: i32 = pid.trim().parse().expect("pid");
+        let ours_row = ours.processes.iter().find(|p| p.pid == pid);
+        let Ok(used) = used.trim().parse::<u64>() else {
+            continue; // [N/A]: another user's process
+        };
+        let row = ours_row.unwrap_or_else(|| panic!("nvidia-smi lists pid {pid}, SysMon doesn't"));
+        assert!((row.vram_bytes / MIB).abs_diff(used) <= tolerance, "pid {pid}: ours {} MiB vs {used}", row.vram_bytes / MIB);
+    }
+}
+
 /// Busy + iowait ≤ 100, and iowait matches the kernel's own split
 /// over the same window, read independently.
 #[test]
@@ -735,4 +799,49 @@ fn cpu_busy_clock_is_what_the_busy_cores_delivered() {
             "window {window}: busy clock {ours:.0} MHz ({source:?}) vs CPPC delivered {truth:.0} MHz over the same window: {results:?}"
         );
     }
+}
+
+/// The thread view (3.8): every thread `ps -L` lists, and a spinner
+/// pinned to one CPU lands there with about a CPU's worth of time.
+#[test]
+fn threads_match_ps_and_a_pinned_thread_lands_on_its_cpu() {
+    use sysmon_core::collect::threads::{ThreadSampler, cpu_count};
+    let target = (cpu_count() - 1) as u32;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spinner_stop = stop.clone();
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+    let spinner = std::thread::spawn(move || {
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_SET(target as usize, &mut set);
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        }
+        tid_tx.send(unsafe { libc::gettid() }).unwrap();
+        while !spinner_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            std::hint::black_box(1u64.wrapping_mul(3));
+        }
+    });
+    let spinner_tid = tid_rx.recv().unwrap();
+    let pid = std::process::id() as i32;
+    let mut sampler = ThreadSampler::new();
+    sampler.sample(pid).expect("own threads");
+    std::thread::sleep(Duration::from_millis(600));
+    let threads = sampler.sample(pid).expect("own threads");
+    let ps = shell(&format!("ps -L -o tid= -p {pid}"));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    spinner.join().unwrap();
+
+    let mut ours: Vec<i32> = threads.threads.iter().map(|t| t.tid).collect();
+    let mut theirs: Vec<i32> = ps.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    ours.sort();
+    theirs.sort();
+    // The test harness may start or end a thread between the two
+    // reads; the spinner and the main thread must be in both.
+    for tid in [pid, spinner_tid] {
+        assert!(ours.contains(&tid) && theirs.contains(&tid), "tid {tid}: ours {ours:?} ps {theirs:?}");
+    }
+    let spinner = threads.threads.iter().find(|t| t.tid == spinner_tid).expect("spinner listed");
+    assert_eq!(spinner.cpu, Some(target), "pinned to CPU {target}");
+    assert!(spinner.cpu_percent >= 60.0, "a spinning thread is about one CPU: {}", spinner.cpu_percent);
+    assert!(threads.per_cpu_percent[target as usize] >= 60.0, "its CPU carries the time: {:?}", threads.per_cpu_percent);
 }

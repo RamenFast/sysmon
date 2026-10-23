@@ -73,9 +73,33 @@ pub struct Histories {
     pub disk_write: History,
     pub cpu_temperature: History,
     pub gpu_temperature: History,
+    /// The NVIDIA card (3.7): busy, VRAM %, die temperature.
+    pub nvidia: History,
+    pub nvidia_vram: History,
+    pub nvidia_temperature: History,
     pub busy_clock: History,
     /// Highest Committed_AS seen since launch (SysMon's own mark).
     pub commit_peak_bytes: u64,
+}
+
+/// Whether this machine's latest sample has an NVIDIA card to show.
+fn nvidia_present(snapshot: &SystemSnapshot) -> bool {
+    snapshot.nvidia.as_ref().is_some_and(|gpu| gpu.available)
+}
+
+/// The Overview's slots: one card each, except that the NVIDIA card
+/// rides in the AMD card's slot, stacked under it. So a machine without
+/// one lays out exactly as before, and every other card keeps its
+/// column when one appears.
+pub(crate) fn overview_slots(sections: &[&'static str]) -> Vec<Vec<&'static str>> {
+    let mut slots: Vec<Vec<&'static str>> = Vec::new();
+    for &section in sections {
+        match slots.last_mut() {
+            Some(slot) if section == "nvidia" && slot[0] == "gpu" => slot.push(section),
+            _ => slots.push(vec![section]),
+        }
+    }
+    slots
 }
 
 impl Histories {
@@ -92,6 +116,17 @@ impl Histories {
             }
             if let Some(t) = gpu.temperature_edge_celsius {
                 self.gpu_temperature.push(t as f64);
+            }
+        }
+        if let Some(gpu) = &snapshot.nvidia
+            && gpu.available
+        {
+            self.nvidia.push(gpu.busy_percent as f64);
+            if gpu.vram_total_bytes > 0 {
+                self.nvidia_vram.push(gpu.vram_used_bytes as f64 / gpu.vram_total_bytes as f64 * 100.0);
+            }
+            if let Some(t) = gpu.temperature_core_celsius {
+                self.nvidia_temperature.push(t as f64);
             }
         }
         if let Some(memory) = &snapshot.memory {
@@ -137,6 +172,9 @@ pub struct SharedUi {
     pub paused: AtomicBool,
     pub interval_seconds: Mutex<f64>,
     pub connections_wanted: AtomicBool,
+    /// Who-is-on-each-CPU (`cpu.per_core_top`) is paid for only while a
+    /// CPU card is on screen to name them.
+    pub occupants_wanted: AtomicBool,
     /// Pop-out sections + detail windows request repaints by id.
     pub open_viewports: Mutex<Vec<ViewportId>>,
     /// The main window's outer rect (screen coords) — the drag-dock
@@ -180,6 +218,7 @@ impl SharedUi {
             paused: AtomicBool::new(false),
             interval_seconds: Mutex::new(interval),
             connections_wanted: AtomicBool::new(false),
+            occupants_wanted: AtomicBool::new(false),
             open_viewports: Mutex::new(Vec::new()),
             main_window_rect: Mutex::new(None),
             renderer: OnceLock::new(),
@@ -291,6 +330,7 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
                     let mut wants = Wants::all();
                     wants.system = true;
                     wants.connections = shared.connections_wanted.load(Ordering::Relaxed);
+                    wants.cpu_occupants = shared.occupants_wanted.load(Ordering::Relaxed);
                     let snapshot = Arc::new(sampler.sample(wants));
 
                     // Histories and `latest` are published under ONE
@@ -329,6 +369,12 @@ pub struct SysMonApp {
     pub page: Page,
     pub table_state: ProcessTableState,
     details_open: Vec<i32>,
+    /// Each details window's own thread reading.
+    details_threads: HashMap<i32, super::threads_view::ThreadsState>,
+    /// Open Threads & CPUs windows (right-click → Threads & CPUs…),
+    /// each with its own sampler.
+    threads_open: Vec<i32>,
+    threads_windows: HashMap<i32, super::threads_view::ThreadsState>,
     /// The one combined-details window (multi-select → Details);
     /// opening a new selection replaces it.
     combined_details_open: Option<Vec<i32>>,
@@ -348,6 +394,8 @@ pub struct SysMonApp {
     pending_screenshot: Option<PendingScreenshot>,
     /// Drag state per popped-out section (drag-anywhere → dock).
     popout_drags: HashMap<&'static str, PopoutDrag>,
+    /// Fit-to-content state per popped-out section.
+    popout_fits: HashMap<&'static str, PopoutFit>,
     /// One-shot: scroll the Overview to this card (the Processes
     /// summary strip's way back).
     overview_scroll_to: Option<&'static str>,
@@ -370,6 +418,67 @@ type PendingScreenshot = (
     std::sync::mpsc::Sender<Result<serde_json::Value, crate::control::VerbError>>,
     Option<String>,
 );
+
+/// A pop-out sizes itself to its card (no scrollbar, no spare room)
+/// until the user resizes it by hand; from then on it keeps their size.
+#[derive(Clone, Copy, Default)]
+struct PopoutFit {
+    /// First frame of this pop-out.
+    opened: Option<Instant>,
+    /// The inner size last asked of the compositor, when, and how many
+    /// times in a row.
+    requested: Option<egui::Vec2>,
+    sent_at: Option<Instant>,
+    sends: u8,
+    /// The window reached `requested` at least once.
+    settled: bool,
+    /// The size moved away from a settled request: the user's now.
+    user_sized: bool,
+}
+
+impl PopoutFit {
+    /// The size to ask for this frame, if any. Width grows at once but
+    /// shrinks only past a margin, so a value gaining and losing a digit
+    /// between samples doesn't make the window breathe.
+    fn next_request(&mut self, current: Option<egui::Vec2>, desired: egui::Vec2) -> Option<egui::Vec2> {
+        if let (Some(requested), Some(current)) = (self.requested, current) {
+            let reached = (current - requested).abs().max_elem() <= 2.0;
+            if reached {
+                self.settled = true;
+            } else if self.settled {
+                self.user_sized = true;
+            }
+        }
+        if self.user_sized {
+            return None;
+        }
+        let target = match self.requested {
+            None => desired,
+            Some(requested) => egui::vec2(
+                if desired.x > requested.x + 1.0 || desired.x < requested.x - 24.0 { desired.x } else { requested.x },
+                if (desired.y - requested.y).abs() > 2.0 { desired.y } else { requested.y },
+            ),
+        };
+        if self.requested == Some(target) {
+            // A request that lands while the compositor is still
+            // configuring the last one can be dropped (seen on Sway:
+            // a second size within a frame or two never arrived). Ask
+            // again a few times, then accept what the desktop gives
+            // (a tiling layout owns the size).
+            let stale = self.sent_at.is_some_and(|at| at.elapsed() > Duration::from_millis(400));
+            if self.settled || !stale || self.sends >= 4 {
+                return None;
+            }
+            self.sends += 1;
+        } else {
+            self.sends = 1;
+        }
+        self.requested = Some(target);
+        self.sent_at = Some(Instant::now());
+        self.settled = false;
+        Some(target)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct PopoutDrag {
@@ -434,6 +543,9 @@ impl SysMonApp {
             page: Page::from_id(&settings.start_page).unwrap_or(Page::Overview),
             table_state,
             details_open: Vec::new(),
+            details_threads: HashMap::new(),
+            threads_open: Vec::new(),
+            threads_windows: HashMap::new(),
             combined_details_open: None,
             pending_confirm: None,
             toast_tx,
@@ -447,6 +559,7 @@ impl SysMonApp {
             command_rx,
             pending_screenshot: None,
             popout_drags: HashMap::new(),
+            popout_fits: HashMap::new(),
             overview_scroll_to: None,
             export_dialog: None,
             clear_dialog: None,
@@ -736,7 +849,7 @@ impl SysMonApp {
                 heading(ui, "Usage history");
                 if menu_check_row(ui, palette, self.settings.history_enabled, "Record usage history")
                     .on_hover_text(
-                        "CPU, memory, GPU and its programs, network, disks and sensors, \
+                        "CPU, memory, the GPUs and their programs, network, disks and sensors, \
                          one line per sample, kept on disk for the copy buttons and `sysmon history`",
                     )
                     .clicked()
@@ -824,10 +937,16 @@ impl SysMonApp {
 
                 ui.separator();
                 heading(ui, "Overview sections");
+                let nvidia_here = nvidia_present(&self.shared.latest.read().unwrap());
                 for key in SECTION_KEYS {
+                    // No NVIDIA card, no row for one.
+                    if key == "nvidia" && !nvidia_here {
+                        continue;
+                    }
                     let visible = self.settings.section_visible(key);
                     let label = match key {
                         "gpu" => "GPU",
+                        "nvidia" => "NVIDIA",
                         "memory" => "Memory",
                         "cpu" => "CPU",
                         "network" => "Network",
@@ -861,13 +980,16 @@ impl SysMonApp {
         let histories = self.shared.histories.read().unwrap();
         let snapshot = self.shared.latest.read().unwrap().clone();
         let scroll_to = self.overview_scroll_to.take();
+        let nvidia_here = nvidia_present(&snapshot);
         let sections: Vec<&'static str> = SECTION_KEYS
             .iter()
             .copied()
+            .filter(|section| *section != "nvidia" || nvidia_here)
             .filter(|section| {
                 self.settings.section_visible(section) && !self.settings.popped_out_sections.iter().any(|s| s == section)
             })
             .collect();
+        let slots = overview_slots(&sections);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -891,10 +1013,11 @@ impl SysMonApp {
                     }
                     ui.add_space(6.0);
                 };
-                if ui.available_width() >= overview::TWO_COLUMN_WIDTH && sections.len() > 1 {
-                    // Cards alternate between the columns in their
-                    // usual order: the left reads gpu, cpu, disks; the
-                    // right memory, network, sensors.
+                if ui.available_width() >= overview::TWO_COLUMN_WIDTH && slots.len() > 1 {
+                    // Slots alternate between the columns in their
+                    // usual order: the left reads gpu (with the NVIDIA
+                    // card under it), cpu, disks; the right memory,
+                    // network, sensors.
                     let gap = 8.0;
                     let column = (ui.available_width() - gap) / 2.0;
                     ui.horizontal_top(|ui| {
@@ -902,8 +1025,10 @@ impl SysMonApp {
                         for side in 0..2 {
                             ui.allocate_ui_with_layout(egui::vec2(column, 0.0), Layout::top_down(Align::Min), |ui| {
                                 ui.set_width(column);
-                                for section in sections.iter().skip(side).step_by(2) {
-                                    draw(ui, &mut cx, section);
+                                for slot in slots.iter().skip(side).step_by(2) {
+                                    for section in slot {
+                                        draw(ui, &mut cx, section);
+                                    }
                                 }
                             });
                         }
@@ -924,6 +1049,9 @@ impl SysMonApp {
             .copied()
             .filter(|key| self.settings.popped_out_sections.iter().any(|s| s == key))
             .collect();
+        // A section docked by any path (button, drag, ctl) fits afresh
+        // when it pops out again.
+        self.popout_fits.retain(|key, _| popped.contains(key));
         if popped.is_empty() {
             return;
         }
@@ -933,6 +1061,7 @@ impl SysMonApp {
             let viewport_id = ViewportId::from_hash_of(("popout", section));
             let title = match section {
                 "gpu" => "GPU — SysMon",
+                "nvidia" => "NVIDIA — SysMon",
                 "memory" => "Memory — SysMon",
                 "cpu" => "CPU — SysMon",
                 "network" => "Network — SysMon",
@@ -955,7 +1084,7 @@ impl SysMonApp {
                 // `app_id=sysmon`; without an id a Wayland pop-out had
                 // none and opened tiled).
                 .with_app_id(super::APP_ID)
-                .with_inner_size([380.0, 320.0])
+                .with_inner_size([440.0, 400.0])
                 .with_min_inner_size([300.0, 160.0])
                 .with_always_on_top();
             ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {
@@ -1017,7 +1146,8 @@ impl SysMonApp {
                                 );
                             }
                         });
-                        egui::ScrollArea::vertical()
+                        let scroll_top = ui.cursor().top();
+                        let scroll = egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 let mut cx = CardContext::new(
@@ -1030,8 +1160,46 @@ impl SysMonApp {
                                     &mut self.table_state.selected_pids,
                                     false,
                                 );
-                                cards::draw_card(ui, &mut cx, section);
+                                let chrome = cards::draw_card(ui, &mut cx, section);
+                                chrome + cx.want_width.get()
                             });
+                        // The window the card asks for: its content
+                        // width plus the panel margins, and the whole
+                        // card's height under the button row, capped
+                        // by the monitor (a tall Sensors card scrolls).
+                        let margin = 8.0;
+                        let monitor = ctx
+                            .input(|input| input.viewport().monitor_size)
+                            .unwrap_or(egui::vec2(1920.0, 1080.0));
+                        let desired = egui::vec2(
+                            (scroll.inner + 2.0 * margin).ceil().clamp(300.0, monitor.x * 0.9),
+                            (scroll_top + scroll.content_size.y + margin).ceil().clamp(160.0, monitor.y * 0.85),
+                        );
+                        // The viewport's own size: Wayland reports no
+                        // inner_rect, so egui's content rect is the one
+                        // reading every backend has.
+                        let current = Some(ctx.content_rect().size());
+                        let fit = self.popout_fits.entry(section).or_default();
+                        // Fit to a full card: before the first complete
+                        // sample a card is a stub (and the top-3 list
+                        // arrives a sample late), so fitting earlier
+                        // shrinks the window and grows it straight back.
+                        let opened = *fit.opened.get_or_insert_with(Instant::now);
+                        let ready = snapshot.processes.is_some() || opened.elapsed() > Duration::from_secs(3);
+                        let request = if ready { fit.next_request(current, desired) } else { None };
+                        if std::env::var_os("SYSMON_DEBUG_FIT").is_some() {
+                            eprintln!("fit[{section}] current={current:?} desired={desired:?} request={request:?} settled={} user={}", fit.settled, fit.user_sized);
+                        }
+                        if let Some(size) = request {
+                            ctx.send_viewport_cmd_to(viewport_id, ViewportCommand::InnerSize(size));
+                        }
+                        if !fit.settled && !fit.user_sized {
+                            // Come back to measure at the new size (or
+                            // ask again) without waiting for a sample. An
+                            // immediate viewport draws inside the root's
+                            // frame, so the root is the one to wake.
+                            ctx.request_repaint_after_for(Duration::from_millis(450), ViewportId::ROOT);
+                        }
                     });
                 if ctx.input(|input| input.viewport().close_requested()) {
                     close_requested = true;
@@ -1086,6 +1254,7 @@ impl SysMonApp {
             if close_requested {
                 self.settings.popped_out_sections.retain(|s| s != section);
                 self.popout_drags.remove(section);
+                self.popout_fits.remove(section);
                 self.settings.save();
             }
         }
@@ -1108,6 +1277,11 @@ impl SysMonApp {
                 AppAction::OpenDetails(pid) => {
                     if !self.details_open.contains(&pid) {
                         self.details_open.push(pid);
+                    }
+                }
+                AppAction::OpenThreads(pid) => {
+                    if !self.threads_open.contains(&pid) {
+                        self.threads_open.push(pid);
                     }
                 }
                 AppAction::OpenCombinedDetails(mut pids) => {
@@ -1588,6 +1762,48 @@ impl SysMonApp {
                         "pages: overview processes",
                     )),
                 },
+                // Open a process in the Inspector (Processes page) or its
+                // own details window: the agent's way to the same
+                // Threads & CPUs view a click opens.
+                "inspect" | "details" | "threads" => {
+                    let wanted = value_or(&value);
+                    let live = wanted.parse::<i32>().ok().and_then(|pid| {
+                        let snapshot = self.shared.latest.read().unwrap();
+                        snapshot
+                            .processes
+                            .as_ref()
+                            .and_then(|records| records.iter().find(|r| r.pid == pid))
+                            .map(|record| (pid, record.name.clone()))
+                    });
+                    match live {
+                        Some((pid, name)) if verb == "inspect" => {
+                            self.page = Page::Processes;
+                            self.settings.show_inspector = true;
+                            self.settings.save();
+                            self.table_state.selected_pids = vec![pid];
+                            self.table_state.reveal_pid = Some(pid);
+                            self.table_state.inspector.inspect(pid);
+                            self.clear_filter_hiding(pid);
+                            Ok(serde_json::json!({"inspecting": pid, "name": name}))
+                        }
+                        Some((pid, name)) if verb == "threads" => {
+                            if !self.threads_open.contains(&pid) {
+                                self.threads_open.push(pid);
+                            }
+                            Ok(serde_json::json!({"threads": pid, "name": name}))
+                        }
+                        Some((pid, name)) => {
+                            if !self.details_open.contains(&pid) {
+                                self.details_open.push(pid);
+                            }
+                            Ok(serde_json::json!({"details": pid, "name": name}))
+                        }
+                        None => Err(VerbError::bad_args(
+                            format!("no process `{wanted}` in the latest sample"),
+                            "give a live pid: `sysmon probe processes` lists them (or `pgrep <name>`)",
+                        )),
+                    }
+                }
                 "cpugraph" => match CpuGraphMode::from_id(&value_or(&value)) {
                     Some(mode) => {
                         self.settings.cpu_graph_mode = mode.id().to_string();
@@ -1653,7 +1869,7 @@ impl SysMonApp {
                         }
                         None => Err(VerbError::bad_args(
                             format!("unknown section `{wanted}`"),
-                            "sections: gpu memory cpu network disks sensors",
+                            "sections: gpu nvidia memory cpu network disks sensors",
                         )),
                     }
                 }
@@ -1942,12 +2158,15 @@ impl eframe::App for SysMonApp {
         let units = self.settings.display().units;
         let mut closed: Vec<i32> = Vec::new();
         for pid in self.details_open.clone() {
+            let palette = self.palette();
             let keep = details::details_window(
                 ctx,
-                self.palette(),
+                palette,
+                &self.settings.graph_palette,
                 units,
                 &snapshot,
                 pid,
+                self.details_threads.entry(pid).or_default(),
                 &mut frame_actions,
             );
             if !keep {
@@ -1955,6 +2174,25 @@ impl eframe::App for SysMonApp {
             }
         }
         self.details_open.retain(|pid| !closed.contains(pid));
+        let open = &self.details_open;
+        self.details_threads.retain(|pid, _| open.contains(pid));
+        let mut closed: Vec<i32> = Vec::new();
+        for pid in self.threads_open.clone() {
+            let keep = details::threads_window(
+                ctx,
+                self.palette(),
+                &self.settings.graph_palette,
+                &snapshot,
+                pid,
+                self.threads_windows.entry(pid).or_default(),
+            );
+            if !keep {
+                closed.push(pid);
+            }
+        }
+        self.threads_open.retain(|pid| !closed.contains(pid));
+        let open = &self.threads_open;
+        self.threads_windows.retain(|pid, _| open.contains(pid));
         // The socket table is only paid for while something shows it:
         // a details window, or the Inspector on the Processes page.
         let inspecting = self.page == Page::Processes
@@ -1963,6 +2201,9 @@ impl eframe::App for SysMonApp {
         self.shared
             .connections_wanted
             .store(!self.details_open.is_empty() || inspecting, Ordering::Relaxed);
+        let cpu_popped = self.settings.popped_out_sections.iter().any(|s| s == "cpu");
+        let cpu_card_shown = self.settings.section_visible("cpu") && (cpu_popped || self.page == Page::Overview);
+        self.shared.occupants_wanted.store(cpu_card_shown, Ordering::Relaxed);
 
         // The combined-details window (multi-select → Details).
         if let Some(pids) = self.combined_details_open.clone() {
@@ -1993,6 +2234,9 @@ impl eframe::App for SysMonApp {
             for pid in &self.details_open {
                 open.push(ViewportId::from_hash_of(("details", *pid)));
             }
+            for pid in &self.threads_open {
+                open.push(ViewportId::from_hash_of(("threads", *pid)));
+            }
             if let Some(pids) = &self.combined_details_open {
                 let mut sorted = pids.clone();
                 sorted.sort_unstable();
@@ -2011,5 +2255,43 @@ impl eframe::App for SysMonApp {
 
     fn on_exit(&mut self) {
         self.settings.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overview_slots;
+
+    #[test]
+    fn the_nvidia_card_rides_in_the_amd_cards_slot() {
+        let all = ["gpu", "nvidia", "memory", "cpu", "network", "disks", "sensors"];
+        assert_eq!(
+            overview_slots(&all),
+            vec![vec!["gpu", "nvidia"], vec!["memory"], vec!["cpu"], vec!["network"], vec!["disks"], vec!["sensors"]],
+            "six slots: the columns alternate exactly as they did before the card existed"
+        );
+        let without = ["gpu", "memory", "cpu", "network", "disks", "sensors"];
+        assert_eq!(overview_slots(&without).len(), 6, "no NVIDIA card: one slot per card, as in 3.6");
+        // The AMD card hidden or popped out: the NVIDIA card takes the
+        // slot alone and nothing is lost.
+        assert_eq!(overview_slots(&["nvidia", "memory"]), vec![vec!["nvidia"], vec!["memory"]]);
+    }
+
+    #[test]
+    fn a_popout_fits_its_card_until_the_user_resizes_it() {
+        use super::PopoutFit;
+        use egui::vec2;
+        let mut fit = PopoutFit::default();
+        // First frame: ask for the card's size.
+        assert_eq!(fit.next_request(Some(vec2(440.0, 400.0)), vec2(451.0, 392.0)), Some(vec2(451.0, 392.0)));
+        // Reached: settled, nothing more to ask.
+        assert_eq!(fit.next_request(Some(vec2(451.0, 392.0)), vec2(451.0, 392.0)), None);
+        assert!(fit.settled);
+        // A digit less in a value doesn't shrink the width; a new row grows the height.
+        assert_eq!(fit.next_request(Some(vec2(451.0, 392.0)), vec2(445.0, 414.0)), Some(vec2(451.0, 414.0)));
+        assert_eq!(fit.next_request(Some(vec2(451.0, 414.0)), vec2(445.0, 414.0)), None);
+        // The user drags it bigger: their size from now on.
+        assert_eq!(fit.next_request(Some(vec2(600.0, 600.0)), vec2(451.0, 300.0)), None);
+        assert!(fit.user_sized);
     }
 }

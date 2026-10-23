@@ -53,6 +53,9 @@ pub struct HourRollup {
     pub metrics: Vec<RollupMetric>,
     /// By name.
     pub programs: Vec<(String, ProgramStats)>,
+    /// The NVIDIA card's programs (3.7), by name. Older rollups have
+    /// none, and older records had no NVIDIA readings to roll up.
+    pub nvidia_programs: Vec<(String, ProgramStats)>,
     /// A hot hour's rollup: the size of the `.jsonl.gz` it was built
     /// from. A restart inside a sealed hour appends a gzip member, and
     /// a size that no longer matches means the rollup is stale (it is
@@ -111,6 +114,7 @@ impl HourRollup {
         let first = records.first()?;
         let mut builder = Builder { metrics: Vec::new(), index: Default::default(), first: true, window: 0.0 };
         let mut programs: std::collections::BTreeMap<String, ProgramStats> = Default::default();
+        let mut nvidia_programs: std::collections::BTreeMap<String, ProgramStats> = Default::default();
         let mut gaps = GapHistogram::default();
         let mut covered_rest = 0.0;
         let mut previous: Option<f64> = None;
@@ -128,8 +132,11 @@ impl HourRollup {
             builder.first = previous.is_none();
             builder.window = window;
             visit(record, "all", &mut scratch, &mut builder);
-            for (name, vram, busy, gtt, pids) in sample_programs(record) {
+            for (name, vram, busy, gtt, pids) in sample_programs(record.gpu.as_ref()) {
                 programs.entry(name.to_string()).or_default().add_sample(vram, busy, gtt, &pids, window);
+            }
+            for (name, vram, busy, gtt, pids) in sample_programs(record.nvidia.as_ref()) {
+                nvidia_programs.entry(name.to_string()).or_default().add_sample(vram, busy, gtt, &pids, window);
             }
             previous = Some(record.ts);
         }
@@ -143,6 +150,7 @@ impl HourRollup {
             gaps,
             metrics: builder.metrics,
             programs: programs.into_iter().collect(),
+            nvidia_programs: nvidia_programs.into_iter().collect(),
             source_bytes: 0,
         })
     }
@@ -229,12 +237,34 @@ struct RollupWire {
     metrics: Vec<MetricWire>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     programs: Vec<ProgramWire>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    nvidia_programs: Vec<ProgramWire>,
     #[serde(skip_serializing_if = "is_zero", default)]
     source_bytes: u64,
 }
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+fn programs_wire(programs: &[(String, ProgramStats)]) -> Vec<ProgramWire> {
+    programs
+        .iter()
+        .map(|(name, p)| ProgramWire {
+            name: name.clone(),
+            pids: p.pids.clone(),
+            vram: StatsWire::from(&p.vram),
+            busy: StatsWire::from(&p.busy),
+            gtt_max: p.gtt_max,
+        })
+        .collect()
+}
+
+fn programs_from_wire(programs: Vec<ProgramWire>) -> Vec<(String, ProgramStats)> {
+    programs
+        .into_iter()
+        .map(|p| (p.name, ProgramStats { pids: p.pids, vram: Stats::from(p.vram), busy: Stats::from(p.busy), gtt_max: p.gtt_max }))
+        .collect()
 }
 
 impl From<&HourRollup> for RollupWire {
@@ -260,17 +290,8 @@ impl From<&HourRollup> for RollupWire {
                     ceiling: m.ceiling,
                 })
                 .collect(),
-            programs: rollup
-                .programs
-                .iter()
-                .map(|(name, p)| ProgramWire {
-                    name: name.clone(),
-                    pids: p.pids.clone(),
-                    vram: StatsWire::from(&p.vram),
-                    busy: StatsWire::from(&p.busy),
-                    gtt_max: p.gtt_max,
-                })
-                .collect(),
+            programs: programs_wire(&rollup.programs),
+            nvidia_programs: programs_wire(&rollup.nvidia_programs),
             source_bytes: rollup.source_bytes,
         }
     }
@@ -298,13 +319,8 @@ impl From<RollupWire> for HourRollup {
                     ceiling: m.ceiling,
                 })
                 .collect(),
-            programs: wire
-                .programs
-                .into_iter()
-                .map(|p| {
-                    (p.name, ProgramStats { pids: p.pids, vram: Stats::from(p.vram), busy: Stats::from(p.busy), gtt_max: p.gtt_max })
-                })
-                .collect(),
+            programs: programs_from_wire(wire.programs),
+            nvidia_programs: programs_from_wire(wire.nvidia_programs),
             source_bytes: wire.source_bytes,
         }
     }
@@ -356,6 +372,29 @@ mod tests {
                         .collect(),
                         ..Default::default()
                     }),
+                    // The NVIDIA card: a resident TTS server, and a model
+                    // that loads and unloads.
+                    nvidia: (r > 0.3).then(|| GpuRecord {
+                        busy_percent: ((r * 3.0) % 1.0 * 100.0) as f32,
+                        vram_used_bytes: 800_000_000 + (r * 6e9) as u64,
+                        vram_total_bytes: 8_589_934_592,
+                        power_watts: Some((20.0 + r * 200.0) as f32),
+                        core_celsius: Some((35.0 + r * 40.0) as f32),
+                        processes: [
+                            Some(GpuProcessRecord { pid: 40, name: "audiocpp_server".into(), vram_bytes: 813_694_976, ..Default::default() }),
+                            (r > 0.6).then(|| GpuProcessRecord {
+                                pid: 41,
+                                name: "llama-server".into(),
+                                busy_percent: (r * 99.0) as f32,
+                                vram_bytes: (r * 5e9) as u64,
+                                ..Default::default()
+                            }),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                        ..Default::default()
+                    }),
                     network: Some(NetworkRecord { download_bps: (r * 1e7).round(), upload_bps: 0.0 }),
                     disks: if ts > start + 2_000.0 {
                         vec![DiskRecord { device: "nvme0n1".into(), read_bps: (r * 5e6).round(), write_bps: 0.0, util_percent: (r * 30.0) as f32 }]
@@ -399,7 +438,7 @@ mod tests {
             .iter()
             .map(|(s, g)| HourRollup::from_line(&HourRollup::build(*s, g).unwrap().to_line()).expect("round trip"))
             .collect();
-        for section in ["all", "cpu", "gpu", "network", "disks", "sensors", "memory"] {
+        for section in ["all", "cpu", "gpu", "nvidia", "network", "disks", "sensors", "memory"] {
             for (from, to, blocks) in [
                 (start, start + 6.0 * 3_600.0, 6),
                 (start - 100.0, start + 6.0 * 3_600.0 + 100.0, 3),
@@ -444,13 +483,33 @@ mod tests {
                     }
                 }
                 assert_eq!(merged.gpu_processes.len(), plain.gpu_processes.len(), "{what}");
-                for (m, p) in merged.gpu_processes.iter().zip(&plain.gpu_processes) {
+                assert_eq!(merged.nvidia_processes.len(), plain.nvidia_processes.len(), "{what}");
+                if section == "nvidia" || section == "all" {
+                    assert_eq!(plain.nvidia_processes.len(), 2, "{what}: both NVIDIA programs");
+                }
+                let both = merged.gpu_processes.iter().zip(&plain.gpu_processes);
+                for (m, p) in both.chain(merged.nvidia_processes.iter().zip(&plain.nvidia_processes)) {
                     assert_eq!((&m.name, &m.pids, m.samples), (&p.name, &p.pids, p.samples), "{what}");
                     assert_eq!((m.vram_max_bytes, m.vram_p95_bytes, m.busy_p95_percent), (p.vram_max_bytes, p.vram_p95_bytes, p.busy_p95_percent));
                     assert!(close(m.vram_avg_bytes, p.vram_avg_bytes) && close(m.present_percent, p.present_percent));
                 }
             }
         }
+    }
+
+    /// A 3.6 rollup line has no `nvidia_programs`, and a 3.7 hour
+    /// without an NVIDIA card writes the same bytes, so the immutable
+    /// archive needs no migration either way.
+    #[test]
+    fn rollups_without_nvidia_keep_the_3_6_wire() {
+        let start = 1_791_673_200.0;
+        let mut records = wobbly_records(start, 1, 2.0);
+        records.iter_mut().for_each(|r| r.nvidia = None);
+        let line = HourRollup::build(start, &records).unwrap().to_line();
+        assert!(!line.contains("nvidia"), "no NVIDIA key in a card-less hour");
+        let back = HourRollup::from_line(&line).expect("reads back");
+        assert!(back.nvidia_programs.is_empty());
+        assert!(!back.programs.is_empty(), "the AMD programs are still there");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::control;
 use crate::envelope::{self, EXIT_BAD_ARGS, EXIT_OK, EXIT_RUNTIME, EXIT_UNAVAILABLE};
 
 const SECTION_NAMES: &str =
-    "all system cpu memory gpu network disks processes sensors connections";
+    "all system cpu memory gpu nvidia network disks processes sensors connections occupants";
 
 fn parse_section_args(arguments: &[String]) -> Result<(Vec<String>, bool, Option<f64>), String> {
     let mut sections = Vec::new();
@@ -62,6 +62,9 @@ fn wants_for(sections: &[String]) -> Result<(Wants, Vec<String>), String> {
     for section in sections {
         match Wants::from_section_name(section) {
             Some(section_wants) => wants = wants.union(section_wants),
+            None if section == "threads" => {
+                return Err("threads is one process's read: `sysmon probe threads --pid <pid>`".to_string());
+            }
             None => return Err(format!("unknown section `{section}` (try: {SECTION_NAMES})")),
         }
     }
@@ -71,6 +74,9 @@ fn wants_for(sections: &[String]) -> Result<(Wants, Vec<String>), String> {
 // ------------------------------------------------------------------ probe
 
 pub fn run_probe(arguments: &[String]) -> i32 {
+    if arguments.iter().any(|argument| argument == "threads") {
+        return run_probe_threads(arguments);
+    }
     // A parse failure happens before `force_json` is known, so read the
     // flag straight off the argv: `--json` must be honored on the very
     // call that got the arguments wrong.
@@ -114,7 +120,7 @@ pub fn run_probe(arguments: &[String]) -> i32 {
             // window sets the step size: 0.25 s moved in 4% jumps
             // (3.1 audit F12). A full second makes one tick 1%; the
             // system-wide sections are fine on the short window.
-            let window = if wants.processes { 1000 } else { 250 };
+            let window = if wants.processes || wants.cpu_occupants { 1000 } else { 250 };
             std::thread::sleep(Duration::from_millis(window));
             match sampler.sample(wants).to_json_value() {
                 Ok(value) => (value, "direct"),
@@ -139,6 +145,94 @@ pub fn run_probe(arguments: &[String]) -> i32 {
         render_human(&snapshot, via);
     }
     EXIT_OK
+}
+
+/// `sysmon probe threads --pid N`: one process, thread by thread, and
+/// which CPUs its time landed on. Always read in-process (any user's
+/// task list is readable; a running window has nothing to add), over
+/// a one-second window: thread CPU comes in 10 ms ticks.
+fn run_probe_threads(arguments: &[String]) -> i32 {
+    const FIX: &str = "usage: sysmon probe threads --pid <pid> [--json] (threads is one process's read; it doesn't combine with other sections)";
+    let force_json = arguments.iter().any(|argument| argument == "--json");
+    let mut pid = None;
+    let mut cursor = arguments.iter();
+    while let Some(argument) = cursor.next() {
+        match argument.as_str() {
+            "threads" | "--json" => {}
+            "--pid" | "-p" => match cursor.next().and_then(|value| value.parse::<i32>().ok()).filter(|pid| *pid > 0) {
+                Some(value) => pid = Some(value),
+                None => return envelope::fail_forced("--pid needs a process id (a positive number)", FIX, EXIT_BAD_ARGS, force_json),
+            },
+            other => {
+                return envelope::fail_forced(format!("`{other}` doesn't go with threads"), FIX, EXIT_BAD_ARGS, force_json);
+            }
+        }
+    }
+    let Some(pid) = pid else {
+        return envelope::fail_forced("threads needs --pid <pid>", FIX, EXIT_BAD_ARGS, force_json);
+    };
+    let gone = || {
+        envelope::fail_forced(
+            format!("no process {pid}"),
+            "find a pid with `sysmon probe processes` (or `pgrep <name>`); it may have exited",
+            EXIT_RUNTIME,
+            force_json,
+        )
+    };
+    let mut sampler = sysmon_core::collect::threads::ThreadSampler::new();
+    if sampler.sample(pid).is_none() {
+        return gone();
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    let Some(threads) = sampler.sample(pid) else {
+        return gone();
+    };
+    if envelope::json_wanted(force_json) {
+        envelope::emit(&envelope::ok(json!({ "threads": threads, "via": "direct" })));
+    } else {
+        render_threads_human(&threads);
+    }
+    EXIT_OK
+}
+
+fn render_threads_human(threads: &sysmon_core::collect::threads::ProcessThreads) {
+    out!(
+        "{} (pid {}) · {:.1}% · {} thread{} · {:.2} of {} CPUs",
+        threads.name,
+        threads.pid,
+        threads.cpu_percent,
+        threads.threads.len(),
+        if threads.threads.len() == 1 { "" } else { "s" },
+        threads.cpu_percent / 100.0,
+        threads.cpu_count
+    );
+    if let Some(allowed) = &threads.allowed_cpus {
+        out!("  pinned to CPUs {allowed}");
+    }
+    let mut busy: Vec<(usize, f32)> =
+        threads.per_cpu_percent.iter().copied().enumerate().filter(|(_, percent)| *percent >= 0.5).collect();
+    busy.sort_by(|a, b| b.1.total_cmp(&a.1));
+    if busy.is_empty() {
+        out!("  on CPUs        (idle this second)");
+    } else {
+        let list: Vec<String> = busy.iter().map(|(cpu, percent)| format!("cpu{cpu} {percent:.0}%")).collect();
+        out!("  on CPUs        {}", list.join("  "));
+    }
+    out!("  {:>8}  {:<16} {:>6}  {:>4}  state", "tid", "thread", "cpu%", "cpu");
+    let shown = threads.threads.iter().filter(|thread| thread.cpu_percent >= 0.5).take(24).count().max(5);
+    for thread in threads.threads.iter().take(shown) {
+        out!(
+            "  {:>8}  {:<16} {:>6.1}  {:>4}  {}",
+            thread.tid,
+            thread.name,
+            thread.cpu_percent,
+            thread.cpu.map(|cpu| cpu.to_string()).unwrap_or("—".into()),
+            thread.state_word
+        );
+    }
+    if threads.threads.len() > shown {
+        out!("  … and {} quieter threads (--json for all)", threads.threads.len() - shown);
+    }
 }
 
 // -------------------------------------------------------------------- tap
@@ -231,7 +325,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             "verbs: status quit pause resume interval <s> raise page <overview|processes> \
              theme <id> palette <id> popout <section> popin <section> shot [path] \
              compact <on|off> units <decimal|binary> temperature <celsius|fahrenheit|both> \
-             cpugraph <total|threads|grid>",
+             cpugraph <total|threads|grid> inspect <pid> details <pid> threads <pid>",
             EXIT_BAD_ARGS,
             force_json,
         );
@@ -251,7 +345,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             request["seconds"] = json!(seconds);
         }
         "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" | "temperature"
-        | "cpugraph" => {
+        | "cpugraph" | "inspect" | "details" | "threads" => {
             let Some(value) = positional.get(1) else {
                 return envelope::fail_forced(
                     format!("`{verb}` needs a value"),
@@ -382,7 +476,7 @@ pub fn run_specs(arguments: &[String]) -> i32 {
 
 // ---------------------------------------------------------------- history
 
-const HISTORY_SECTION_NAMES: &str = "all cpu memory gpu network disks sensors";
+const HISTORY_SECTION_NAMES: &str = "all cpu memory gpu nvidia network disks sensors";
 
 /// "90s", "15m", "2h", "7d", "1y", a bare number of seconds, or a unix time
 /// (a number above 1e9) → seconds back from `now`.
@@ -898,6 +992,7 @@ fn build_schema() -> Value {
                             "timeline_block_seconds": {"type": "number"},
                             "metrics": {"type": "array", "description": "[{key (`<section>.<reading>_<unit>`, e.g. gpu.vram_used_bytes, sensors.k10temp Tctl_celsius), label, unit (percent|bytes|bps|celsius|watts|mhz|rpm|load), samples, min, avg, p95, max, latest, total_bytes? (rates: bytes moved over the range), ceiling? (100 for a percent, the card/RAM size for memory), timeline: [mean per block | null where nothing was recorded]}]. min/avg/max/latest exact; p95 from a log-bucket sketch, within 0.5% of the exact nearest-rank p95"},
                             "gpu_processes": {"type": "array", "description": "[{name, pids[], samples, present_percent, vram_avg_bytes, vram_p95_bytes, vram_max_bytes, busy_avg_percent, busy_p95_percent, busy_max_percent, gtt_max_bytes}] — programs grouped by name per sample, biggest peak VRAM first. A buffer two programs share counts in both"},
+                            "nvidia_processes": {"type": "array", "description": "the NVIDIA card's programs, the same shape (sections nvidia and all; new in 3.7)"},
                             "skipped_lines": {"type": "integer", "description": "unreadable lines on disk (a torn tail after a crash), reported rather than hidden"},
                             "rollup_hours": {"type": "integer", "description": "hours merged whole from their rollups instead of read record by record (0 with --raw); the numbers are the same either way"},
                             "store": {"type": "object", "description": "the whole history on disk: as `store` in store_ops.info"},
@@ -991,11 +1086,45 @@ fn build_schema() -> Value {
                             "cpu": {"type": ["object", "null"]},
                             "memory": {"type": ["object", "null"]},
                             "gpu": {"type": ["object", "null"]},
+                            "nvidia": {"type": ["object", "null"]},
                             "network": {"type": ["object", "null"]},
                             "disks": {"type": ["array", "null"]},
                             "processes": {"type": ["array", "null"]},
                             "sensors": {"type": ["object", "null"]},
                             "connections": {"type": ["array", "null"]},
+                        },
+                    },
+                    "exits": [0, 3, 4],
+                },
+                "probe threads": {
+                    "usage": "sysmon probe threads --pid <pid> [--json]",
+                    "kind": "one-shot",
+                    "since": "3.8.0",
+                    "description": "one process, thread by thread, and which logical CPUs its time landed on; always read in-process over a 1 s window",
+                    "arguments": {
+                        "--pid": {"type": "integer", "required": true},
+                        "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "result": {
+                        "type": "object",
+                        "required": ["threads", "via"],
+                        "properties": {
+                            "via": {"enum": ["direct"]},
+                            "threads": {
+                                "type": "object",
+                                "required": ["pid", "name", "interval_seconds", "cpu_count", "cpu_percent", "per_cpu_percent", "cpu_attribution", "threads"],
+                                "properties": {
+                                    "pid": {"type": "integer"},
+                                    "name": {"type": "string"},
+                                    "interval_seconds": {"type": "number"},
+                                    "cpu_count": {"type": "integer", "description": "logical CPUs (configured); the length of per_cpu_percent"},
+                                    "cpu_percent": {"type": "number", "description": "the threads' sum; 100 = one whole CPU"},
+                                    "per_cpu_percent": {"type": "array", "items": {"type": "number"}, "description": "this process's share of each logical CPU, by cpu_attribution"},
+                                    "cpu_attribution": {"enum": ["last_cpu"], "description": "each thread's time over the window is placed on the CPU it last ran on (stat field 39, as ps -o psr / htop); the kernel keeps no per-CPU split"},
+                                    "allowed_cpus": {"type": "string", "description": "Cpus_allowed_list, present only when it narrows the CPUs (a pinned / taskset process)"},
+                                    "threads": {"type": "array", "description": "busiest first: {tid, name, state, state_word, cpu_percent, cpu?, cpu_time_seconds}"},
+                                },
+                            },
                         },
                     },
                     "exits": [0, 3, 4],
@@ -1040,6 +1169,12 @@ fn build_schema() -> Value {
                                       "note": "3.6 folded the Performance page into the Overview; `performance` exits 3 with the fix"},
                         "cpugraph": {"value": {"enum": ["total", "threads", "grid"]}, "needs_gui": true,
                                       "note": "the Overview CPU card's view: total = one trace (busy + kernel); threads = a coloured line per thread (default); grid = a small graph per thread"},
+                        "inspect":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
+                                      "note": "3.8: the Processes page with the Inspector on that pid (its Threads & CPUs included); exits 3 when the pid isn't in the latest sample"},
+                        "details":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
+                                      "note": "3.8: that pid's own details window (identity, Threads & CPUs, connections)"},
+                        "threads":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
+                                      "note": "3.8: a small window with only that pid's Threads & CPUs (what right-click → Threads & CPUs… opens)"},
                         "theme":    {"value": {"enum": theme_enum}, "needs_gui": true},
                         "palette":  {"value": {"enum": palette_enum}, "needs_gui": true},
                         "popout":   {"value": {"enum": popout_enum}, "needs_gui": true},
@@ -1091,7 +1226,7 @@ fn build_schema() -> Value {
                             "system": {"type": "object", "description": "os, os_base?, kernel, architecture, hostname (JSON only, never in text), session_type?, desktop?, model?, board?, firmware?, firmware_date? (ISO), boot_mode (UEFI|BIOS), secure_boot?"},
                             "cpu": {"type": "object", "description": "model?, sockets?, cores? (physical), threads (logical), base_mhz? (ACPI CPPC nominal), max_mhz?, boost_enabled?, cache_l1d_bytes? | cache_l1i_bytes? | cache_l2_bytes? | cache_l3_bytes? (machine totals, shared caches counted once), frequency_driver?, governor?, energy_preference?, features[]"},
                             "memory": {"type": "object", "description": "modules[] (the memory section's module shape, plus form_factor?, rank?, manufacturer?), slots?, installed_bytes?, usable_bytes (MemTotal), swap_bytes"},
-                            "gpus": {"type": "array", "description": "[{name, pci_id, pci_address, driver?, vram_bytes?, architecture? (e.g. gfx1201), family? (e.g. RDNA 4), compute_units?, pcie_link? {generation, width, device_max_generation?, device_max_width?} (the slowest hop to the CPU), power_cap_watts?, power_cap_max_watts?, vulkan? {version, driver}, opengl? {version, driver}, compute_stack?}] — every PCI display device; software renderers are never listed"},
+                            "gpus": {"type": "array", "description": "[{name, pci_id, pci_address, driver?, vram_bytes?, architecture? (AMD ISA e.g. gfx1201, NVIDIA compute capability e.g. sm_86), family? (e.g. RDNA 4, Ampere), compute_units? (AMD), cuda_cores? (NVIDIA, 3.7), pcie_link? {generation, width, device_max_generation?, device_max_width?} (the slowest hop to the CPU), power_cap_watts?, power_cap_max_watts?, vulkan? {version, driver}, opengl? {version, driver}, compute_stack?}] — every PCI display device; software renderers are never listed"},
                             "displays": {"type": "array", "description": "[{connector, make?, model?, diagonal_inches?, width_px?, height_px?, refresh_hz?, scale?, mode_source: active (the compositor's running mode) | preferred (EDID only — the panel's preference, not necessarily in use)}]"},
                             "drives": {"type": "array", "description": "[{name, model?, kind (NVMe SSD | SATA SSD | SATA HDD | USB | SD/eMMC), size_bytes, rpm?, link?, removable, filesystems: [{device, fs_type?, mount_points[]}]}] — physical drives, mounted or not"},
                             "network": {"type": "array", "description": "[{name, kind (Ethernet | Wi-Fi), model?, driver?, link_up, speed_mbps?, duplex?}] — physical interfaces only, no addresses"},
@@ -1107,7 +1242,7 @@ fn build_schema() -> Value {
                 "protocol": "one JSON object per line in; one envelope line out; `subscribe` upgrades to a raw NDJSON snapshot stream",
                 "verbs": ["status", "snapshot", "subscribe", "pause", "resume", "interval",
                            "quit", "raise", "page", "theme", "palette", "popout", "popin",
-                           "shot", "compact", "units", "temperature", "cpugraph"],
+                           "shot", "compact", "units", "temperature", "cpugraph", "inspect", "details", "threads"],
                 "single_owner": "GUI or serve — whoever binds first; `sysmon serve` exits 2 if occupied",
             },
         },
@@ -1129,6 +1264,7 @@ fn build_schema() -> Value {
             "cpu": {
                 "overall_percent": "f32 0–100, mean of cores over the window",
                 "per_core_percent": "[f32]",
+                "per_core_top": "[[{pid, name, cpu_percent}]] per logical CPU, up to 3 busiest processes (threads summed, each thread on the CPU it last ran on). Only with section `occupants` (3.8): it walks every thread on the machine",
                 "core_count": "logical cores",
                 "frequency_mhz": "mean of per-core current frequencies (cpufreq)",
                 "frequency_busy_mhz": "the clock the working cores ran at: each core's delivered clock over the window (ACPI CPPC, the APERF/MPERF ratio turbostat's Bzy_MHz reads) weighted by its busy share",
@@ -1167,6 +1303,20 @@ fn build_schema() -> Value {
                 "clock_source": "\"mean of N reads\" or \"instant read\" (a window's first sample)",
                 "fan_rpm | fan_max_rpm": "hwmon fan1",
                 "processes": "[{pid, busy_percent, vram_bytes, gtt_bytes, vram_shared_bytes, vram_evicted_bytes}] via DRM fdinfo, each client once, busiest first. vram_bytes = drm-total-vram − amd-evicted-vram (buffers in VRAM now; never drm-memory-vram, which drifts to terabytes on kernel 7.2). A shared buffer counts in every process that maps it, so the sum can exceed vram_used_bytes by the shared part",
+            },
+            "nvidia": {
+                "(shape)": "the gpu section's shape, read through NVML (libnvidia-ml.so.1, opened at run time); the first NVIDIA card. New in 3.7",
+                "available": "false ⇒ no NVIDIA card, driver or libnvidia-ml (all other fields empty)",
+                "device_name": "NVML's name, verbatim (\"NVIDIA GeForce RTX 3070\")",
+                "busy_percent": "nvmlDeviceGetUtilizationRates .gpu: share of the driver's last sample period a kernel ran (nvidia-smi utilization.gpu)",
+                "memory_busy_percent": "the same call's .memory: device memory read or written (nvidia-smi utilization.memory)",
+                "vram_used_bytes | vram_total_bytes": "nvmlMemory_v2: used leaves out the driver's reserve, as nvidia-smi's Used row does",
+                "vram_reserved_bytes": "the driver and firmware's reserve (nvidia-smi's Reserved row); absent on a driver without nvmlMemory_v2, whose used then includes it",
+                "temperature_core_celsius": "the die sensor (NVML_TEMPERATURE_GPU)",
+                "power_draw_watts | power_cap_watts": "nvmlDeviceGetPowerUsage (a 1 s average on Ampere and newer) / the enforced power limit",
+                "core_clock_mhz | memory_clock_mhz": "current graphics / memory clock, one read (clock_source \"instant read\")",
+                "fan_percent | fan_rpm": "the fan's target speed, % / its RPM where the driver reports it",
+                "processes": "[{pid, busy_percent, vram_bytes}] from NVML's compute + graphics process lists (a pid in both counts its memory once); busy = the driver's newest per-process sample since the previous read (0 on the first). vram_bytes is 0 where NVML withholds it (another user's process)",
             },
             "network": {
                 "download_bps | upload_bps": "physical interfaces only (a device symlink in /sys/class/net)",
@@ -1240,6 +1390,26 @@ fn render_human(snapshot: &Value, via: &str) {
             ),
         );
         line("tasks", format!("{}", value_u64(&cpu["tasks_total"])));
+        if let Some(per_core) = cpu["per_core_top"].as_array() {
+            // Busiest CPUs first, each naming who is on it.
+            let mut rows: Vec<(usize, f64, String)> = per_core
+                .iter()
+                .enumerate()
+                .filter_map(|(index, occupants)| {
+                    let occupants = occupants.as_array()?;
+                    let busy = value_f64(&cpu["per_core_percent"][index]);
+                    let names: Vec<String> = occupants
+                        .iter()
+                        .map(|o| format!("{} {:.0}%", o["name"].as_str().unwrap_or("?"), value_f64(&o["cpu_percent"])))
+                        .collect();
+                    (!names.is_empty()).then(|| (index, busy, names.join(" · ")))
+                })
+                .collect();
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (index, busy, names) in rows.iter().take(8) {
+                line(&format!("cpu{index} {busy:.0}%"), names.clone());
+            }
+        }
     }
     if let Some(memory) = snapshot.get("memory").filter(|s| !s.is_null()) {
         out!("memory");
@@ -1283,6 +1453,30 @@ fn render_human(snapshot: &Value, via: &str) {
             );
         } else {
             line("device", "no AMD GPU on this machine".to_string());
+        }
+    }
+    if let Some(gpu) = snapshot.get("nvidia").filter(|s| !s.is_null()) {
+        out!("nvidia");
+        if gpu["available"].as_bool() == Some(true) {
+            line("device", gpu["device_name"].as_str().unwrap_or("?").to_string());
+            let mut busy = units::format_percent(value_f64(&gpu["busy_percent"]) as f32);
+            if let Some(core) = gpu["temperature_core_celsius"].as_f64() {
+                busy += &format!(" · {}", units::format_temperature(core as f32));
+            }
+            if let Some(power) = gpu["power_draw_watts"].as_f64() {
+                busy += &format!(" · {}", units::format_power(power as f32));
+            }
+            line("busy", busy);
+            line(
+                "vram",
+                format!(
+                    "{} of {}",
+                    units::format_size(value_u64(&gpu["vram_used_bytes"]), units),
+                    units::format_size(value_u64(&gpu["vram_total_bytes"]), units),
+                ),
+            );
+        } else {
+            line("device", "no NVIDIA GPU on this machine".to_string());
         }
     }
     if let Some(network) = snapshot.get("network").filter(|s| !s.is_null()) {

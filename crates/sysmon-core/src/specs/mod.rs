@@ -168,6 +168,9 @@ pub struct GpuSpec {
     pub family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_units: Option<u32>,
+    /// NVIDIA: CUDA cores, from NVML (new in 3.7).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cuda_cores: Option<u32>,
     /// The link the card actually gets: the slowest hop between the
     /// card and the CPU. A PCIe 5.0 card in a 4.0 slot reports 5.0
     /// on its own port; the slot is what it runs at.

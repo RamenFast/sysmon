@@ -114,6 +114,7 @@ USAGE
     sysmon                          launch the GUI (default; re-launch raises it)
     sysmon --background             GUI on a private Xvfb display (no focus steal)
     sysmon probe [sections…]        one-shot system state (JSON when piped)
+    sysmon probe threads --pid N    one process's threads and the CPUs they're on
     sysmon tap [sections…] [-i N]   stream NDJSON snapshots (default: network, 1s)
     sysmon ctl <verb> […]           drive the running instance
     sysmon serve [--record]         headless daemon on the control socket
@@ -129,18 +130,21 @@ USAGE
     sysmon --version                print the version
 
 SECTIONS
-    all system cpu memory gpu network disks processes sensors connections
+    all system cpu memory gpu nvidia network disks processes sensors connections
+    occupants (who is on each CPU: cpu.per_core_top; walks every thread)
 
 SPEC SECTIONS
     system cpu memory graphics storage network audio
 
 HISTORY SECTIONS
-    all cpu memory gpu network disks sensors
+    all cpu memory gpu nvidia network disks sensors
 
 CTL VERBS
     status quit pause resume interval <s> raise page <p> theme <t>
     palette <p> popout <section> popin <section> shot [path]
-    compact <on|off> units <decimal|binary>
+    compact <on|off> units <decimal|binary> temperature <scale>
+    cpugraph <total|threads|grid> inspect <pid> details <pid>
+    threads <pid>
 
 Everything exits 0 on success, 2 when a needed piece isn't running,
 3 on bad arguments, 4 on runtime failure. Piped output is always

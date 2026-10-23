@@ -136,6 +136,11 @@ fn build(width: f32, settings: Settings) -> (Harness<'static, SysMonApp>, Arc<Sh
         .build_eframe(move |cc| SysMonApp::new(cc, settings, shared, rx, None));
     control.paused.store(true, Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(900));
+    // The live sampler may have recorded a sample or two before the
+    // pause landed; drop them, so every graph holds only the fixture
+    // (a series the fixture lacks, such as this machine's NVIDIA card,
+    // would otherwise keep its live line).
+    *control.histories.write().unwrap() = Default::default();
     let snap = snapshot();
     push_histories(&control, &snap);
     (harness, control)

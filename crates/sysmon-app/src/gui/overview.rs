@@ -87,6 +87,9 @@ pub fn status_text(snapshot: &SystemSnapshot, display: Display, wide: bool) -> S
     if let Some(gpu) = snapshot.gpu.as_ref().filter(|g| g.available) {
         parts.push(format!("GPU {:.0}%", gpu.busy_percent));
     }
+    if let Some(gpu) = snapshot.nvidia.as_ref().filter(|g| g.available) {
+        parts.push(format!("NVIDIA {:.0}%", gpu.busy_percent));
+    }
     if let Some(t) = snapshot.cpu.as_ref().and_then(|c| c.temperature_celsius) {
         parts.push(format_temperature_in(t, display.temperature));
     }

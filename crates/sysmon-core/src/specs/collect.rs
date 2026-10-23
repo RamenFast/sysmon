@@ -393,29 +393,34 @@ fn gpus(vulkan: &[parse::VulkanDevice], glx: Option<&(u32, u32, ApiDriver)>) -> 
     cards.sort_by_key(|name| name[4..].parse::<u32>().unwrap_or(0));
     let kfd = kfd_nodes();
     let rocm = rocm_version();
+    // NVML knows what the PCI tree can't about an NVIDIA card (VRAM,
+    // CUDA cores, the power limit, the CUDA stack). One short session.
+    let nvidia = crate::collect::nvidia::spec();
 
     let mut gpus = Vec::new();
     let mut seen = BTreeSet::new();
-    for card in cards {
-        let device = PathBuf::from(format!("/sys/class/drm/{card}/device"));
-        let Ok(real) = fs::canonicalize(&device) else { continue };
+    let mut add = |device: PathBuf| {
+        let Ok(real) = fs::canonicalize(&device) else { return };
         let pci_address = real.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if !seen.insert(pci_address.clone()) {
-            continue;
+            return;
         }
         let hex = |name: &str| {
             read_trimmed(device.join(name)).and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
         };
-        let (Some(vendor), Some(device_id)) = (hex("vendor"), hex("device")) else { continue };
+        let (Some(vendor), Some(device_id)) = (hex("vendor"), hex("device")) else { return };
         let driver = fs::read_link(device.join("driver"))
             .ok()
             .and_then(|link| link.file_name().map(|n| n.to_string_lossy().to_string()));
         let amd = vendor == 0x1002;
+        let nv = nvidia.as_ref().filter(|spec| vendor == 0x10de && spec.pci_address == pci_address);
         let name = if amd {
             // pci.ids brackets the marketing name without the brand
             // ("Radeon AI PRO R9700"); a spec sheet wants it whole.
             let name = query_marketing_name(&pci_address, &device);
             if name.starts_with("AMD") { name } else { format!("AMD {name}") }
+        } else if let Some(nv) = nv {
+            nv.name.clone() // NVML's own name: "NVIDIA GeForce RTX 3070"
         } else {
             crate::collect::gpu::lspci_name(&pci_address).unwrap_or_else(|| format!("GPU {vendor:04x}:{device_id:04x}"))
         };
@@ -441,17 +446,55 @@ fn gpus(vulkan: &[parse::VulkanDevice], glx: Option<&(u32, u32, ApiDriver)>) -> 
             pci_id: format!("{vendor:04x}:{device_id:04x}"),
             pci_address,
             driver,
-            vram_bytes: if amd { read_u64(device.join("mem_info_vram_total")).filter(|&b| b > 0) } else { None },
-            family: architecture.as_deref().and_then(amd_family).map(String::from),
-            architecture,
+            vram_bytes: if amd {
+                read_u64(device.join("mem_info_vram_total")).filter(|&b| b > 0)
+            } else {
+                nv.and_then(|nv| nv.vram_bytes)
+            },
+            family: architecture
+                .as_deref()
+                .and_then(amd_family)
+                .map(String::from)
+                .or_else(|| nv.and_then(|nv| nv.family.clone())),
+            architecture: architecture.or_else(|| nv.and_then(|nv| nv.architecture.clone())),
             compute_units: node.and_then(|node| node.compute_units),
-            pcie_link: pcie_link(&real),
-            power_cap_watts: watts("power1_cap"),
-            power_cap_max_watts: watts("power1_cap_max"),
+            cuda_cores: nv.and_then(|nv| nv.cuda_cores),
+            pcie_link: pcie_link(&real).map(|link| match nv.and_then(|nv| nv.link_max_generation) {
+                // Idle, the card has dropped to Gen 1: the slot's
+                // generation is NVML's, the width stays the trained one.
+                Some(slot) if slot > link.generation => PcieLink {
+                    generation: slot,
+                    device_max_generation: link.device_max_generation.filter(|&card| card > slot),
+                    ..link
+                },
+                _ => link,
+            }),
+            power_cap_watts: watts("power1_cap").or_else(|| nv.and_then(|nv| nv.power_cap_watts)),
+            power_cap_max_watts: watts("power1_cap_max").or_else(|| nv.and_then(|nv| nv.power_cap_max_watts)),
             vulkan: vulkan_driver,
             opengl,
-            compute_stack: if amd && node.is_some() { rocm.clone() } else { None },
+            compute_stack: if amd && node.is_some() {
+                rocm.clone()
+            } else {
+                nv.and_then(|nv| nv.compute_stack.clone())
+            },
         });
+    };
+    for card in cards {
+        add(PathBuf::from(format!("/sys/class/drm/{card}/device")));
+    }
+    // Display controllers with no DRM node: a compute-only NVIDIA card
+    // (nvidia-drm not loaded) is on the PCI bus and nowhere under
+    // /sys/class/drm. PCI class 0x03 is every display controller.
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") {
+        let mut addresses: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        addresses.sort();
+        for device in addresses {
+            let class = read_trimmed(device.join("class")).and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+            if class.is_some_and(|class| class >> 16 == 0x03) {
+                add(device);
+            }
+        }
     }
     gpus
 }

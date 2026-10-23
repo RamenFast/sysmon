@@ -281,11 +281,11 @@ fn dispatch(verb: &str, request: &Value, backend: &Arc<dyn Backend>) -> Value {
         "quit" => Ok(json!({"quitting": true})),
         "history" => backend.history_op(request),
         "raise" | "page" | "theme" | "palette" | "popout" | "popin" | "shot" | "compact"
-        | "units" | "temperature" | "cpugraph" => backend.gui_verb(verb, request),
+        | "units" | "temperature" | "cpugraph" | "inspect" | "details" | "threads" => backend.gui_verb(verb, request),
         other => Err(VerbError::bad_args(
             format!("unknown verb `{other}`"),
             "verbs: status snapshot subscribe pause resume interval quit history raise page theme \
-             palette popout popin shot compact units temperature cpugraph",
+             palette popout popin shot compact units temperature cpugraph inspect details threads",
         )),
     };
     match result {
@@ -357,7 +357,7 @@ fn wants_from_request(request: &Value) -> Result<Wants, VerbError> {
                 None => {
                     return Err(VerbError::bad_args(
                         format!("unknown section `{name}`"),
-                        "sections: all system cpu memory gpu network disks processes sensors \
+                        "sections: all system cpu memory gpu nvidia network disks processes sensors \
                          connections",
                     ));
                 }

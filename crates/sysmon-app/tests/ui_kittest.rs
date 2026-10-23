@@ -262,9 +262,12 @@ fn ui_interactions_end_to_end() {
     let status = harness.state().shared().history.lock().unwrap().status.clone();
     assert!(status.recording, "the window records history by default: {status:?}");
     assert!(status.dir.starts_with(&scratch), "history must land in the scratch dir, not {:?}", status.dir);
+    // On a machine with an NVIDIA card its card sits second (3.7), so
+    // Memory's copy is the third button there.
+    let nvidia_here = harness.state().shared().latest.read().unwrap().nvidia.as_ref().is_some_and(|gpu| gpu.available);
     let memory_copy = harness
         .get_all_by_label("Copy this section: specs and recent usage")
-        .nth(1) // gpu, memory, cpu, … in SECTION_KEYS order
+        .nth(if nvidia_here { 2 } else { 1 }) // gpu, (nvidia,) memory, cpu, … in SECTION_KEYS order
         .expect("each docked card carries a copy button");
     memory_copy.click();
     let mut section_copy = None;

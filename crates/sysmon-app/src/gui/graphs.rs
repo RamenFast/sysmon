@@ -11,7 +11,9 @@
 
 use std::collections::VecDeque;
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+
+use sysmon_core::collect::threads::CoreOccupant;
 
 use super::theme::Palette;
 
@@ -382,7 +384,7 @@ pub fn thread_lines_graph(
         painter.text(
             drawable.left_top() + vec2(3.0, 1.0),
             egui::Align2::LEFT_TOP,
-            format!("thread {index}"),
+            format!("CPU {index}"),
             egui::FontId::monospace(10.0),
             color_of(index),
         );
@@ -398,7 +400,7 @@ pub fn thread_lines_graph(
         at_that_moment.sort_by(|a, b| b.1.total_cmp(&a.1));
         let busiest: Vec<String> = at_that_moment.iter().take(3).map(|(thread, v)| format!("{thread} {v:.0}%")).collect();
         let average = at_that_moment.iter().map(|(_, v)| v).sum::<f64>() / at_that_moment.len().max(1) as f64;
-        let text = format!("thread {index}: {value:.0}%\nbusiest: {}\nall threads: {average:.0}%", busiest.join(" · "));
+        let text = format!("CPU {index}: {value:.0}%\nbusiest: {}\nall CPUs: {average:.0}%", busiest.join(" · "));
         response.clone().on_hover_ui_at_pointer(|ui| {
             ui.monospace(text);
         });
@@ -471,7 +473,16 @@ pub fn per_thread_columns(width: f32) -> usize {
 /// now. With one colour per thread (the thread views) the bars are the
 /// lines' legend too, and pointing at a bar singles that thread out in
 /// the graph above (`focus_id`). One colour paints them all.
-pub fn per_core_bars(ui: &mut Ui, palette: &Palette, percentages: &[f32], colors: &[Color32], focus_id: Option<egui::Id>) {
+/// One bar per logical CPU. With `occupants` (`cpu.per_core_top`), a
+/// bar's hover names who is on that CPU.
+pub fn per_core_bars(
+    ui: &mut Ui,
+    palette: &Palette,
+    percentages: &[f32],
+    colors: &[Color32],
+    focus_id: Option<egui::Id>,
+    occupants: Option<&[Vec<CoreOccupant>]>,
+) {
     if percentages.is_empty() {
         return;
     }
@@ -517,7 +528,24 @@ pub fn per_core_bars(ui: &mut Ui, palette: &Palette, percentages: &[f32], colors
     if let Some(index) = hovered {
         let percent = percentages[index];
         response.on_hover_ui_at_pointer(|ui| {
-            ui.monospace(format!("Thread {index} — {percent:.0}%"));
+            ui.monospace(format!("CPU {index} — {percent:.0}%"));
+            match occupants.map(|all| all.get(index)) {
+                Some(Some(on_it)) if !on_it.is_empty() => {
+                    for occupant in on_it {
+                        ui.monospace(format!("  {:<15} {:>5.1}%", occupant.name, occupant.cpu_percent));
+                    }
+                    ui.label(
+                        RichText::new("each thread counted on the CPU it last ran on")
+                            .color(palette.muted)
+                            .size(9.5),
+                    );
+                }
+                Some(Some(_)) => {
+                    ui.label(RichText::new("no process held it this window").color(palette.muted).italics().size(10.0));
+                }
+                // The first sample after the card appears has no window yet.
+                Some(None) | None => {}
+            }
         });
     }
 }

@@ -56,6 +56,7 @@ impl GuiBackend {
             keep("cpu", wants.cpu, object);
             keep("memory", wants.memory, object);
             keep("gpu", wants.gpu, object);
+            keep("nvidia", wants.nvidia, object);
             keep("network", wants.network, object);
             keep("disks", wants.disks, object);
             keep("processes", wants.processes, object);

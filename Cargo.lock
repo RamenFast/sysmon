@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "sysmon-app"
-version = "3.6.0"
+version = "3.8.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "sysmon-core"
-version = "3.6.0"
+version = "3.8.0"
 dependencies = [
  "flate2",
  "libc",

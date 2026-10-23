@@ -300,6 +300,11 @@ pub fn summary_text(summary: &Summary, style: TextStyle) -> String {
         lines.extend(table(&["On the GPU", "peak VRAM", "avg VRAM", "busy avg / max", "present"], &programs));
         lines.push("(a buffer two programs share, such as a window the compositor draws, counts in both)".to_string());
     }
+    let nvidia_programs = program_rows(&summary.nvidia_processes, style);
+    if !nvidia_programs.is_empty() {
+        lines.push(String::new());
+        lines.extend(table(&["On the NVIDIA GPU", "peak VRAM", "avg VRAM", "busy avg / max", "present"], &nvidia_programs));
+    }
     lines.join("\n") + "\n"
 }
 

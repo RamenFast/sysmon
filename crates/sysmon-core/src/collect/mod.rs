@@ -12,9 +12,11 @@ pub mod gpu;
 pub mod memory;
 pub mod net;
 pub mod net_process;
+pub mod nvidia;
 pub mod process;
 pub(crate) mod read;
 pub mod sensors;
+pub mod threads;
 
 use std::time::Instant;
 
@@ -47,11 +49,13 @@ pub struct Sampler {
     cpu: cpu::CpuCollector,
     memory: memory::MemoryCollector,
     gpu: gpu::GpuCollector,
+    nvidia: nvidia::NvidiaCollector,
     disk: disk::DiskCollector,
     net: net::NetCollector,
     net_process: net_process::NetProcessCollector,
     process: process::ProcessCollector,
     sensors: sensors::SensorsCollector,
+    occupancy: threads::OccupancySampler,
     boot_ts: f64,
 }
 
@@ -83,10 +87,12 @@ impl Sampler {
             cpu,
             memory: memory::MemoryCollector::new(),
             gpu: gpu::GpuCollector::new(),
+            nvidia: nvidia::NvidiaCollector::new(),
             disk: disk::DiskCollector::new(),
             net: net::NetCollector::new(),
             net_process: net_process::NetProcessCollector::new(options.enable_nethogs, 1),
             process: process::ProcessCollector::new(),
+            occupancy: threads::OccupancySampler::new(),
             sensors: sensors::SensorsCollector::new(),
             boot_ts,
         }
@@ -170,6 +176,9 @@ impl Sampler {
                 cpu.temperature_celsius = Some(celsius);
                 cpu.temperature_source = Some(source);
             }
+            if wants.cpu_occupants {
+                cpu.per_core_top = Some(self.occupancy.sample());
+            }
             snapshot.cpu = Some(cpu);
         }
         if wants.memory {
@@ -177,6 +186,11 @@ impl Sampler {
         }
         if wants.gpu {
             snapshot.gpu = Some(self.gpu.collect(now));
+        }
+        // Not a rate section: NVML measures busy over the driver's own
+        // sample period, and memory is a level.
+        if wants.nvidia {
+            snapshot.nvidia = Some(self.nvidia.collect());
         }
         if wants.network {
             snapshot.network = Some(self.net.collect(now));

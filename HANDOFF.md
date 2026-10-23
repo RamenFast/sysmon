@@ -105,6 +105,48 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.8 Threads & CPUs** (`collect/threads.rs`, `gui/threads_view.rs`):
+  `ThreadSampler` reads one pid's `/proc/<pid>/task/*/stat` (each view
+  owns one: Inspector, each details window, each Threads window,
+  `probe threads`). The Threads window (`details::threads_window`,
+  `AppAction::OpenThreads`, `ctl threads <pid>`) is what the shared
+  `process_context_menu` opens, so every process row gets it — new
+  process rows should call that menu, not grow their own;
+  `OccupancySampler` walks every task for `cpu.per_core_top` only when
+  `Wants::cpu_occupants` (window: while a CPU card shows). Attribution
+  is last-CPU (stat field 39), disclosed as `cpu_attribution`; threads
+  born inside a window count all their ticks (`window_ticks`, against
+  /proc/uptime). Accuracy: `threads_match_ps_and_a_pinned_thread_lands_on_its_cpu`.
+  Present mode is `AutoNoVsync` (`gui/mod.rs`): with FIFO a SysMon window
+  the compositor isn't showing blocked the shared frame and froze every
+  window. Hardware lanes are "CPU n" in visible text; AccessKit labels
+  keep "CPU thread n" (tests read them).
+
+- **3.7.1 pop-outs fit their card** (`app.rs::PopoutFit`): a pop-out
+  asks for its card's size (width from `CardContext::want_width`, which
+  the header and `stat_grid` report while drawing; height from the
+  scroll content) once the first full sample is in, re-asks if Sway
+  drops a request, and stops for good once the user resizes it.
+  `stat_grid` drops to one pair a row when two would squeeze (the CPU
+  card's "Avg clock2.71 GHz" at 380 px). Wayland reports no
+  `inner_rect`: compare against `ctx.content_rect()`. Debug:
+  `SYSMON_DEBUG_FIT=1`.
+
+- **3.7 the NVIDIA card** (section `nvidia`, `collect/nvidia.rs`): the
+  RTX 3070 beside the R9700 is compute-only (no nvidia-drm, no DRM
+  node), so NVML is the only source; opened by dlopen on the first
+  sample that wants it. Overview: the card rides in the AMD card's slot,
+  under it (`app.rs::overview_slots`), so a machine without one lays
+  out as before and no other card changes column; no menu row without a
+  card. History records it (`nvidia` record, `nvidia.*` metrics,
+  `nvidia_programs` in rollups, serde-defaulted, so 3.6 rollups and the
+  archive read unchanged). The spec sheet now walks PCI display class
+  too (it said "every PCI display device" and missed the 3070), with the
+  slot's PCIe generation from NVML (an idle card drops to Gen 1).
+  Accuracy: `nvidia_matches_nvidia_smi`. Edges: the Processes table's
+  GPU % / VRAM columns are still the AMD card's; the NVIDIA card has no
+  "more" link for that reason. Only NVML index 0 is read.
+
 - **3.6 one Overview** (`docs/dev/OVERVIEW-VIEW.md`, revision 3): the
   Performance page is gone; its graphs became the cards' graphs and
   its boxes card stats. The CPU card switches total · threads · grid
@@ -154,7 +196,7 @@ version. Version law: workspace == `--version` == filenames == tag.
   exists. Diet: `sysmon tap network -i 2`; click-through:
   `probe network` top_processes + `probe connections`. See
   docs/API.md "For the future Cinnamon bar".
-- NVIDIA/Intel GPU cards (honest empty state today).
+- Intel GPU cards (honest empty state today); NVIDIA landed in 3.7.
 - Wayland drag-dock (needs a compositor-side story; toggle works).
 - RSS trim: worth trying eframe's glow backend behind a feature flag
   and re-measuring (wgpu costs ~40 MB of the 148 MB llvmpipe RSS).
