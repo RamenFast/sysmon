@@ -28,6 +28,7 @@ use super::graphs::{self, HISTORY_LENGTH};
 use super::icons::{self, IconCache};
 use super::settings::Display;
 use super::theme::{GRAPH_SERIES_CPU, GRAPH_SERIES_MEMORY, Palette, card_frame, graph_color};
+use super::threads_view::{ThreadsState, threads_view};
 
 const DETAIL_REFRESH: Duration = Duration::from_secs(1);
 
@@ -44,6 +45,7 @@ pub struct InspectorState {
     last_ts: f64,
     detail: Option<ProcessDetail>,
     detail_read_at: Option<Instant>,
+    threads: ThreadsState,
 }
 
 impl InspectorState {
@@ -226,7 +228,13 @@ pub fn inspector(
         let cpu_color = graph_color(graph_palette_id, GRAPH_SERIES_CPU, palette.dark);
         let memory_color = graph_color(graph_palette_id, GRAPH_SERIES_MEMORY, palette.dark);
         section(ui, palette, Glyph::Gauge, "Now", |ui| {
-            metric(ui, palette, "CPU", format!("{:.1}%", record.cpu_percent));
+            note_metric(
+                ui,
+                palette,
+                "CPU",
+                cpu_with_count(record.cpu_percent),
+                "100% is one whole CPU, so a process using several can pass 100% (Threads & CPUs, below, shows which)",
+            );
             let cpu: Vec<f64> = state.cpu.iter().copied().collect();
             // 0-based so 5% looks like 5%, not like a mountain; the
             // ceiling follows the peak (multithreaded can pass 100%).
@@ -259,6 +267,12 @@ pub fn inspector(
                     format!("↓ {}  ↑ {}", format_rate(rx, display.units), format_rate(tx, display.units)),
                 );
             }
+        });
+
+        // ── which CPUs its time is on, thread by thread
+        state.threads.refresh(ui.ctx(), pid, snapshot.ts);
+        section(ui, palette, Glyph::Cpu, "Threads & CPUs", |ui| {
+            threads_view(ui, palette, graph_palette_id, snapshot, &mut state.threads);
         });
 
         // ── the memory split
@@ -397,6 +411,16 @@ pub fn inspector(
             }
         });
     });
+}
+
+/// "125.2% · 1.25 CPUs": past 100% the count says what the percent
+/// means; under it the percent alone is clearer.
+pub fn cpu_with_count(percent: f32) -> String {
+    if percent > 100.0 {
+        format!("{percent:.1}% · {:.2} CPUs", percent / 100.0)
+    } else {
+        format!("{percent:.1}%")
+    }
 }
 
 fn empty_state(ui: &mut Ui, palette: &Palette) {

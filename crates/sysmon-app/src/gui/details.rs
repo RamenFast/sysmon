@@ -21,13 +21,17 @@ use super::cards::{AppAction, process_context_menu, selection_color};
 use super::graphs::share_bar;
 use super::icons::{self, IconCache};
 use super::theme::{Palette, card_frame};
+use super::threads_view::{ThreadsState, threads_view};
 
+#[allow(clippy::too_many_arguments)]
 pub fn details_window(
     ctx: &egui::Context,
     palette: &'static Palette,
+    graph_palette_id: &str,
     units: Units,
     snapshot: &SystemSnapshot,
     pid: i32,
+    threads: &mut ThreadsState,
     actions: &mut Vec<AppAction>,
 ) -> bool {
     let viewport_id = ViewportId::from_hash_of(("details", pid));
@@ -123,7 +127,7 @@ pub fn details_window(
                         ui.add_space(6.0);
                         ui.separator();
 
-                        row(ui, "CPU", format!("{:.1}%", record.cpu_percent));
+                        row(ui, "CPU", super::inspector::cpu_with_count(record.cpu_percent));
                         row(ui, "Memory (RSS)", format_size(record.memory_rss_bytes, units));
                         row(
                             ui,
@@ -158,6 +162,17 @@ pub fn details_window(
                                 ),
                             );
                         }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(
+                            RichText::new("Threads & CPUs")
+                                .color(palette.title)
+                                .strong()
+                                .size(12.5),
+                        );
+                        threads.refresh(ctx, pid, snapshot.ts);
+                        threads_view(ui, palette, graph_palette_id, snapshot, threads);
 
                         ui.add_space(6.0);
                         ui.separator();

@@ -800,3 +800,48 @@ fn cpu_busy_clock_is_what_the_busy_cores_delivered() {
         );
     }
 }
+
+/// The thread view (3.8): every thread `ps -L` lists, and a spinner
+/// pinned to one CPU lands there with about a CPU's worth of time.
+#[test]
+fn threads_match_ps_and_a_pinned_thread_lands_on_its_cpu() {
+    use sysmon_core::collect::threads::{ThreadSampler, cpu_count};
+    let target = (cpu_count() - 1) as u32;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spinner_stop = stop.clone();
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+    let spinner = std::thread::spawn(move || {
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_SET(target as usize, &mut set);
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        }
+        tid_tx.send(unsafe { libc::gettid() }).unwrap();
+        while !spinner_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            std::hint::black_box(1u64.wrapping_mul(3));
+        }
+    });
+    let spinner_tid = tid_rx.recv().unwrap();
+    let pid = std::process::id() as i32;
+    let mut sampler = ThreadSampler::new();
+    sampler.sample(pid).expect("own threads");
+    std::thread::sleep(Duration::from_millis(600));
+    let threads = sampler.sample(pid).expect("own threads");
+    let ps = shell(&format!("ps -L -o tid= -p {pid}"));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    spinner.join().unwrap();
+
+    let mut ours: Vec<i32> = threads.threads.iter().map(|t| t.tid).collect();
+    let mut theirs: Vec<i32> = ps.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    ours.sort();
+    theirs.sort();
+    // The test harness may start or end a thread between the two
+    // reads; the spinner and the main thread must be in both.
+    for tid in [pid, spinner_tid] {
+        assert!(ours.contains(&tid) && theirs.contains(&tid), "tid {tid}: ours {ours:?} ps {theirs:?}");
+    }
+    let spinner = threads.threads.iter().find(|t| t.tid == spinner_tid).expect("spinner listed");
+    assert_eq!(spinner.cpu, Some(target), "pinned to CPU {target}");
+    assert!(spinner.cpu_percent >= 60.0, "a spinning thread is about one CPU: {}", spinner.cpu_percent);
+    assert!(threads.per_cpu_percent[target as usize] >= 60.0, "its CPU carries the time: {:?}", threads.per_cpu_percent);
+}

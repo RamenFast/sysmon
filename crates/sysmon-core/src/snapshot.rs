@@ -75,6 +75,12 @@ pub struct CpuSnapshot {
     #[serde(default)]
     pub kernel_percent: f32,
     pub per_core_percent: Vec<f32>,
+    /// Each logical CPU's busiest processes (≤ 3, threads summed, by
+    /// the CPU each thread last ran on). Only when asked for (section
+    /// `occupants`, or the window while its CPU card shows): it walks
+    /// every thread on the machine. New in 3.8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_core_top: Option<Vec<Vec<crate::collect::threads::CoreOccupant>>>,
     pub core_count: usize,
     /// Mean of the per-core current frequencies, idle cores included
     /// (cpufreq reports a parked core at its last requested clock).
@@ -576,6 +582,9 @@ pub struct Wants {
     pub per_process_net: bool,
     /// The full socket table.
     pub connections: bool,
+    /// Who is on each CPU (`cpu.per_core_top`): a walk of every
+    /// thread, so asked for by name only. New in 3.8.
+    pub cpu_occupants: bool,
 }
 
 impl Wants {
@@ -592,6 +601,7 @@ impl Wants {
             sensors: true,
             per_process_net: true,
             connections: false, // big; explicitly requested only
+            cpu_occupants: false, // every thread on the machine; by name only
         }
     }
 
@@ -619,6 +629,10 @@ impl Wants {
                 wants.per_process_net = true;
             }
             "sensors" => wants.sensors = true,
+            "occupants" => {
+                wants.cpu = true;
+                wants.cpu_occupants = true;
+            }
             "connections" => {
                 wants.connections = true;
                 wants.per_process_net = true;
@@ -642,6 +656,7 @@ impl Wants {
             sensors: self.sensors || other.sensors,
             per_process_net: self.per_process_net || other.per_process_net,
             connections: self.connections || other.connections,
+            cpu_occupants: self.cpu_occupants || other.cpu_occupants,
         }
     }
 }

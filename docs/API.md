@@ -41,6 +41,32 @@ Sections: `all system cpu memory gpu nvidia network disks processes sensors
 connections`. `nvidia` (3.7) is the first NVIDIA card, read through
 NVML; see [The NVIDIA card](#the-nvidia-card).
 
+### One process's threads, and which CPUs (3.8)
+
+```bash
+sysmon probe threads --pid $(pgrep -x st)
+sysmon probe threads --pid 4872 --json | jq '.result.threads.per_cpu_percent'
+sysmon probe occupants       # who is on each CPU (cpu.per_core_top)
+```
+
+`threads` is one process read in-process over a 1 s window (any
+user's task list is readable, so a running window has nothing to add):
+`{pid, name, interval_seconds, cpu_count, cpu_percent, per_cpu_percent[],
+cpu_attribution: "last_cpu", allowed_cpus?, threads: [{tid, name, state,
+state_word, cpu_percent, cpu?, cpu_time_seconds}]}`, busiest first.
+100% is one whole CPU. The kernel keeps no per-CPU split of a thread's
+time, so each thread's time over the window is placed on the CPU it
+last ran on (stat field 39: what `ps -o psr` and htop's PROCESSOR
+show); that is `cpu_attribution`. A thread born inside the window
+counts all of its time. `allowed_cpus` appears only when the process's
+affinity narrows the CPUs (`taskset`, a pinned service).
+
+`occupants` is the reverse view, every thread on the machine grouped
+by CPU: `cpu.per_core_top[i]` is CPU i's busiest processes, up to 3,
+threads of one process summed. It walks ~3000 task files, so it is
+never part of `all`; the window asks for it only while a CPU card is on
+screen (about half a percent of one CPU at the 5 s default).
+
 ## Door 2 — `sysmon tap` (stream)
 
 One snapshot per line, NDJSON, at your cadence, every line carrying
@@ -61,6 +87,8 @@ every line's rates are correct for its own window.
 sysmon ctl status            # who's serving, which mode
 sysmon ctl page processes    # switch pages: overview | processes
 sysmon ctl cpugraph threads  # the Overview's CPU card: total | threads | grid
+sysmon ctl inspect 4872      # Processes page, Inspector on pid 4872 (Threads & CPUs included)
+sysmon ctl details 4872      # pid 4872's own details window
 sysmon ctl theme blossom_dark
 sysmon ctl popout gpu        # pop the GPU card into its own window
 sysmon ctl shot /tmp/s.png   # PNG of the window, path in the reply

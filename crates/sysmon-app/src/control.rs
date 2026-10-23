@@ -281,11 +281,11 @@ fn dispatch(verb: &str, request: &Value, backend: &Arc<dyn Backend>) -> Value {
         "quit" => Ok(json!({"quitting": true})),
         "history" => backend.history_op(request),
         "raise" | "page" | "theme" | "palette" | "popout" | "popin" | "shot" | "compact"
-        | "units" | "temperature" | "cpugraph" => backend.gui_verb(verb, request),
+        | "units" | "temperature" | "cpugraph" | "inspect" | "details" => backend.gui_verb(verb, request),
         other => Err(VerbError::bad_args(
             format!("unknown verb `{other}`"),
             "verbs: status snapshot subscribe pause resume interval quit history raise page theme \
-             palette popout popin shot compact units temperature cpugraph",
+             palette popout popin shot compact units temperature cpugraph inspect details",
         )),
     };
     match result {

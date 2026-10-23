@@ -19,7 +19,7 @@ use crate::control;
 use crate::envelope::{self, EXIT_BAD_ARGS, EXIT_OK, EXIT_RUNTIME, EXIT_UNAVAILABLE};
 
 const SECTION_NAMES: &str =
-    "all system cpu memory gpu nvidia network disks processes sensors connections";
+    "all system cpu memory gpu nvidia network disks processes sensors connections occupants";
 
 fn parse_section_args(arguments: &[String]) -> Result<(Vec<String>, bool, Option<f64>), String> {
     let mut sections = Vec::new();
@@ -62,6 +62,9 @@ fn wants_for(sections: &[String]) -> Result<(Wants, Vec<String>), String> {
     for section in sections {
         match Wants::from_section_name(section) {
             Some(section_wants) => wants = wants.union(section_wants),
+            None if section == "threads" => {
+                return Err("threads is one process's read: `sysmon probe threads --pid <pid>`".to_string());
+            }
             None => return Err(format!("unknown section `{section}` (try: {SECTION_NAMES})")),
         }
     }
@@ -71,6 +74,9 @@ fn wants_for(sections: &[String]) -> Result<(Wants, Vec<String>), String> {
 // ------------------------------------------------------------------ probe
 
 pub fn run_probe(arguments: &[String]) -> i32 {
+    if arguments.iter().any(|argument| argument == "threads") {
+        return run_probe_threads(arguments);
+    }
     // A parse failure happens before `force_json` is known, so read the
     // flag straight off the argv: `--json` must be honored on the very
     // call that got the arguments wrong.
@@ -114,7 +120,7 @@ pub fn run_probe(arguments: &[String]) -> i32 {
             // window sets the step size: 0.25 s moved in 4% jumps
             // (3.1 audit F12). A full second makes one tick 1%; the
             // system-wide sections are fine on the short window.
-            let window = if wants.processes { 1000 } else { 250 };
+            let window = if wants.processes || wants.cpu_occupants { 1000 } else { 250 };
             std::thread::sleep(Duration::from_millis(window));
             match sampler.sample(wants).to_json_value() {
                 Ok(value) => (value, "direct"),
@@ -139,6 +145,94 @@ pub fn run_probe(arguments: &[String]) -> i32 {
         render_human(&snapshot, via);
     }
     EXIT_OK
+}
+
+/// `sysmon probe threads --pid N`: one process, thread by thread, and
+/// which CPUs its time landed on. Always read in-process (any user's
+/// task list is readable; a running window has nothing to add), over
+/// a one-second window: thread CPU comes in 10 ms ticks.
+fn run_probe_threads(arguments: &[String]) -> i32 {
+    const FIX: &str = "usage: sysmon probe threads --pid <pid> [--json] (threads is one process's read; it doesn't combine with other sections)";
+    let force_json = arguments.iter().any(|argument| argument == "--json");
+    let mut pid = None;
+    let mut cursor = arguments.iter();
+    while let Some(argument) = cursor.next() {
+        match argument.as_str() {
+            "threads" | "--json" => {}
+            "--pid" | "-p" => match cursor.next().and_then(|value| value.parse::<i32>().ok()).filter(|pid| *pid > 0) {
+                Some(value) => pid = Some(value),
+                None => return envelope::fail_forced("--pid needs a process id (a positive number)", FIX, EXIT_BAD_ARGS, force_json),
+            },
+            other => {
+                return envelope::fail_forced(format!("`{other}` doesn't go with threads"), FIX, EXIT_BAD_ARGS, force_json);
+            }
+        }
+    }
+    let Some(pid) = pid else {
+        return envelope::fail_forced("threads needs --pid <pid>", FIX, EXIT_BAD_ARGS, force_json);
+    };
+    let gone = || {
+        envelope::fail_forced(
+            format!("no process {pid}"),
+            "find a pid with `sysmon probe processes` (or `pgrep <name>`); it may have exited",
+            EXIT_RUNTIME,
+            force_json,
+        )
+    };
+    let mut sampler = sysmon_core::collect::threads::ThreadSampler::new();
+    if sampler.sample(pid).is_none() {
+        return gone();
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    let Some(threads) = sampler.sample(pid) else {
+        return gone();
+    };
+    if envelope::json_wanted(force_json) {
+        envelope::emit(&envelope::ok(json!({ "threads": threads, "via": "direct" })));
+    } else {
+        render_threads_human(&threads);
+    }
+    EXIT_OK
+}
+
+fn render_threads_human(threads: &sysmon_core::collect::threads::ProcessThreads) {
+    out!(
+        "{} (pid {}) · {:.1}% · {} thread{} · {:.2} of {} CPUs",
+        threads.name,
+        threads.pid,
+        threads.cpu_percent,
+        threads.threads.len(),
+        if threads.threads.len() == 1 { "" } else { "s" },
+        threads.cpu_percent / 100.0,
+        threads.cpu_count
+    );
+    if let Some(allowed) = &threads.allowed_cpus {
+        out!("  pinned to CPUs {allowed}");
+    }
+    let mut busy: Vec<(usize, f32)> =
+        threads.per_cpu_percent.iter().copied().enumerate().filter(|(_, percent)| *percent >= 0.5).collect();
+    busy.sort_by(|a, b| b.1.total_cmp(&a.1));
+    if busy.is_empty() {
+        out!("  on CPUs        (idle this second)");
+    } else {
+        let list: Vec<String> = busy.iter().map(|(cpu, percent)| format!("cpu{cpu} {percent:.0}%")).collect();
+        out!("  on CPUs        {}", list.join("  "));
+    }
+    out!("  {:>8}  {:<16} {:>6}  {:>4}  state", "tid", "thread", "cpu%", "cpu");
+    let shown = threads.threads.iter().filter(|thread| thread.cpu_percent >= 0.5).take(24).count().max(5);
+    for thread in threads.threads.iter().take(shown) {
+        out!(
+            "  {:>8}  {:<16} {:>6.1}  {:>4}  {}",
+            thread.tid,
+            thread.name,
+            thread.cpu_percent,
+            thread.cpu.map(|cpu| cpu.to_string()).unwrap_or("—".into()),
+            thread.state_word
+        );
+    }
+    if threads.threads.len() > shown {
+        out!("  … and {} quieter threads (--json for all)", threads.threads.len() - shown);
+    }
 }
 
 // -------------------------------------------------------------------- tap
@@ -231,7 +325,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             "verbs: status quit pause resume interval <s> raise page <overview|processes> \
              theme <id> palette <id> popout <section> popin <section> shot [path] \
              compact <on|off> units <decimal|binary> temperature <celsius|fahrenheit|both> \
-             cpugraph <total|threads|grid>",
+             cpugraph <total|threads|grid> inspect <pid> details <pid>",
             EXIT_BAD_ARGS,
             force_json,
         );
@@ -251,7 +345,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             request["seconds"] = json!(seconds);
         }
         "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" | "temperature"
-        | "cpugraph" => {
+        | "cpugraph" | "inspect" | "details" => {
             let Some(value) = positional.get(1) else {
                 return envelope::fail_forced(
                     format!("`{verb}` needs a value"),
@@ -1002,6 +1096,39 @@ fn build_schema() -> Value {
                     },
                     "exits": [0, 3, 4],
                 },
+                "probe threads": {
+                    "usage": "sysmon probe threads --pid <pid> [--json]",
+                    "kind": "one-shot",
+                    "since": "3.8.0",
+                    "description": "one process, thread by thread, and which logical CPUs its time landed on; always read in-process over a 1 s window",
+                    "arguments": {
+                        "--pid": {"type": "integer", "required": true},
+                        "--json": {"type": "flag", "description": "force the envelope on a terminal"},
+                    },
+                    "result": {
+                        "type": "object",
+                        "required": ["threads", "via"],
+                        "properties": {
+                            "via": {"enum": ["direct"]},
+                            "threads": {
+                                "type": "object",
+                                "required": ["pid", "name", "interval_seconds", "cpu_count", "cpu_percent", "per_cpu_percent", "cpu_attribution", "threads"],
+                                "properties": {
+                                    "pid": {"type": "integer"},
+                                    "name": {"type": "string"},
+                                    "interval_seconds": {"type": "number"},
+                                    "cpu_count": {"type": "integer", "description": "logical CPUs (configured); the length of per_cpu_percent"},
+                                    "cpu_percent": {"type": "number", "description": "the threads' sum; 100 = one whole CPU"},
+                                    "per_cpu_percent": {"type": "array", "items": {"type": "number"}, "description": "this process's share of each logical CPU, by cpu_attribution"},
+                                    "cpu_attribution": {"enum": ["last_cpu"], "description": "each thread's time over the window is placed on the CPU it last ran on (stat field 39, as ps -o psr / htop); the kernel keeps no per-CPU split"},
+                                    "allowed_cpus": {"type": "string", "description": "Cpus_allowed_list, present only when it narrows the CPUs (a pinned / taskset process)"},
+                                    "threads": {"type": "array", "description": "busiest first: {tid, name, state, state_word, cpu_percent, cpu?, cpu_time_seconds}"},
+                                },
+                            },
+                        },
+                    },
+                    "exits": [0, 3, 4],
+                },
                 "tap": {
                     "usage": "sysmon tap [sections…] [--interval N]",
                     "kind": "stream",
@@ -1042,6 +1169,10 @@ fn build_schema() -> Value {
                                       "note": "3.6 folded the Performance page into the Overview; `performance` exits 3 with the fix"},
                         "cpugraph": {"value": {"enum": ["total", "threads", "grid"]}, "needs_gui": true,
                                       "note": "the Overview CPU card's view: total = one trace (busy + kernel); threads = a coloured line per thread (default); grid = a small graph per thread"},
+                        "inspect":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
+                                      "note": "3.8: the Processes page with the Inspector on that pid (its Threads & CPUs included); exits 3 when the pid isn't in the latest sample"},
+                        "details":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
+                                      "note": "3.8: that pid's own details window (identity, Threads & CPUs, connections)"},
                         "theme":    {"value": {"enum": theme_enum}, "needs_gui": true},
                         "palette":  {"value": {"enum": palette_enum}, "needs_gui": true},
                         "popout":   {"value": {"enum": popout_enum}, "needs_gui": true},
@@ -1109,7 +1240,7 @@ fn build_schema() -> Value {
                 "protocol": "one JSON object per line in; one envelope line out; `subscribe` upgrades to a raw NDJSON snapshot stream",
                 "verbs": ["status", "snapshot", "subscribe", "pause", "resume", "interval",
                            "quit", "raise", "page", "theme", "palette", "popout", "popin",
-                           "shot", "compact", "units", "temperature", "cpugraph"],
+                           "shot", "compact", "units", "temperature", "cpugraph", "inspect", "details"],
                 "single_owner": "GUI or serve — whoever binds first; `sysmon serve` exits 2 if occupied",
             },
         },
@@ -1131,6 +1262,7 @@ fn build_schema() -> Value {
             "cpu": {
                 "overall_percent": "f32 0–100, mean of cores over the window",
                 "per_core_percent": "[f32]",
+                "per_core_top": "[[{pid, name, cpu_percent}]] per logical CPU, up to 3 busiest processes (threads summed, each thread on the CPU it last ran on). Only with section `occupants` (3.8): it walks every thread on the machine",
                 "core_count": "logical cores",
                 "frequency_mhz": "mean of per-core current frequencies (cpufreq)",
                 "frequency_busy_mhz": "the clock the working cores ran at: each core's delivered clock over the window (ACPI CPPC, the APERF/MPERF ratio turbostat's Bzy_MHz reads) weighted by its busy share",
@@ -1256,6 +1388,26 @@ fn render_human(snapshot: &Value, via: &str) {
             ),
         );
         line("tasks", format!("{}", value_u64(&cpu["tasks_total"])));
+        if let Some(per_core) = cpu["per_core_top"].as_array() {
+            // Busiest CPUs first, each naming who is on it.
+            let mut rows: Vec<(usize, f64, String)> = per_core
+                .iter()
+                .enumerate()
+                .filter_map(|(index, occupants)| {
+                    let occupants = occupants.as_array()?;
+                    let busy = value_f64(&cpu["per_core_percent"][index]);
+                    let names: Vec<String> = occupants
+                        .iter()
+                        .map(|o| format!("{} {:.0}%", o["name"].as_str().unwrap_or("?"), value_f64(&o["cpu_percent"])))
+                        .collect();
+                    (!names.is_empty()).then(|| (index, busy, names.join(" · ")))
+                })
+                .collect();
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (index, busy, names) in rows.iter().take(8) {
+                line(&format!("cpu{index} {busy:.0}%"), names.clone());
+            }
+        }
     }
     if let Some(memory) = snapshot.get("memory").filter(|s| !s.is_null()) {
         out!("memory");

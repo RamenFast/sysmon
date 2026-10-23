@@ -16,6 +16,7 @@ pub mod nvidia;
 pub mod process;
 pub(crate) mod read;
 pub mod sensors;
+pub mod threads;
 
 use std::time::Instant;
 
@@ -54,6 +55,7 @@ pub struct Sampler {
     net_process: net_process::NetProcessCollector,
     process: process::ProcessCollector,
     sensors: sensors::SensorsCollector,
+    occupancy: threads::OccupancySampler,
     boot_ts: f64,
 }
 
@@ -90,6 +92,7 @@ impl Sampler {
             net: net::NetCollector::new(),
             net_process: net_process::NetProcessCollector::new(options.enable_nethogs, 1),
             process: process::ProcessCollector::new(),
+            occupancy: threads::OccupancySampler::new(),
             sensors: sensors::SensorsCollector::new(),
             boot_ts,
         }
@@ -172,6 +175,9 @@ impl Sampler {
             if let Some((celsius, source)) = temperature {
                 cpu.temperature_celsius = Some(celsius);
                 cpu.temperature_source = Some(source);
+            }
+            if wants.cpu_occupants {
+                cpu.per_core_top = Some(self.occupancy.sample());
             }
             snapshot.cpu = Some(cpu);
         }

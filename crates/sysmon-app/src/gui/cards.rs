@@ -1054,7 +1054,7 @@ fn cpu_card(ui: &mut Ui, cx: &mut CardContext) {
     let swatch = |index: usize| thread_palette.get(index).copied().unwrap_or(busy_color);
     let legend: Vec<(Color32, &str)> = match mode {
         CpuGraphMode::Total => vec![(busy_color, "busy"), (kernel_color, "kernel")],
-        CpuGraphMode::Threads => vec![(swatch(0), ""), (swatch(1), ""), (swatch(2), "a line per thread")],
+        CpuGraphMode::Threads => vec![(swatch(0), ""), (swatch(1), ""), (swatch(2), "a line per CPU")],
         CpuGraphMode::Grid => vec![(swatch(0), ""), (swatch(1), ""), (swatch(2), "a graph per thread")],
     };
     graph_legend_row(ui, cx, &legend, |ui, cx| {
@@ -1091,10 +1091,17 @@ fn cpu_card(ui: &mut Ui, cx: &mut CardContext) {
         return;
     }
     match mode {
-        CpuGraphMode::Total => graphs::per_core_bars(ui, cx.palette, &cpu.per_core_percent, &[busy_color], None),
+        CpuGraphMode::Total => graphs::per_core_bars(ui, cx.palette, &cpu.per_core_percent, &[busy_color], None, cpu.per_core_top.as_deref()),
         // The bars are the lines' legend: point at one to single that
         // thread out above.
-        CpuGraphMode::Threads => graphs::per_core_bars(ui, cx.palette, &cpu.per_core_percent, &thread_palette, Some(focus_id)),
+        CpuGraphMode::Threads => graphs::per_core_bars(
+            ui,
+            cx.palette,
+            &cpu.per_core_percent,
+            &thread_palette,
+            Some(focus_id),
+            cpu.per_core_top.as_deref(),
+        ),
         // The grid already shows every thread on its own.
         CpuGraphMode::Grid => {}
     }

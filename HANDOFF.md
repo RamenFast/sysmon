@@ -105,6 +105,19 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.8 Threads & CPUs** (`collect/threads.rs`, `gui/threads_view.rs`):
+  `ThreadSampler` reads one pid's `/proc/<pid>/task/*/stat` (each view
+  owns one: Inspector, each details window, `probe threads`);
+  `OccupancySampler` walks every task for `cpu.per_core_top` only when
+  `Wants::cpu_occupants` (window: while a CPU card shows). Attribution
+  is last-CPU (stat field 39), disclosed as `cpu_attribution`; threads
+  born inside a window count all their ticks (`window_ticks`, against
+  /proc/uptime). Accuracy: `threads_match_ps_and_a_pinned_thread_lands_on_its_cpu`.
+  Present mode is `AutoNoVsync` (`gui/mod.rs`): with FIFO a SysMon window
+  the compositor isn't showing blocked the shared frame and froze every
+  window. Hardware lanes are "CPU n" in visible text; AccessKit labels
+  keep "CPU thread n" (tests read them).
+
 - **3.7.1 pop-outs fit their card** (`app.rs::PopoutFit`): a pop-out
   asks for its card's size (width from `CardContext::want_width`, which
   the header and `stat_grid` report while drawing; height from the

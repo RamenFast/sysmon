@@ -9,6 +9,7 @@ sysmon - compact system monitor with an agent-drivable API
 *sysmon*++
 *sysmon* --background++
 *sysmon* probe [_sections_...] [--json]++
+*sysmon* probe threads --pid _PID_ [--json]++
 *sysmon* tap [_sections_...] [--interval _N_]++
 *sysmon* ctl _verb_ [_args_...]++
 *sysmon* serve [--record [--interval _N_]]++
@@ -49,7 +50,17 @@ networking first — without scraping a UI.
 	apart, so rates are real. Sections: *all system cpu memory gpu
 	nvidia network disks processes sensors connections*. *nvidia* is
 	the first NVIDIA card through libnvidia-ml (opened at run time;
-	_available_ is false where there is none).
+	_available_ is false where there is none). *occupants* adds
+	_cpu.per_core_top_: each logical CPU's busiest processes (it
+	walks every thread on the machine, so it is never in *all*).
+
+*probe threads* --pid _PID_ [--json]
+	One process, thread by thread: each thread's CPU %, the logical
+	CPU it last ran on, and the process's share of every CPU
+	(_per_cpu_percent_; a thread's time is placed on the CPU it last
+	ran on, as *ps -o psr* and htop show it). Names the CPUs it is
+	pinned to when its affinity narrows them. Read in-process over a
+	1 s window.
 
 *tap* [_sections_...] [--interval _N_]
 	Stream snapshots as NDJSON, one per line, at the given cadence
@@ -64,7 +75,9 @@ networking first — without scraping a UI.
 	on|off; *units* decimal|binary; *temperature*
 	celsius|fahrenheit|both; *cpugraph* total|threads|grid (the
 	Overview's CPU card: one trace, a coloured line per thread, or a
-	small graph per thread). A GUI's *status* names the
+	small graph per thread); *inspect* _pid_ (the Processes page with
+	the Inspector on it) and *details* _pid_ (its own window), both
+	showing its Threads & CPUs. A GUI's *status* names the
 	adapter the window renders on (_renderer_); a CPU-rasterizer
 	fallback — no usable Vulkan driver — adds _renderer_hint_ with
 	the fix, and the window says so at startup too. Degraded modes

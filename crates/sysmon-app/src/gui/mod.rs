@@ -21,6 +21,7 @@ pub mod sensors_view;
 pub mod settings;
 pub mod specs;
 pub mod theme;
+pub mod threads_view;
 pub mod widgets;
 
 /// The Wayland app id (X11 WM_CLASS) every SysMon window carries: the
@@ -139,6 +140,18 @@ pub fn run(_arguments: &[String]) -> i32 {
 
     let native_options = eframe::NativeOptions {
         viewport,
+        // Every SysMon window draws inside one frame (immediate
+        // viewports), and with vsync (FIFO) a present waits for the
+        // compositor's frame callback. A window the compositor isn't
+        // showing (a pop-out or details window on another workspace,
+        // in the scratchpad) never gets one, so the present blocked and
+        // froze every SysMon window, the main one included (3.8, seen on
+        // Sway). Without vsync the present never waits; at SysMon's
+        // ~1 frame a sample there's nothing to tear or to waste.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            ..Default::default()
+        },
         ..Default::default()
     };
     match eframe::run_native(

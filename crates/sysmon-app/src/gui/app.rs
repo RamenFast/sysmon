@@ -172,6 +172,9 @@ pub struct SharedUi {
     pub paused: AtomicBool,
     pub interval_seconds: Mutex<f64>,
     pub connections_wanted: AtomicBool,
+    /// Who-is-on-each-CPU (`cpu.per_core_top`) is paid for only while a
+    /// CPU card is on screen to name them.
+    pub occupants_wanted: AtomicBool,
     /// Pop-out sections + detail windows request repaints by id.
     pub open_viewports: Mutex<Vec<ViewportId>>,
     /// The main window's outer rect (screen coords) — the drag-dock
@@ -215,6 +218,7 @@ impl SharedUi {
             paused: AtomicBool::new(false),
             interval_seconds: Mutex::new(interval),
             connections_wanted: AtomicBool::new(false),
+            occupants_wanted: AtomicBool::new(false),
             open_viewports: Mutex::new(Vec::new()),
             main_window_rect: Mutex::new(None),
             renderer: OnceLock::new(),
@@ -326,6 +330,7 @@ fn spawn_sampler(ctx: egui::Context, shared: Arc<SharedUi>) {
                     let mut wants = Wants::all();
                     wants.system = true;
                     wants.connections = shared.connections_wanted.load(Ordering::Relaxed);
+                    wants.cpu_occupants = shared.occupants_wanted.load(Ordering::Relaxed);
                     let snapshot = Arc::new(sampler.sample(wants));
 
                     // Histories and `latest` are published under ONE
@@ -364,6 +369,8 @@ pub struct SysMonApp {
     pub page: Page,
     pub table_state: ProcessTableState,
     details_open: Vec<i32>,
+    /// Each details window's own thread reading.
+    details_threads: HashMap<i32, super::threads_view::ThreadsState>,
     /// The one combined-details window (multi-select → Details);
     /// opening a new selection replaces it.
     combined_details_open: Option<Vec<i32>>,
@@ -532,6 +539,7 @@ impl SysMonApp {
             page: Page::from_id(&settings.start_page).unwrap_or(Page::Overview),
             table_state,
             details_open: Vec::new(),
+            details_threads: HashMap::new(),
             combined_details_open: None,
             pending_confirm: None,
             toast_tx,
@@ -1743,6 +1751,42 @@ impl SysMonApp {
                         "pages: overview processes",
                     )),
                 },
+                // Open a process in the Inspector (Processes page) or its
+                // own details window: the agent's way to the same
+                // Threads & CPUs view a click opens.
+                "inspect" | "details" => {
+                    let wanted = value_or(&value);
+                    let live = wanted.parse::<i32>().ok().and_then(|pid| {
+                        let snapshot = self.shared.latest.read().unwrap();
+                        snapshot
+                            .processes
+                            .as_ref()
+                            .and_then(|records| records.iter().find(|r| r.pid == pid))
+                            .map(|record| (pid, record.name.clone()))
+                    });
+                    match live {
+                        Some((pid, name)) if verb == "inspect" => {
+                            self.page = Page::Processes;
+                            self.settings.show_inspector = true;
+                            self.settings.save();
+                            self.table_state.selected_pids = vec![pid];
+                            self.table_state.reveal_pid = Some(pid);
+                            self.table_state.inspector.inspect(pid);
+                            self.clear_filter_hiding(pid);
+                            Ok(serde_json::json!({"inspecting": pid, "name": name}))
+                        }
+                        Some((pid, name)) => {
+                            if !self.details_open.contains(&pid) {
+                                self.details_open.push(pid);
+                            }
+                            Ok(serde_json::json!({"details": pid, "name": name}))
+                        }
+                        None => Err(VerbError::bad_args(
+                            format!("no process `{wanted}` in the latest sample"),
+                            "give a live pid: `sysmon probe processes` lists them (or `pgrep <name>`)",
+                        )),
+                    }
+                }
                 "cpugraph" => match CpuGraphMode::from_id(&value_or(&value)) {
                     Some(mode) => {
                         self.settings.cpu_graph_mode = mode.id().to_string();
@@ -2097,12 +2141,15 @@ impl eframe::App for SysMonApp {
         let units = self.settings.display().units;
         let mut closed: Vec<i32> = Vec::new();
         for pid in self.details_open.clone() {
+            let palette = self.palette();
             let keep = details::details_window(
                 ctx,
-                self.palette(),
+                palette,
+                &self.settings.graph_palette,
                 units,
                 &snapshot,
                 pid,
+                self.details_threads.entry(pid).or_default(),
                 &mut frame_actions,
             );
             if !keep {
@@ -2110,6 +2157,8 @@ impl eframe::App for SysMonApp {
             }
         }
         self.details_open.retain(|pid| !closed.contains(pid));
+        let open = &self.details_open;
+        self.details_threads.retain(|pid, _| open.contains(pid));
         // The socket table is only paid for while something shows it:
         // a details window, or the Inspector on the Processes page.
         let inspecting = self.page == Page::Processes
@@ -2118,6 +2167,9 @@ impl eframe::App for SysMonApp {
         self.shared
             .connections_wanted
             .store(!self.details_open.is_empty() || inspecting, Ordering::Relaxed);
+        let cpu_popped = self.settings.popped_out_sections.iter().any(|s| s == "cpu");
+        let cpu_card_shown = self.settings.section_visible("cpu") && (cpu_popped || self.page == Page::Overview);
+        self.shared.occupants_wanted.store(cpu_card_shown, Ordering::Relaxed);
 
         // The combined-details window (multi-select → Details).
         if let Some(pids) = self.combined_details_open.clone() {
