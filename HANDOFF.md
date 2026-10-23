@@ -107,7 +107,11 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 - **3.8 Threads & CPUs** (`collect/threads.rs`, `gui/threads_view.rs`):
   `ThreadSampler` reads one pid's `/proc/<pid>/task/*/stat` (each view
-  owns one: Inspector, each details window, `probe threads`);
+  owns one: Inspector, each details window, each Threads window,
+  `probe threads`). The Threads window (`details::threads_window`,
+  `AppAction::OpenThreads`, `ctl threads <pid>`) is what the shared
+  `process_context_menu` opens, so every process row gets it — new
+  process rows should call that menu, not grow their own;
   `OccupancySampler` walks every task for `cpu.per_core_top` only when
   `Wants::cpu_occupants` (window: while a CPU card shows). Attribution
   is last-CPU (stat field 39), disclosed as `cpu_attribution`; threads

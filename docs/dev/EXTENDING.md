@@ -180,6 +180,6 @@ and wgpu move in **lockstep**. The compatible set is pinned in
   (outer rect, button state, main rect) — the drag-dock triad.
 - `SYSMON_DEBUG_FIT=1` — per-frame pop-out fit (current vs desired
   size, request, settled, user-sized).
-- `sysmon ctl inspect <pid>` / `ctl details <pid>` open the views a
+- `sysmon ctl inspect <pid>` / `ctl details <pid>` / `ctl threads <pid>` open the views a
   click opens; `sysmon probe threads --pid <pid>` reads the same data.
 - `RUST_BACKTRACE=1` — as usual; the GUI logs panics to stderr.

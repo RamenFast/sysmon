@@ -200,9 +200,15 @@ Click any process (here, or in a card's top-3 on the Overview) and the
 chain, each step clickable), live CPU and memory, its memory told
 honestly (resident vs fair share vs what quitting it would actually
 free), open files, OOM score, cgroup, working directory, children to
-drill into, and its sockets. The strip above the table links each
-figure back to its Overview card. A right-click menu always acts on the
-process you right-clicked, even if the list re-sorts while it's open.
+drill into, its sockets, and its **Threads & CPUs**: which logical
+CPUs its time is landing on, thread by thread ("8 of 8 threads busy ·
+2.40 of 32 CPUs"), a strip of every CPU in the CPU card's own colours,
+hover-linked to the thread list. The strip above the table links each
+figure back to its Overview card. Right-click any process, anywhere,
+for the same menu (Inspect, Details, **Threads & CPUs…** in a small
+window of its own, priority, end); it always acts on the process you
+right-clicked, even if the list re-sorts while it's open. Point at a
+bar in the CPU card's per-CPU view and it names who is on that CPU.
 
 Ctrl+click selects up to five processes for a **combined details**
 view — summed usage with color-coded share bars.
@@ -273,10 +279,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.7.0_amd64.deb
+sudo apt install ./sysmon_3.8.0_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.7.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.8.0-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -286,7 +292,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.7.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.8.0 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, the NVIDIA card the proprietary driver's libnvidia-ml, and

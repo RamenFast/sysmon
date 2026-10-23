@@ -274,6 +274,68 @@ pub fn details_window(
     keep_open
 }
 
+/// Threads & CPUs alone, in its own small window: the right-click way
+/// to "which CPUs is this on" from any process row (Ben, 3.8: "want it
+/// in simple right click on process from anywhere in the ui").
+pub fn threads_window(
+    ctx: &egui::Context,
+    palette: &'static Palette,
+    graph_palette_id: &str,
+    snapshot: &SystemSnapshot,
+    pid: i32,
+    threads: &mut ThreadsState,
+) -> bool {
+    let viewport_id = ViewportId::from_hash_of(("threads", pid));
+    let record = snapshot
+        .processes
+        .as_ref()
+        .and_then(|records| records.iter().find(|r| r.pid == pid))
+        .cloned();
+    let title = match &record {
+        Some(record) => format!("Threads · {} ({pid}) — SysMon", record.name),
+        None => format!("Threads · PID {pid} — SysMon"),
+    };
+    let mut keep_open = true;
+    let builder = ViewportBuilder::default()
+        .with_title(title)
+        .with_app_id(super::APP_ID)
+        .with_inner_size([420.0, 340.0])
+        .with_min_inner_size([300.0, 200.0]);
+    ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(palette.plane).inner_margin(egui::Margin::same(10)))
+            .show(ctx, |ui| {
+                let Some(record) = &record else {
+                    ui.label(RichText::new("This process has exited.").color(palette.muted).italics());
+                    return;
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icons::display_name(record)).color(palette.title).strong().size(14.0));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(super::inspector::cpu_with_count(record.cpu_percent))
+                                .monospace()
+                                .size(11.5)
+                                .color(palette.ink_2),
+                        );
+                    });
+                });
+                ui.label(RichText::new(format!("PID {pid} · {} threads", record.threads)).color(palette.muted).size(10.5));
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    threads.refresh(ctx, pid, snapshot.ts);
+                    threads_view(ui, palette, graph_palette_id, snapshot, threads);
+                });
+            });
+        if ctx.input(|input| input.viewport().close_requested())
+            || ctx.input(|input| input.key_pressed(egui::Key::Escape))
+        {
+            keep_open = false;
+        }
+    });
+    keep_open
+}
+
 /// Sum an optional per-process metric: Some(total of what's known)
 /// when at least one process reports it, None when nobody does —
 /// degraded modes stay disclosed, never silently zero.

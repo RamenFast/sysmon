@@ -167,6 +167,8 @@ pub fn inspector(
                 if response.clicked() && !is_self {
                     actions.push(AppAction::Inspect(ancestor.pid));
                 }
+                // The same right-click as every process row.
+                process_context_menu(&response, actions, ancestor, selected, false);
             }
         });
         ui.add_space(4.0);
@@ -359,9 +361,11 @@ pub fn inspector(
                             palette.ink_2,
                         );
                     }
-                    if response.on_hover_text("inspect").clicked() {
+                    let response = response.on_hover_text("inspect");
+                    if response.clicked() {
                         actions.push(AppAction::Inspect(child.pid));
                     }
+                    process_context_menu(&response, actions, child, selected, false);
                 }
                 if children.len() > 12 {
                     ui.label(RichText::new(format!("… and {} more", children.len() - 12)).color(palette.muted).size(10.5));

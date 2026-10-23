@@ -144,6 +144,7 @@ CTL VERBS
     palette <p> popout <section> popin <section> shot [path]
     compact <on|off> units <decimal|binary> temperature <scale>
     cpugraph <total|threads|grid> inspect <pid> details <pid>
+    threads <pid>
 
 Everything exits 0 on success, 2 when a needed piece isn't running,
 3 on bad arguments, 4 on runtime failure. Piped output is always

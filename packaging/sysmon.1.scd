@@ -76,8 +76,10 @@ networking first — without scraping a UI.
 	celsius|fahrenheit|both; *cpugraph* total|threads|grid (the
 	Overview's CPU card: one trace, a coloured line per thread, or a
 	small graph per thread); *inspect* _pid_ (the Processes page with
-	the Inspector on it) and *details* _pid_ (its own window), both
-	showing its Threads & CPUs. A GUI's *status* names the
+	the Inspector on it), *details* _pid_ (its own window), both
+	showing its Threads & CPUs, and *threads* _pid_ (only its
+	Threads & CPUs, in a small window; right-click any process for
+	the same). A GUI's *status* names the
 	adapter the window renders on (_renderer_); a CPU-rasterizer
 	fallback — no usable Vulkan driver — adds _renderer_hint_ with
 	the fix, and the window says so at startup too. Degraded modes

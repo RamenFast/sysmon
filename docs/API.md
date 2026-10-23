@@ -89,6 +89,7 @@ sysmon ctl page processes    # switch pages: overview | processes
 sysmon ctl cpugraph threads  # the Overview's CPU card: total | threads | grid
 sysmon ctl inspect 4872      # Processes page, Inspector on pid 4872 (Threads & CPUs included)
 sysmon ctl details 4872      # pid 4872's own details window
+sysmon ctl threads 4872      # only its Threads & CPUs, in a small window
 sysmon ctl theme blossom_dark
 sysmon ctl popout gpu        # pop the GPU card into its own window
 sysmon ctl shot /tmp/s.png   # PNG of the window, path in the reply

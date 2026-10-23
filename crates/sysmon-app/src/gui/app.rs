@@ -371,6 +371,10 @@ pub struct SysMonApp {
     details_open: Vec<i32>,
     /// Each details window's own thread reading.
     details_threads: HashMap<i32, super::threads_view::ThreadsState>,
+    /// Open Threads & CPUs windows (right-click → Threads & CPUs…),
+    /// each with its own sampler.
+    threads_open: Vec<i32>,
+    threads_windows: HashMap<i32, super::threads_view::ThreadsState>,
     /// The one combined-details window (multi-select → Details);
     /// opening a new selection replaces it.
     combined_details_open: Option<Vec<i32>>,
@@ -540,6 +544,8 @@ impl SysMonApp {
             table_state,
             details_open: Vec::new(),
             details_threads: HashMap::new(),
+            threads_open: Vec::new(),
+            threads_windows: HashMap::new(),
             combined_details_open: None,
             pending_confirm: None,
             toast_tx,
@@ -1273,6 +1279,11 @@ impl SysMonApp {
                         self.details_open.push(pid);
                     }
                 }
+                AppAction::OpenThreads(pid) => {
+                    if !self.threads_open.contains(&pid) {
+                        self.threads_open.push(pid);
+                    }
+                }
                 AppAction::OpenCombinedDetails(mut pids) => {
                     pids.dedup();
                     pids.truncate(cards::MAX_SELECTED);
@@ -1754,7 +1765,7 @@ impl SysMonApp {
                 // Open a process in the Inspector (Processes page) or its
                 // own details window: the agent's way to the same
                 // Threads & CPUs view a click opens.
-                "inspect" | "details" => {
+                "inspect" | "details" | "threads" => {
                     let wanted = value_or(&value);
                     let live = wanted.parse::<i32>().ok().and_then(|pid| {
                         let snapshot = self.shared.latest.read().unwrap();
@@ -1774,6 +1785,12 @@ impl SysMonApp {
                             self.table_state.inspector.inspect(pid);
                             self.clear_filter_hiding(pid);
                             Ok(serde_json::json!({"inspecting": pid, "name": name}))
+                        }
+                        Some((pid, name)) if verb == "threads" => {
+                            if !self.threads_open.contains(&pid) {
+                                self.threads_open.push(pid);
+                            }
+                            Ok(serde_json::json!({"threads": pid, "name": name}))
                         }
                         Some((pid, name)) => {
                             if !self.details_open.contains(&pid) {
@@ -2159,6 +2176,23 @@ impl eframe::App for SysMonApp {
         self.details_open.retain(|pid| !closed.contains(pid));
         let open = &self.details_open;
         self.details_threads.retain(|pid, _| open.contains(pid));
+        let mut closed: Vec<i32> = Vec::new();
+        for pid in self.threads_open.clone() {
+            let keep = details::threads_window(
+                ctx,
+                self.palette(),
+                &self.settings.graph_palette,
+                &snapshot,
+                pid,
+                self.threads_windows.entry(pid).or_default(),
+            );
+            if !keep {
+                closed.push(pid);
+            }
+        }
+        self.threads_open.retain(|pid| !closed.contains(pid));
+        let open = &self.threads_open;
+        self.threads_windows.retain(|pid, _| open.contains(pid));
         // The socket table is only paid for while something shows it:
         // a details window, or the Inspector on the Processes page.
         let inspecting = self.page == Page::Processes
@@ -2199,6 +2233,9 @@ impl eframe::App for SysMonApp {
             }
             for pid in &self.details_open {
                 open.push(ViewportId::from_hash_of(("details", *pid)));
+            }
+            for pid in &self.threads_open {
+                open.push(ViewportId::from_hash_of(("threads", *pid)));
             }
             if let Some(pids) = &self.combined_details_open {
                 let mut sorted = pids.clone();

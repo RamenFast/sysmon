@@ -325,7 +325,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             "verbs: status quit pause resume interval <s> raise page <overview|processes> \
              theme <id> palette <id> popout <section> popin <section> shot [path] \
              compact <on|off> units <decimal|binary> temperature <celsius|fahrenheit|both> \
-             cpugraph <total|threads|grid> inspect <pid> details <pid>",
+             cpugraph <total|threads|grid> inspect <pid> details <pid> threads <pid>",
             EXIT_BAD_ARGS,
             force_json,
         );
@@ -345,7 +345,7 @@ pub fn run_ctl(arguments: &[String]) -> i32 {
             request["seconds"] = json!(seconds);
         }
         "page" | "theme" | "palette" | "popout" | "popin" | "compact" | "units" | "temperature"
-        | "cpugraph" | "inspect" | "details" => {
+        | "cpugraph" | "inspect" | "details" | "threads" => {
             let Some(value) = positional.get(1) else {
                 return envelope::fail_forced(
                     format!("`{verb}` needs a value"),
@@ -1173,6 +1173,8 @@ fn build_schema() -> Value {
                                       "note": "3.8: the Processes page with the Inspector on that pid (its Threads & CPUs included); exits 3 when the pid isn't in the latest sample"},
                         "details":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
                                       "note": "3.8: that pid's own details window (identity, Threads & CPUs, connections)"},
+                        "threads":  {"value": {"type": "integer", "description": "a live pid"}, "needs_gui": true,
+                                      "note": "3.8: a small window with only that pid's Threads & CPUs (what right-click → Threads & CPUs… opens)"},
                         "theme":    {"value": {"enum": theme_enum}, "needs_gui": true},
                         "palette":  {"value": {"enum": palette_enum}, "needs_gui": true},
                         "popout":   {"value": {"enum": popout_enum}, "needs_gui": true},
@@ -1240,7 +1242,7 @@ fn build_schema() -> Value {
                 "protocol": "one JSON object per line in; one envelope line out; `subscribe` upgrades to a raw NDJSON snapshot stream",
                 "verbs": ["status", "snapshot", "subscribe", "pause", "resume", "interval",
                            "quit", "raise", "page", "theme", "palette", "popout", "popin",
-                           "shot", "compact", "units", "temperature", "cpugraph", "inspect", "details"],
+                           "shot", "compact", "units", "temperature", "cpugraph", "inspect", "details", "threads"],
                 "single_owner": "GUI or serve — whoever binds first; `sysmon serve` exits 2 if occupied",
             },
         },

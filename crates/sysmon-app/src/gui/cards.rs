@@ -62,6 +62,9 @@ pub struct CardContext<'a> {
 pub enum AppAction {
     TogglePopOut(&'static str),
     OpenDetails(i32),
+    /// A small window with only that pid's Threads & CPUs (3.8: the
+    /// right-click way to it from any process row).
+    OpenThreads(i32),
     /// Combined details for a multi-selection (≤ MAX_SELECTED pids).
     OpenCombinedDetails(Vec<i32>),
     /// Jump to the Processes page with this pid selected + scrolled to.
@@ -616,6 +619,10 @@ pub fn process_context_menu(
         }
         if ui.button("Details window…").clicked() {
             actions.push(AppAction::OpenDetails(pid));
+            ui.close();
+        }
+        if ui.button("Threads & CPUs…").clicked() {
+            actions.push(AppAction::OpenThreads(pid));
             ui.close();
         }
         if !in_process_table && ui.button("Open in process viewer").clicked() {
