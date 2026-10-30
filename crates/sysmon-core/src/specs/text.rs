@@ -223,8 +223,9 @@ fn memory_rows(sheet: &mut Sheet, specs: &SystemSpecs) {
     }
     for (module, count) in &groups {
         // Sticks are sold in binary sizes under decimal names: a
-        // "32 GB" DIMM is 32 GiB. Print what the box says.
-        let mut kind = format!("{count} × {} GB {}", module.size_bytes >> 30, module.kind);
+        // "32 GB" DIMM is 32 GiB, so the line says GiB (the box's "GB"
+        // beside this sheet's decimal GB would be two units, one name).
+        let mut kind = format!("{count} × {} GiB {}", module.size_bytes >> 30, module.kind);
         if let Some(speed) = module.configured_speed_mts {
             kind += &format!("-{speed}");
         }
@@ -629,7 +630,7 @@ mod tests {
             "          L2 8 MiB · L3 64 MiB",
             "          AVX2 · FMA3 · AES-NI · SHA · AMD-V",
             "          amd-pstate-epp · performance governor",
-            "Memory    4 × 32 GB DDR4-3200 · Corsair CMK128GX4M4E3200C16 · dual-rank",
+            "Memory    4 × 32 GiB DDR4-3200 · Corsair CMK128GX4M4E3200C16 · dual-rank",
             "          installed 137.4 GB (128.0 GiB) · 4 of 4 slots used",
             "          usable 135.0 GB (125.7 GiB) · no swap",
             "GPU       AMD Radeon AI PRO R9700 · 34.2 GB (31.9 GiB) VRAM",
@@ -675,7 +676,7 @@ mod tests {
         assert!(gpu.starts_with("GPU       AMD Radeon AI PRO R9700"), "{gpu}");
         assert!(gpu.contains("Display   HP X32") && !gpu.contains("Storage"), "{gpu}");
         let memory = section_text("memory", &specs);
-        assert!(memory.starts_with("Memory    4 × 32 GB DDR4-3200"), "{memory}");
+        assert!(memory.starts_with("Memory    4 × 32 GiB DDR4-3200"), "{memory}");
         assert_eq!(section_text("nonsuch", &specs), specs_text(&specs));
         for section in SPEC_SECTIONS {
             assert!(specs_text(&specs).contains(section_text(section, &specs).trim_end()), "{section}");
@@ -692,8 +693,8 @@ mod tests {
         memory.modules[3].size_bytes = 16 << 30;
         memory.modules[3].configured_speed_mts = Some(2133);
         let text = section_text("memory", &specs);
-        assert!(text.contains("3 × 32 GB DDR4-2133 · Corsair CMK128GX4M4E3200C16 · dual-rank · rated 3200 MT/s"), "{text}");
-        assert!(text.contains("1 × 16 GB DDR4-2133"), "{text}");
+        assert!(text.contains("3 × 32 GiB DDR4-2133 · Corsair CMK128GX4M4E3200C16 · dual-rank · rated 3200 MT/s"), "{text}");
+        assert!(text.contains("1 × 16 GiB DDR4-2133"), "{text}");
     }
 
     /// Unknown is absent, never zero; a missing section says so.

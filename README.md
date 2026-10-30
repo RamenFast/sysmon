@@ -109,7 +109,7 @@ Desktop   SwayFX 0.6-c4c8d51b (Sway 1.12.0) · Wayland
 CPU       AMD Ryzen 9 5950X 16-Core Processor
           16 cores / 32 threads · 3.40 GHz base · up to 5.09 GHz
           L2 8 MiB · L3 64 MiB
-Memory    4 × 32 GB DDR4-3200 · Corsair CMK128GX4M4E3200C16 · dual-rank
+Memory    4 × 32 GiB DDR4-3200 · Corsair CMK128GX4M4E3200C16 · dual-rank
           installed 137.4 GB (128.0 GiB) · 4 of 4 slots used
 GPU       AMD Radeon AI PRO R9700 · 34.2 GB (31.9 GiB) VRAM
           RDNA 4 (gfx1201) · 64 CUs · PCIe 4.0 x16 (card supports 5.0) · 300 W cap (max 330 W)

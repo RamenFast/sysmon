@@ -994,16 +994,21 @@ fn memory_card(ui: &mut Ui, cx: &mut CardContext) {
     });
 }
 
-/// "4 × 32 GiB DDR4 · 2133 MT/s" — the sticks, as the box says.
+/// "4 × 34.4 GB DDR4 · 3200 MT/s" / "4 × 32 GiB DDR4 · 3200 MT/s": the
+/// sticks, in the same unit as every other size on the card.
 fn memory_subtitle(memory: &sysmon_core::snapshot::MemorySnapshot, units_: units::Units) -> String {
     let Some(first) = memory.modules.first() else {
         return String::new();
     };
     let same_size = memory.modules.iter().all(|m| m.size_bytes == first.size_bytes);
     let sticks = if same_size {
-        // Module sizes are powers of two; their marketing unit is GiB
-        // whatever the display units ("32 GB" sticks are 32 GiB).
-        format!("{} × {} GB", memory.modules.len(), first.size_bytes >> 30)
+        // Module sizes are powers of two: a stick sold as "32 GB" is
+        // 32 GiB = 34.4 GB. Printing "32 GB" in decimal mode put a binary
+        // GB beside the decimal 135.0 GB total, two units under one name.
+        match units_ {
+            units::Units::Binary => format!("{} × {} GiB", memory.modules.len(), first.size_bytes >> 30),
+            units::Units::Decimal => format!("{} × {}", memory.modules.len(), format_size(first.size_bytes, units_)),
+        }
     } else {
         format!("{} sticks · {}", memory.modules.len(), format_size(memory.installed_bytes.unwrap_or(0), units_))
     };
@@ -1016,10 +1021,12 @@ fn memory_subtitle(memory: &sysmon_core::snapshot::MemorySnapshot, units_: units
 /// The hover note that untangles the three "total"s and the speed.
 fn installed_note(memory: &sysmon_core::snapshot::MemorySnapshot, installed: u64, units_: units::Units) -> String {
     let mut note = format!(
-        "{} of sticks ({} as sold — memory is sold in binary units: \"128 GB\" is 128 GiB). \
+        "{} of sticks. The box, the BIOS and MemTest86 call it \"{} GB\": memory has always been \
+         sold and tested in binary units, so that GB is a GiB ({}). \
          Usable {} after firmware and kernel reservations.",
         format_size(installed, units_),
-        format_size(installed, units::Units::Binary).replace("GiB", "GB"),
+        installed >> 30,
+        format_size(installed, units::Units::Binary),
         format_size(memory.total_bytes, units_),
     );
     if let Some(module) = memory.modules.first()
@@ -1502,4 +1509,34 @@ fn thermal_graph(ui: &mut Ui, cx: &mut CardContext) {
             fill_all: false,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sysmon_core::snapshot::{MemoryModule, MemorySnapshot};
+
+    fn kit() -> MemorySnapshot {
+        let stick = MemoryModule {
+            size_bytes: 32 << 30,
+            kind: "DDR4".into(),
+            configured_speed_mts: Some(3200),
+            ..Default::default()
+        };
+        MemorySnapshot { total_bytes: 131_813_212 * 1024, installed_bytes: Some(128 << 30), modules: vec![stick; 4], ..Default::default() }
+    }
+
+    /// The sticks speak the card's unit: a binary "32 GB" beside a
+    /// decimal "135.0 GB" total was two units under one name.
+    #[test]
+    fn sticks_use_the_cards_unit() {
+        let memory = kit();
+        assert_eq!(memory_subtitle(&memory, units::Units::Decimal), "4 × 34.4 GB DDR4 · 3200 MT/s");
+        assert_eq!(memory_subtitle(&memory, units::Units::Binary), "4 × 32 GiB DDR4 · 3200 MT/s");
+        // 4 × 34.4 = 137.4 GB installed, the same unit as the headline
+        assert_eq!(format_size(memory.installed_bytes.unwrap(), units::Units::Decimal), "137.4 GB");
+        let note = installed_note(&memory, 128 << 30, units::Units::Decimal);
+        assert!(note.starts_with("137.4 GB of sticks. The box, the BIOS and MemTest86 call it \"128 GB\""), "{note}");
+        assert!(note.contains("(128.0 GiB)") && note.contains("Usable 135.0 GB"), "{note}");
+    }
 }
