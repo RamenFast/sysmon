@@ -67,7 +67,7 @@ here match ids there.
 
 ## Results, this machine (2026-10-01, 3.1, kernel 7.0.0-28)
 
-Ryzen 9 5950X · Radeon AI PRO R9700 (Navi 48) · 4 × 32 GB DDR4 ·
+Ryzen 9 5950X · Radeon AI PRO R9700 (Navi 48) · 4 × 32 GiB DDR4 ·
 ASRock X570 Phantom Gaming 4 (nct6798) · Mint 22.3.
 
 `scripts/accuracy-audit.sh`: **66 pass, 0 fail** (idle, `stress-ng`
