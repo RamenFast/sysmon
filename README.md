@@ -31,7 +31,7 @@ new engine.
 | idle CPU (same display, 60 s, software rendering) | 13.0% of a core | **6.0%** — and `serve` idles at **0.00% / 5.6 MB** |
 | accuracy | trusted psutil | a 66-check live audit against free/turbostat/mpstat/sensors/iostat/pidstat/df/DMI, plus cross-checks in `cargo test` |
 | theming | adopts the GTK theme | eleven built-in palettes (including a greyscale a11y floor) + a System mode that maps your GTK theme to the nearest family, and honors high-contrast and reduced-motion |
-| process icons | icon theme lookup, gaps common | desktop-entry index over the real icon-theme inherit chain, letter-tile fallback |
+| process icons | icon theme lookup, gaps common | a process-icons folder by the process's own name first (scripts too), then the desktop-entry index over the real icon-theme inherit chain, letter-tile fallback |
 
 **Not carried over / changed, said out loud:**
 - v1 literally *wore* your GTK theme; v3 draws its own chrome. System
@@ -195,6 +195,15 @@ window runs narrow, filterable (Ctrl+F), with end/kill/renice
 (pkexec ladder for the privileged cases). **Group by app** folds a
 browser's forty renderers into one row.
 
+Each row's icon comes from the app's desktop entry and your icon
+theme. A script has neither (its exe is just `python3.12`), so
+SysMon first looks for an icon named after the process itself in
+`~/.local/share/sysmon/process-icons/` (`$XDG_DATA_HOME/sysmon/process-icons/`):
+`portal-server.svg` (or `.png`) dresses the `portal-server.py` row,
+`foxloader.svg` dresses `foxloader-2.0-alpha39-server.jar` (a
+`-<version>` tail is dropped). The name is the one the row shows,
+lowercase. A new icon shows on the next launch.
+
 Double-click any process (or select it and press **Inspect…**, or
 right-click → Inspect…, or click a card's top-3 row on the Overview)
 and its **Inspector** opens in a window of its own, one per process:
@@ -282,10 +291,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.9.0_amd64.deb
+sudo apt install ./sysmon_3.9.1_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.9.0-1.x86_64.rpm
+sudo dnf install ./sysmon-3.9.1-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -295,7 +304,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.9.0 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.9.1 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, the NVIDIA card the proprietary driver's libnvidia-ml, and

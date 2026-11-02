@@ -105,6 +105,22 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.9.1 process icons by name** (`apps.rs::icon_for_named_process`,
+  `process_icon_names`): an icon in `$XDG_DATA_HOME/sysmon/process-icons/`
+  (default `~/.local/share/sysmon/process-icons/`) named after the
+  process wins before the desktop entries and the theme. Stems are
+  tried most specific first: the display name, minus a script
+  extension, minus a `-<version>` tail, then exe and comm. Ben asked
+  for icons for Nexus's processes: "Don't want just the plain/stock
+  sysmon ones". A script's exe and comm name only its interpreter, and the
+  IconCache was keyed by exe, so the first python3.12 seen decided
+  every script's icon. It is keyed by display name + exe now
+  (`icons.rs::cache_key`). Nexus's set lives in `~/Dev/nexus/process-icons`
+  (`install.sh` links it into the folder). Edge: the folder is read
+  per lookup and cached per program, so a new icon shows on the next
+  launch. Edge, not fixed: a theme's icons are read from the first
+  icon root that holds its `index.theme`, so `~/.local/share/icons/hicolor`
+  (no index.theme there) is never searched.
 - **3.9 one Inspector** (`gui/inspector.rs::inspector_window`): the
   docked Inspector pane and the per-process Details window were one
   view told twice. Ben: "merge the "details" and "inspect" into one

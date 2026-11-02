@@ -12,6 +12,14 @@
 //!      Blossom → Papirus-Dark → Mint-Y → Adwaita → gnome →
 //!      hicolor), picking the best-sized png/svg/xpm.
 //!
+//! Before either, a process-icons folder
+//! (`$XDG_DATA_HOME/sysmon/process-icons`, else
+//! `~/.local/share/sysmon/process-icons`) can name a process's icon
+//! by the process's own name: `nexus-instinct-server.svg` for the
+//! `nexus-instinct-server.py` a python3.12 runs. Scripts have no
+//! desktop entry, and their exe and comm name only the interpreter,
+//! so without the folder every script wears the same icon.
+//!
 //! Everything returns *paths*; rasterizing is the GUI's business.
 
 use std::collections::{HashMap, HashSet};
@@ -80,7 +88,17 @@ pub struct AppIndex {
     fallback_directories: Vec<PathBuf>,
     /// icon name → resolved path (misses cached as None).
     resolution_cache: std::sync::Mutex<HashMap<(String, u32), Option<PathBuf>>>,
+    /// Folders of icons named after the process itself, checked
+    /// before the desktop entries and the theme.
+    process_icon_dirs: Vec<PathBuf>,
 }
+
+/// Script extensions dropped from a display name when a
+/// process-icons folder is searched (`portal-server.py` →
+/// `portal-server`).
+const SCRIPT_EXTENSIONS: [&str; 10] = [
+    "py", "sh", "bash", "jar", "js", "mjs", "cjs", "ts", "pl", "rb",
+];
 
 impl AppIndex {
     /// Build from the real system: XDG dirs + the configured
@@ -90,6 +108,14 @@ impl AppIndex {
         let icon_roots = default_icon_roots();
         let theme = configured_icon_theme().unwrap_or_else(|| "hicolor".to_string());
         Self::load_with(&application_dirs, &icon_roots, &theme)
+            .with_process_icon_dirs(default_process_icon_dirs())
+    }
+
+    /// Folders searched first, by the process's own name (see
+    /// `icon_for_named_process`). `load_with` starts with none.
+    pub fn with_process_icon_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.process_icon_dirs = dirs;
+        self
     }
 
     pub fn load_with(
@@ -143,7 +169,35 @@ impl AppIndex {
             theme_directories,
             fallback_directories: vec![PathBuf::from("/usr/share/pixmaps")],
             resolution_cache: std::sync::Mutex::new(HashMap::new()),
+            process_icon_dirs: Vec::new(),
         }
+    }
+
+    /// Best icon file for a process as a person names it: a file in a
+    /// process-icons folder named after the process wins (stems from
+    /// `process_icon_names`, `.svg` then `.png`); otherwise the
+    /// desktop-entry and theme lookup of `icon_for_process`.
+    pub fn icon_for_named_process(
+        &self,
+        display_name: &str,
+        comm: &str,
+        exe_basename: Option<&str>,
+        command_line: &str,
+        size: u32,
+    ) -> Option<PathBuf> {
+        if !self.process_icon_dirs.is_empty() {
+            for name in process_icon_names(display_name, comm, exe_basename) {
+                for dir in &self.process_icon_dirs {
+                    for extension in ["svg", "png"] {
+                        let candidate = dir.join(format!("{name}.{extension}"));
+                        if candidate.is_file() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        self.icon_for_process(comm, exe_basename, command_line, size)
     }
 
     /// Best icon file for a process, or None (caller draws its
@@ -259,6 +313,77 @@ impl AppIndex {
         }
         None
     }
+}
+
+/// The file stems a process-icons folder is searched for, most
+/// specific first, lowercase, no repeats: the display name; it without
+/// a script extension; that without a `-<version>` tail; then the exe
+/// basename and comm. A name that could leave the folder (a `/`, a
+/// leading `.`) is skipped.
+///
+/// `foxloader-2.0-alpha39-server.jar` (exe `java`) →
+/// `foxloader-2.0-alpha39-server.jar`, `foxloader-2.0-alpha39-server`,
+/// `foxloader`, `java`.
+pub fn process_icon_names(
+    display_name: &str,
+    comm: &str,
+    exe_basename: Option<&str>,
+) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        let name = name.trim().to_lowercase();
+        if !name.is_empty()
+            && !name.contains('/')
+            && !name.starts_with('.')
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    };
+    let display = display_name.trim().to_lowercase();
+    push(&display);
+    let stem = match display.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && SCRIPT_EXTENSIONS.contains(&extension) => {
+            stem
+        }
+        _ => display.as_str(),
+    };
+    push(stem);
+    if let Some(unversioned) = without_version_tail(stem) {
+        push(unversioned);
+    }
+    if let Some(exe) = exe_basename {
+        push(exe);
+    }
+    push(comm);
+    names
+}
+
+/// `foxloader-2.0-alpha39-server` → `foxloader`: cut at the first `-`
+/// or `_` that a digit follows. None when there is no such tail.
+fn without_version_tail(name: &str) -> Option<&str> {
+    let bytes = name.as_bytes();
+    (1..bytes.len().saturating_sub(1))
+        .find(|&i| (bytes[i] == b'-' || bytes[i] == b'_') && bytes[i + 1].is_ascii_digit())
+        .map(|i| &name[..i])
+}
+
+/// `$XDG_DATA_HOME/sysmon/process-icons`, else
+/// `~/.local/share/sysmon/process-icons`.
+fn default_process_icon_dirs() -> Vec<PathBuf> {
+    let data_home = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".local/share"))
+        });
+    data_home
+        .map(|dir| vec![dir.join("sysmon").join("process-icons")])
+        .unwrap_or_default()
 }
 
 /// Parse one index.theme: (directories with metadata, inherits).
@@ -561,6 +686,95 @@ mod tests {
         assert_eq!(entry.icon, "test-icon");
         assert_eq!(entry.exec_basename.as_deref(), Some("testapp"));
         assert_eq!(entry.startup_wm_class.as_deref(), Some("TestApp"));
+    }
+
+    #[test]
+    fn process_icon_names_say_the_process_not_the_interpreter() {
+        assert_eq!(
+            process_icon_names("nexus-instinct-server.py", "python", Some("python3.12")),
+            vec!["nexus-instinct-server.py", "nexus-instinct-server", "python3.12", "python"]
+        );
+        assert_eq!(
+            process_icon_names("foxloader-2.0-alpha39-server.jar", "java", Some("java")),
+            vec![
+                "foxloader-2.0-alpha39-server.jar",
+                "foxloader-2.0-alpha39-server",
+                "foxloader",
+                "java"
+            ]
+        );
+        // A truncated comm's display name is the whole exe name.
+        assert_eq!(
+            process_icon_names("nexus-ear-server", "nexus-ear-serve", Some("nexus-ear-server")),
+            vec!["nexus-ear-server", "nexus-ear-serve"]
+        );
+        // Version-looking names that are not a tail stay whole.
+        assert_eq!(process_icon_names("python3.12", "python3", None), vec!["python3.12", "python3"]);
+        assert_eq!(process_icon_names("Screen-Sense", "python3", None), vec!["screen-sense", "python3"]);
+        // Nothing that could leave the folder.
+        assert_eq!(process_icon_names("kworker/0:1", "kworker/0:1", None), Vec::<String>::new());
+        assert_eq!(process_icon_names(".hidden", "..", None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_process_icon_folder_wins_by_the_process_name() {
+        let root =
+            std::env::temp_dir().join(format!("sysmon-process-icons-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let folder = root.join("process-icons");
+        let applications = root.join("applications");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&applications).unwrap();
+        // What the interpreter would wear without the folder.
+        let python_icon = root.join("python.svg");
+        fs::write(&python_icon, "<svg/>").unwrap();
+        fs::write(
+            applications.join("python3.12.desktop"),
+            format!(
+                "[Desktop Entry]\nExec=/usr/bin/python3.12\nIcon={}\n",
+                python_icon.display()
+            ),
+        )
+        .unwrap();
+        fs::write(folder.join("nexus-instinct-server.svg"), "<svg/>").unwrap();
+        fs::write(folder.join("foxloader.png"), "png").unwrap();
+
+        let bare = AppIndex::load_with(std::slice::from_ref(&applications), &[], "hicolor");
+        let index = AppIndex::load_with(&[applications], &[], "hicolor")
+            .with_process_icon_dirs(vec![folder.clone()]);
+        let cmdline = "/usr/bin/python3 /srv/nexus-instinct-server.py";
+
+        let instinct = |index: &AppIndex| {
+            index.icon_for_named_process(
+                "nexus-instinct-server.py",
+                "python",
+                Some("python3.12"),
+                cmdline,
+                32,
+            )
+        };
+        assert_eq!(
+            instinct(&bare),
+            Some(python_icon.clone()),
+            "without the folder the script wears its interpreter's icon"
+        );
+        assert_eq!(instinct(&index), Some(folder.join("nexus-instinct-server.svg")));
+        assert_eq!(
+            index.icon_for_named_process(
+                "foxloader-2.0-alpha39-server.jar",
+                "java",
+                Some("java"),
+                "java -jar x.jar",
+                32,
+            ),
+            Some(folder.join("foxloader.png"))
+        );
+        // No file of its own: the old lookup still answers.
+        assert_eq!(
+            index.icon_for_named_process("station-helper.py", "python3", Some("python3.12"), cmdline, 32),
+            Some(python_icon)
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

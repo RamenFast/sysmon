@@ -31,7 +31,10 @@ src/snapshot.rs        SystemSnapshot and every section struct — THE WIRE
                        temp, processes⇒gpu for the GPU% column,
                        network⇒per_process_net).
 src/units.rs           decimal/binary human formatting (v1 semantics)
-src/apps.rs            AppIndex: .desktop entries indexed by exe basename /
+src/apps.rs            AppIndex: a process-icons folder searched first by
+                       the process's own name (display name, minus script
+                       extension and -<version> tail; then exe, comm),
+                       then .desktop entries indexed by exe basename /
                        comm / StartupWMClass / desktop-id → Icon name, plus
                        a freedesktop icon-theme resolver that walks the real
                        Inherits chain. Returns paths; rasterizing is the
@@ -182,8 +185,8 @@ src/gui/details.rs     per-process viewport incl. live connections (every
 src/gui/specs.rs       the copy buttons: CopyJob (specs part + history
                        part) run off the UI thread by SpecsCopier
 src/gui/icons.rs       IconCache: AppIndex path → png (image crate) / svg
-                       (resvg) → egui texture; letter-tile fallback;
-                       kernel threads stay bare
+                       (resvg) → egui texture, cached per display name +
+                       exe; letter-tile fallback; kernel threads stay bare
 src/gui/actions.rs     end/kill/renice with the pkexec ladder + confirm
                        modal + toasts
 tests/ui_kittest.rs    the AccessKit interaction suite
