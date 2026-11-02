@@ -50,16 +50,13 @@ impl IconCache {
         if record.is_kernel_thread {
             return None;
         }
-        let key = record
-            .exe_basename
-            .clone()
-            .unwrap_or_else(|| record.name.clone())
-            .to_lowercase();
+        let key = cache_key(record);
         if let Some(cached) = self.by_process.get(&key) {
             return cached.clone();
         }
 
-        let path = self.app_index.icon_for_process(
+        let path = self.app_index.icon_for_named_process(
+            display_name(record),
             &record.name,
             record.exe_basename.as_deref(),
             &record.command_line,
@@ -118,6 +115,14 @@ pub fn display_name(record: &ProcessRecord) -> &str {
     } else {
         &record.display_name
     }
+}
+
+/// One resolution per program a person can tell apart: the display
+/// name with the exe. Keyed by exe alone, the first python3.12 seen
+/// decided the icon of every script that interpreter runs.
+fn cache_key(record: &ProcessRecord) -> String {
+    let exe = record.exe_basename.as_deref().unwrap_or(&record.name);
+    format!("{}\u{1f}{}", display_name(record), exe).to_lowercase()
 }
 
 fn rasterize(path: &Path) -> Option<ColorImage> {
@@ -224,3 +229,28 @@ const TILE_HUES: [Color32; 8] = [
     Color32::from_rgb(0xc9, 0x82, 0xb5), // orchid
     Color32::from_rgb(0x9a, 0x8f, 0x7d), // stone
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(name: &str, display: &str, exe: Option<&str>) -> ProcessRecord {
+        ProcessRecord {
+            name: name.to_string(),
+            display_name: display.to_string(),
+            exe_basename: exe.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scripts_of_one_interpreter_resolve_apart() {
+        let instinct = record("python", "nexus-instinct-server.py", Some("python3.12"));
+        let helper = record("python3", "station-helper.py", Some("python3.12"));
+        assert_ne!(cache_key(&instinct), cache_key(&helper));
+        // The same program twice shares one resolution.
+        assert_eq!(cache_key(&instinct), cache_key(&instinct.clone()));
+        // No display name: comm stands in, as in the row.
+        assert_eq!(cache_key(&record("sway", "", Some("sway"))), "sway\u{1f}sway");
+    }
+}
