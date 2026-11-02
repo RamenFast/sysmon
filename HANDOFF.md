@@ -105,9 +105,25 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.9 one Inspector** (`gui/inspector.rs::inspector_window`): the
+  docked Inspector pane and the per-process Details window were one
+  view told twice. Ben: "merge the "details" and "inspect" into one
+  thing" (the pane also only showed in a wide window). Now the
+  Inspector is a window per pid (`app.inspectors_open`, viewport
+  `("inspector", pid)`). `AppAction::Inspect` opens it or raises the
+  open one (`ViewportCommand::Focus`), so a crumb or child row never
+  duplicates a window. A table click only selects. Double-click, the
+  toolbar's Inspect… and right-click → Inspect… open it, and a
+  top-3 row opens it without leaving the Overview. `ctl details` is
+  an alias of `ctl inspect` (same window, its 3.8 reply shape plus
+  `"window": "inspector"`). The `show_inspector` setting is retired
+  (old files load; the key is ignored). Edge: Wayland can't place a
+  window, so a second Inspector opens over the first (Sway centres
+  floats). kittest embeds child viewports, so `ui_bridge` drives the
+  window's widgets but one Esc closes them all there.
 - **3.8 Threads & CPUs** (`collect/threads.rs`, `gui/threads_view.rs`):
   `ThreadSampler` reads one pid's `/proc/<pid>/task/*/stat` (each view
-  owns one: Inspector, each details window, each Threads window,
+  owns one: each Inspector, each Threads window,
   `probe threads`). The Threads window (`details::threads_window`,
   `AppAction::OpenThreads`, `ctl threads <pid>`) is what the shared
   `process_context_menu` opens, so every process row gets it — new

@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Inspector: deep detail for the selected process, docked beside
-//! the process table (Ben, 3.1: "allow for deeper inspection of
-//! processes, and nice UI/UX integration between overview and
-//! processes").
+//! The Inspector: deep detail for one process, in a window of its own
+//! (Ben, 3.1: "allow for deeper inspection of processes, and nice
+//! UI/UX integration between overview and processes"; 3.9: "merge the
+//! "details" and "inspect" into one thing … you would expect it to pop
+//! out into a new window"). It used to dock beside the process table,
+//! and only when the main window was wide, while a thinner Details
+//! window repeated half of it. Now there is one view, one window per
+//! process, opened from anywhere a process appears (double-click, the
+//! right-click menu's Inspect…, a top-3 row, `ctl inspect`).
 //!
 //! Top to bottom: the parent chain as clickable breadcrumbs
 //! (systemd › sway › ghostty › jcode), identity, live CPU and memory
 //! sparklines, the memory split (RSS · PSS · USS · swap — what it maps,
 //! what its fair share is, what quitting it would free), I/O, the
 //! open-file count, cgroup and working directory, its children, its
-//! sockets, and the actions. Everything heavier than the snapshot
-//! (smaps_rollup, fd count) is read for this one pid only, at most
-//! once a second.
+//! sockets with their live rates, and the actions. Everything heavier
+//! than the snapshot (smaps_rollup, fd count) is read for this one pid
+//! only, at most once a second.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Layout, RichText, ScrollArea, Sense, Ui, vec2};
+use egui::{Align, Layout, RichText, ScrollArea, Sense, Ui, ViewportBuilder, ViewportId, vec2};
 
 use sysmon_core::collect::detail::{ProcessDetail, read_process_detail};
 use sysmon_core::snapshot::{ProcessRecord, SystemSnapshot};
@@ -56,10 +61,6 @@ impl InspectorState {
                 ..Default::default()
             };
         }
-    }
-
-    pub fn clear(&mut self) {
-        *self = InspectorState::default();
     }
 
     /// Fold the new snapshot in (once per sample, not per frame) and
@@ -128,7 +129,6 @@ pub fn inspector(
     };
     let by_pid: HashMap<i32, usize> = records.iter().enumerate().map(|(i, r)| (r.pid, i)).collect();
     let Some(pid) = state.pid else {
-        empty_state(ui, palette);
         return;
     };
     let Some(record) = by_pid.get(&pid).map(|&i| &records[i]) else {
@@ -137,9 +137,7 @@ pub fn inspector(
             glyphs::show(ui, Glyph::Zombie, 14.0, palette.muted);
             ui.label(RichText::new(format!("PID {pid} has exited.")).color(palette.muted).italics());
         });
-        if ui.button("Clear").clicked() {
-            state.clear();
-        }
+        ui.label(RichText::new("Esc closes this window.").color(palette.muted).size(10.5));
         return;
     };
     state.update(snapshot, record);
@@ -373,20 +371,44 @@ pub fn inspector(
             });
         }
 
-        // ── sockets (the connection table is gathered while any detail
-        // view is open)
-        if let Some(connections) = &snapshot.connections {
-            let mine: Vec<_> = connections.iter().filter(|c| c.pid == pid).collect();
-            if !mine.is_empty() {
-                section(ui, palette, Glyph::Plug, &format!("Sockets ({})", mine.len()), |ui| {
-                    for connection in mine.iter().take(16) {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("{:<5} {}", connection.protocol, connection.state))
-                                    .color(palette.muted)
+        // ── sockets, with each one's live rate: "what is this app doing
+        // on the network" (the connection table is gathered while any
+        // Inspector is open, so the first frame can come before it)
+        let mine: Option<Vec<_>> = snapshot.connections.as_ref().map(|all| all.iter().filter(|c| c.pid == pid).collect());
+        let title = match &mine {
+            Some(mine) => format!("Sockets ({})", mine.len()),
+            None => "Sockets".to_string(),
+        };
+        section(ui, palette, Glyph::Plug, &title, |ui| match &mine {
+            None => {
+                ui.label(RichText::new("gathering sockets… (next refresh)").color(palette.muted).italics().size(10.5));
+            }
+            Some(mine) if mine.is_empty() => {
+                ui.label(RichText::new("no open sockets right now").color(palette.muted).italics().size(10.5));
+            }
+            Some(mine) => {
+                for connection in mine.iter().take(24) {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{:<5} {}", connection.protocol, connection.state))
+                                .color(palette.muted)
+                                .monospace()
+                                .size(10.0),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if let (Some(rx), Some(tx)) = (connection.rx_bps, connection.tx_bps)
+                                && rx + tx >= 1.0
+                            {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "↓{} ↑{}",
+                                        format_rate(rx, display.units),
+                                        format_rate(tx, display.units)
+                                    ))
                                     .monospace()
                                     .size(10.0),
-                            );
+                                );
+                            }
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(format!("{} → {}", connection.local_address, connection.remote_address))
@@ -396,16 +418,19 @@ pub fn inspector(
                                 .truncate(),
                             );
                         });
-                    }
-                });
+                    });
+                }
+                if mine.len() > 24 {
+                    ui.label(RichText::new(format!("… and {} more", mine.len() - 24)).color(palette.muted).size(10.5));
+                }
             }
-        }
+        });
 
         // ── actions
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Details window").clicked() {
-                actions.push(AppAction::OpenDetails(pid));
+            if ui.button("Show in table").on_hover_text("The Processes page, this row selected").clicked() {
+                actions.push(AppAction::RevealInProcesses(pid));
             }
             if ui.button("Copy PID").clicked() {
                 actions.push(AppAction::CopyPid(pid));
@@ -427,17 +452,58 @@ pub fn cpu_with_count(percent: f32) -> String {
     }
 }
 
-fn empty_state(ui: &mut Ui, palette: &Palette) {
-    ui.add_space(24.0);
-    ui.vertical_centered(|ui| {
-        glyphs::show(ui, Glyph::Sparkle, 18.0, palette.muted);
-        ui.label(RichText::new("Pick a process").color(palette.ink_2).size(13.0));
-        ui.label(
-            RichText::new("Click any row — here, or a top-3 row on the Overview — and its whole story opens here.")
-                .color(palette.muted)
-                .size(11.0),
-        );
+/// One process's Inspector in its own floating window (viewport keyed
+/// by pid, so asking for an open one again just raises it). Returns
+/// false once the window was closed (its close button or Esc).
+#[allow(clippy::too_many_arguments)]
+pub fn inspector_window(
+    ctx: &egui::Context,
+    palette: &'static Palette,
+    graph_palette_id: &str,
+    display: Display,
+    snapshot: &SystemSnapshot,
+    pid: i32,
+    state: &mut InspectorState,
+    icon_cache: &mut IconCache,
+    selected: &[i32],
+    actions: &mut Vec<AppAction>,
+) -> bool {
+    state.inspect(pid);
+    let name = snapshot
+        .processes
+        .as_ref()
+        .and_then(|records| records.iter().find(|r| r.pid == pid))
+        .map(|record| icons::display_name(record).to_string());
+    let title = match &name {
+        Some(name) => format!("{name} ({pid}) · Inspector — SysMon"),
+        None => format!("PID {pid} · Inspector — SysMon"),
+    };
+    let mut keep_open = true;
+    let builder = ViewportBuilder::default()
+        .with_title(title)
+        // SysMon's app id, so the desktop floats it like the main window.
+        .with_app_id(super::APP_ID)
+        .with_inner_size([460.0, 700.0])
+        .with_min_inner_size([360.0, 300.0]);
+    ctx.show_viewport_immediate(inspector_viewport_id(pid), builder, |ctx, _class| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(palette.plane).inner_margin(egui::Margin::same(10)))
+            .show(ctx, |ui| {
+                inspector(ui, palette, graph_palette_id, display, snapshot, state, icon_cache, selected, actions);
+            });
+        if ctx.input(|input| input.viewport().close_requested())
+            || ctx.input(|input| input.key_pressed(egui::Key::Escape))
+        {
+            keep_open = false;
+        }
     });
+    keep_open
+}
+
+/// The viewport an Inspector window lives in (the sampler pokes it,
+/// and asking for its pid again focuses it).
+pub fn inspector_viewport_id(pid: i32) -> ViewportId {
+    ViewportId::from_hash_of(("inspector", pid))
 }
 
 fn section(ui: &mut Ui, palette: &Palette, glyph: Glyph, title: &str, body: impl FnOnce(&mut Ui)) {

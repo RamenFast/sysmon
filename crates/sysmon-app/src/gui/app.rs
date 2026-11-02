@@ -23,6 +23,7 @@ use super::cards::{self, AppAction, CardContext};
 use super::details;
 use super::graphs::History;
 use super::icons::IconCache;
+use super::inspector::{self, InspectorState};
 use super::overview::{self, CpuGraphMode};
 use super::processes::{ProcessTableState, SortColumn, matches_filter, processes_page};
 use super::settings::{CAP_CHOICES_MB, HOT_CHOICES_HOURS, KEEP_CHOICES_DAYS, SECTION_KEYS, Settings};
@@ -368,9 +369,10 @@ pub struct SysMonApp {
     icon_cache: IconCache,
     pub page: Page,
     pub table_state: ProcessTableState,
-    details_open: Vec<i32>,
-    /// Each details window's own thread reading.
-    details_threads: HashMap<i32, super::threads_view::ThreadsState>,
+    /// Open Inspector windows, in opening order (one per pid; asking
+    /// for an open one raises it), each with its own state.
+    inspectors_open: Vec<i32>,
+    inspectors: HashMap<i32, InspectorState>,
     /// Open Threads & CPUs windows (right-click → Threads & CPUs…),
     /// each with its own sampler.
     threads_open: Vec<i32>,
@@ -542,8 +544,8 @@ impl SysMonApp {
             icon_cache: IconCache::new(),
             page: Page::from_id(&settings.start_page).unwrap_or(Page::Overview),
             table_state,
-            details_open: Vec::new(),
-            details_threads: HashMap::new(),
+            inspectors_open: Vec::new(),
+            inspectors: HashMap::new(),
             threads_open: Vec::new(),
             threads_windows: HashMap::new(),
             combined_details_open: None,
@@ -580,6 +582,21 @@ impl SysMonApp {
     /// introspection verbs read this).
     pub fn combined_details(&self) -> Option<&[i32]> {
         self.combined_details_open.as_deref()
+    }
+
+    /// The pids with an Inspector window open, in opening order.
+    pub fn inspectors_open(&self) -> &[i32] {
+        &self.inspectors_open
+    }
+
+    /// Open `pid`'s Inspector window, or raise it when it's already
+    /// open (one window per process, never a second copy).
+    fn open_inspector(&mut self, ctx: &egui::Context, pid: i32) {
+        if self.inspectors_open.contains(&pid) {
+            ctx.send_viewport_cmd_to(inspector::inspector_viewport_id(pid), ViewportCommand::Focus);
+        } else {
+            self.inspectors_open.push(pid);
+        }
     }
 
     pub fn palette(&mut self) -> &'static Palette {
@@ -1274,11 +1291,6 @@ impl SysMonApp {
                     }
                     self.settings.save();
                 }
-                AppAction::OpenDetails(pid) => {
-                    if !self.details_open.contains(&pid) {
-                        self.details_open.push(pid);
-                    }
-                }
                 AppAction::OpenThreads(pid) => {
                     if !self.threads_open.contains(&pid) {
                         self.threads_open.push(pid);
@@ -1295,28 +1307,9 @@ impl SysMonApp {
                     self.page = Page::Processes;
                     self.table_state.selected_pids = vec![pid];
                     self.table_state.reveal_pid = Some(pid);
-                    self.table_state.inspector.inspect(pid);
                     self.clear_filter_hiding(pid);
                 }
-                AppAction::Inspect(pid) => {
-                    // Inspecting from the Overview opens the Processes
-                    // page with the row revealed; from the table it
-                    // just retargets the Inspector.
-                    if self.page != Page::Processes {
-                        self.page = Page::Processes;
-                        self.table_state.selected_pids = vec![pid];
-                        self.table_state.reveal_pid = Some(pid);
-                        self.clear_filter_hiding(pid);
-                    }
-                    self.table_state.inspector.inspect(pid);
-                    if !self.settings.show_inspector {
-                        // A narrow or inspector-less layout: the
-                        // details window is the deep view.
-                        if !self.details_open.contains(&pid) {
-                            self.details_open.push(pid);
-                        }
-                    }
-                }
+                AppAction::Inspect(pid) => self.open_inspector(ctx, pid),
                 AppAction::ShowProcessesBy(column) => {
                     self.page = Page::Processes;
                     self.table_state.sort_column = column;
@@ -1329,10 +1322,6 @@ impl SysMonApp {
                 AppAction::SetGroupByApp(on) => {
                     self.table_state.group_by_app = on;
                     self.settings.group_by_app = on;
-                    self.settings.save();
-                }
-                AppAction::SetInspector(on) => {
-                    self.settings.show_inspector = on;
                     self.settings.save();
                 }
                 AppAction::ToggleSensorGroup(key) => {
@@ -1762,9 +1751,9 @@ impl SysMonApp {
                         "pages: overview processes",
                     )),
                 },
-                // Open a process in the Inspector (Processes page) or its
-                // own details window: the agent's way to the same
-                // Threads & CPUs view a click opens.
+                // Open a process's Inspector window (`details` is the
+                // 3.8-era name for the same window, kept so scripts don't
+                // break) or its small Threads & CPUs window.
                 "inspect" | "details" | "threads" => {
                     let wanted = value_or(&value);
                     let live = wanted.parse::<i32>().ok().and_then(|pid| {
@@ -1777,13 +1766,7 @@ impl SysMonApp {
                     });
                     match live {
                         Some((pid, name)) if verb == "inspect" => {
-                            self.page = Page::Processes;
-                            self.settings.show_inspector = true;
-                            self.settings.save();
-                            self.table_state.selected_pids = vec![pid];
-                            self.table_state.reveal_pid = Some(pid);
-                            self.table_state.inspector.inspect(pid);
-                            self.clear_filter_hiding(pid);
+                            self.open_inspector(ctx, pid);
                             Ok(serde_json::json!({"inspecting": pid, "name": name}))
                         }
                         Some((pid, name)) if verb == "threads" => {
@@ -1793,10 +1776,8 @@ impl SysMonApp {
                             Ok(serde_json::json!({"threads": pid, "name": name}))
                         }
                         Some((pid, name)) => {
-                            if !self.details_open.contains(&pid) {
-                                self.details_open.push(pid);
-                            }
-                            Ok(serde_json::json!({"details": pid, "name": name}))
+                            self.open_inspector(ctx, pid);
+                            Ok(serde_json::json!({"details": pid, "name": name, "window": "inspector"}))
                         }
                         None => Err(VerbError::bad_args(
                             format!("no process `{wanted}` in the latest sample"),
@@ -2136,7 +2117,6 @@ impl eframe::App for SysMonApp {
                         &mut self.table_state,
                         &mut self.icon_cache,
                         &mut frame_actions,
-                        self.settings.show_inspector,
                     );
                     // Persist a changed sort choice (survives restarts).
                     let sort_id = self.table_state.sort_column.id();
@@ -2152,30 +2132,34 @@ impl eframe::App for SysMonApp {
 
         self.popout_viewports(ctx, &mut frame_actions);
 
-        // Detail windows (and whether the sampler should pay for the
+        // Inspector windows (and whether the sampler should pay for the
         // connection table).
         let snapshot = self.shared.latest.read().unwrap().clone();
         let units = self.settings.display().units;
+        let display = self.settings.display();
+        let selected = self.table_state.selected_pids.clone();
         let mut closed: Vec<i32> = Vec::new();
-        for pid in self.details_open.clone() {
+        for pid in self.inspectors_open.clone() {
             let palette = self.palette();
-            let keep = details::details_window(
+            let keep = inspector::inspector_window(
                 ctx,
                 palette,
                 &self.settings.graph_palette,
-                units,
+                display,
                 &snapshot,
                 pid,
-                self.details_threads.entry(pid).or_default(),
+                self.inspectors.entry(pid).or_default(),
+                &mut self.icon_cache,
+                &selected,
                 &mut frame_actions,
             );
             if !keep {
                 closed.push(pid);
             }
         }
-        self.details_open.retain(|pid| !closed.contains(pid));
-        let open = &self.details_open;
-        self.details_threads.retain(|pid, _| open.contains(pid));
+        self.inspectors_open.retain(|pid| !closed.contains(pid));
+        let open = &self.inspectors_open;
+        self.inspectors.retain(|pid, _| open.contains(pid));
         let mut closed: Vec<i32> = Vec::new();
         for pid in self.threads_open.clone() {
             let keep = details::threads_window(
@@ -2193,14 +2177,10 @@ impl eframe::App for SysMonApp {
         self.threads_open.retain(|pid| !closed.contains(pid));
         let open = &self.threads_open;
         self.threads_windows.retain(|pid, _| open.contains(pid));
-        // The socket table is only paid for while something shows it:
-        // a details window, or the Inspector on the Processes page.
-        let inspecting = self.page == Page::Processes
-            && self.settings.show_inspector
-            && self.table_state.inspector.pid.is_some();
+        // The socket table is only paid for while an Inspector shows it.
         self.shared
             .connections_wanted
-            .store(!self.details_open.is_empty() || inspecting, Ordering::Relaxed);
+            .store(!self.inspectors_open.is_empty(), Ordering::Relaxed);
         let cpu_popped = self.settings.popped_out_sections.iter().any(|s| s == "cpu");
         let cpu_card_shown = self.settings.section_visible("cpu") && (cpu_popped || self.page == Page::Overview);
         self.shared.occupants_wanted.store(cpu_card_shown, Ordering::Relaxed);
@@ -2231,8 +2211,8 @@ impl eframe::App for SysMonApp {
             for section in &self.settings.popped_out_sections {
                 open.push(ViewportId::from_hash_of(("popout", section.as_str())));
             }
-            for pid in &self.details_open {
-                open.push(ViewportId::from_hash_of(("details", *pid)));
+            for pid in &self.inspectors_open {
+                open.push(inspector::inspector_viewport_id(*pid));
             }
             for pid in &self.threads_open {
                 open.push(ViewportId::from_hash_of(("threads", *pid)));

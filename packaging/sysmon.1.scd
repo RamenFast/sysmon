@@ -75,9 +75,9 @@ networking first — without scraping a UI.
 	on|off; *units* decimal|binary; *temperature*
 	celsius|fahrenheit|both; *cpugraph* total|threads|grid (the
 	Overview's CPU card: one trace, a coloured line per thread, or a
-	small graph per thread); *inspect* _pid_ (the Processes page with
-	the Inspector on it), *details* _pid_ (its own window), both
-	showing its Threads & CPUs, and *threads* _pid_ (only its
+	small graph per thread); *inspect* _pid_ (its Inspector, in a
+	window of its own; *details* _pid_ is the same window, 3.8's
+	name), showing its Threads & CPUs, and *threads* _pid_ (only its
 	Threads & CPUs, in a small window; right-click any process for
 	the same). A GUI's *status* names the
 	adapter the window renders on (_renderer_); a CPU-rasterizer

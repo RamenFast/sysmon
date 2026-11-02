@@ -61,7 +61,6 @@ pub struct CardContext<'a> {
 #[derive(Clone, Debug)]
 pub enum AppAction {
     TogglePopOut(&'static str),
-    OpenDetails(i32),
     /// A small window with only that pid's Threads & CPUs (3.8: the
     /// right-click way to it from any process row).
     OpenThreads(i32),
@@ -73,10 +72,9 @@ pub enum AppAction {
     ShowProcessesBy(SortColumn),
     /// Back to the Overview, scrolled to a card (the summary strip).
     ShowOverview(&'static str),
-    /// Select a pid in the Inspector (and the table).
+    /// Open this pid's Inspector window, or raise it when it's open.
     Inspect(i32),
     SetGroupByApp(bool),
-    SetInspector(bool),
     ConfirmTerminate(i32, String),
     ConfirmKill(i32, String),
     SetPriority(i32, String, i32),
@@ -553,7 +551,7 @@ fn top_process_row(ui: &mut Ui, cx: &mut CardContext, rank: usize, record: &Proc
     }
 
     let response = response.on_hover_text(format!(
-        "{} · PID {} — click to inspect, Ctrl+click to select, right-click for actions",
+        "{} · PID {} — click to inspect (its own window), Ctrl+click to select, right-click for actions",
         record.name, record.pid
     ));
     if response.clicked() {
@@ -623,12 +621,8 @@ pub fn process_context_menu(
             }
         }
         ui.separator();
-        if ui.button("Inspect").clicked() {
+        if ui.button("Inspect…").clicked() {
             actions.push(AppAction::Inspect(pid));
-            ui.close();
-        }
-        if ui.button("Details window…").clicked() {
-            actions.push(AppAction::OpenDetails(pid));
             ui.close();
         }
         if ui.button("Threads & CPUs…").clicked() {
