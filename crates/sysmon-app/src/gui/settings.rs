@@ -71,8 +71,6 @@ pub struct Settings {
     /// Process table: one row per application (thorium ×12) instead
     /// of one per process. New in 3.1.
     pub group_by_app: bool,
-    /// Process table: the Inspector pane beside the table. New in 3.1.
-    pub show_inspector: bool,
     /// Sensors card groups the user folded shut ("board", "drives"…).
     pub folded_sensor_groups: Vec<String>,
     /// The page the window opens on: "overview" | "processes". New in
@@ -120,7 +118,6 @@ impl Default for Settings {
             sort_column: "cpu".to_string(),
             sort_descending: true,
             group_by_app: false,
-            show_inspector: true,
             folded_sensor_groups: Vec::new(),
             start_page: "overview".to_string(),
             cpu_graph_mode: "threads".to_string(),
@@ -491,7 +488,10 @@ mod tests {
         let settings = Settings::from_json(v3_0).expect("3.0 file parses");
         assert_eq!(settings.display().temperature, TemperatureScale::Celsius);
         assert_eq!(settings.theme_mode, "amoled");
-        assert!(settings.show_inspector, "new panes default on");
+        // 3.1–3.8 files carry `show_inspector` (the docked pane, retired
+        // in 3.9 when the Inspector became its own window): it's ignored.
+        let v3_8 = r#"{"settings_version": 2, "show_inspector": false, "group_by_app": true}"#;
+        assert!(Settings::from_json(v3_8).expect("3.8 file parses").group_by_app);
 
         let both = r#"{"settings_version": 2, "temperature_scale": "both"}"#;
         assert_eq!(

@@ -92,8 +92,9 @@ and `tests/accuracy.rs` are the checks.*
 | P8 | group-by-app sums a different set than the filter shows (×N count wrong) | unit test on `group_by_app` + `ui_bridge` grouped row label |
 | P9 | Inspector keeps a dead pid's history when the pid is recycled | unit test `a_recycled_pid_starts_a_fresh_history` (starttime keyed) |
 | P10 | Inspector breadcrumb loops forever on a reparenting race | unit test `ancestry_survives_a_reparenting_loop` |
-| P11 | the Inspector pane eats the table's click targets at narrow widths | `ui_kittest` header clicks at 430 px (the pane only docks ≥ 760 px) |
-| P12 | group-by / inspector toggles don't survive a restart | `ui_bridge`: settings file read back after toggles |
+| P11 | the Inspector pane eats the table's click targets at narrow widths | retired in 3.9: the Inspector is its own window, nothing docks beside the table (`ui_kittest` header clicks at 430 px still run) |
+| P12 | the group-by toggle doesn't survive a restart | `ui_bridge`: settings file read back after the toggle |
+| P13 | a single row click opens a window (it should only select) | `ui_bridge`: click selects, no window; the toolbar's Inspect… opens the selection's Inspector |
 | P13 | a clustered inline-code flag (`bash -lc "cd x && cargo build"`, `-ec`, `python3 -Bc`) is read as a script path, so the code becomes the name ("Dev && cargo build --release") | `display_names_say_what_a_person_would`: a short cluster carrying c/e means inline code; `-uB x.py` still names x.py |
 | P14 | group-by-app keys on the executable, so five unrelated python3.12 programs become one "tray.py ×5" row with summed CPU, and End process signals only the root | `unrelated_scripts_on_one_interpreter_stay_apart`: interpreters are keyed by the script they run |
 | P15 | inline code that only launches a module (`python3 -I -c "from multiprocessing.resource_tracker import main;main(5)"`) is shown as a bare `python3` | audit P2 caught it live (3.2); `display_names_say_what_a_person_would`: a leading `from X import` / `import X` names the module, as `-m` does |

@@ -87,8 +87,8 @@ every line's rates are correct for its own window.
 sysmon ctl status            # who's serving, which mode
 sysmon ctl page processes    # switch pages: overview | processes
 sysmon ctl cpugraph threads  # the Overview's CPU card: total | threads | grid
-sysmon ctl inspect 4872      # Processes page, Inspector on pid 4872 (Threads & CPUs included)
-sysmon ctl details 4872      # pid 4872's own details window
+sysmon ctl inspect 4872      # pid 4872's Inspector window (Threads & CPUs included); raises it if open
+sysmon ctl details 4872      # the same window (3.8's name, kept; answers {"details": pid, "window": "inspector"})
 sysmon ctl threads 4872      # only its Threads & CPUs, in a small window
 sysmon ctl theme blossom_dark
 sysmon ctl popout gpu        # pop the GPU card into its own window

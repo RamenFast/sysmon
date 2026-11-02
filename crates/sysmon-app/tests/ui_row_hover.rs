@@ -79,10 +79,6 @@ fn a_hovered_row_wears_the_soft_tint_and_never_the_ink() {
     let settings = Settings {
         theme_mode: "amoled".to_string(),
         start_page: "processes".to_string(),
-        // The real default: the Inspector docked beside the table (its
-        // layout clips the table at the cell's left edge, which hid a
-        // hover edge painted just outside it).
-        show_inspector: true,
         sort_column: "pid".to_string(),
         sort_descending: false,
         ..Settings::default()

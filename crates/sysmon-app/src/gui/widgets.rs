@@ -20,6 +20,9 @@ pub enum ButtonGlyph {
     Copy,
 }
 
+/// A glyph button's width; card headers budget their right side by it.
+pub const GLYPH_BUTTON_WIDTH: f32 = 22.0;
+
 pub fn glyph_button(
     ui: &mut Ui,
     palette: &Palette,
@@ -27,7 +30,7 @@ pub fn glyph_button(
     active: bool,
     tooltip: &str,
 ) -> egui::Response {
-    let size = vec2(22.0, 18.0);
+    let size = vec2(GLYPH_BUTTON_WIDTH, 18.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     // Screen readers (and the kittest harness) see the tooltip text.
     response.widget_info(|| {

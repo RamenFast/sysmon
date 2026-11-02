@@ -8,10 +8,11 @@
 //! up to five for the combined details view. Rows are virtualized;
 //! sorting is stable so the table doesn't shimmer.
 //!
-//! New in 3.1: a summary strip that links back to the Overview, a
-//! group-by-app view (one row per application, its processes summed),
-//! and the Inspector docked on the right — click a row and its whole
-//! story opens there.
+//! New in 3.1: a summary strip that links back to the Overview and a
+//! group-by-app view (one row per application, its processes summed).
+//! 3.9: a click selects a row; double-click, the toolbar's Inspect… or
+//! the right-click menu opens the process's Inspector in its own
+//! window (it used to dock here, and only in a wide window).
 
 use std::collections::HashMap;
 
@@ -24,7 +25,6 @@ use sysmon_core::units::{format_duration_seconds, format_percent, format_rate, f
 use super::cards::{AppAction, MAX_SELECTED, process_context_menu, selection_color, toggle_selection};
 use super::glyphs::{self, Glyph};
 use super::icons::{self, IconCache};
-use super::inspector::{self, InspectorState};
 use super::settings::Display;
 use super::theme::Palette;
 use super::widgets::paint_row_edge;
@@ -126,7 +126,6 @@ pub struct ProcessTableState {
     pub reveal_pid: Option<i32>,
     /// One row per application instead of per process.
     pub group_by_app: bool,
-    pub inspector: InspectorState,
     /// The row (index) the pointer was on last frame: it wears the hover
     /// edge, on the same row egui_extras tints (it learns hover a frame
     /// late too).
@@ -143,7 +142,6 @@ impl Default for ProcessTableState {
             focus_filter: false,
             reveal_pid: None,
             group_by_app: false,
-            inspector: InspectorState::default(),
             hovered_row: None,
         }
     }
@@ -266,7 +264,6 @@ pub fn processes_page(
     state: &mut ProcessTableState,
     icon_cache: &mut IconCache,
     actions: &mut Vec<AppAction>,
-    show_inspector: bool,
 ) {
     let Some(records) = &snapshot.processes else {
         ui.centered_and_justified(|ui| {
@@ -281,40 +278,9 @@ pub fn processes_page(
 
     summary_strip(ui, palette, display, snapshot, actions);
     ui.add_space(2.0);
-    toolbar(ui, palette, records, state, actions, show_inspector);
+    toolbar(ui, palette, records, state, actions);
     ui.add_space(2.0);
-
-    // The Inspector docks on the right when there's room for both.
-    // Only then does the table get its own clipped panel (it must not
-    // draw under the Inspector); otherwise it keeps the page's full
-    // width, margins included, exactly as before.
-    let wide_enough = ui.available_width() >= 760.0;
-    if !(show_inspector && wide_enough) {
-        table(ui, palette, graph_palette_id, display, snapshot, records, state, icon_cache, actions);
-        return;
-    }
-    let selected = state.selected_pids.clone();
-    egui::SidePanel::right("inspector_panel")
-        .resizable(true)
-        .default_width(330.0)
-        .width_range(260.0..=520.0)
-        .frame(egui::Frame::new().fill(palette.plane).inner_margin(egui::Margin::symmetric(6, 0)))
-        .show_inside(ui, |ui| {
-            inspector::inspector(
-                ui,
-                palette,
-                graph_palette_id,
-                display,
-                snapshot,
-                &mut state.inspector,
-                icon_cache,
-                &selected,
-                actions,
-            );
-        });
-    egui::CentralPanel::default()
-        .frame(egui::Frame::new())
-        .show_inside(ui, |ui| table(ui, palette, graph_palette_id, display, snapshot, records, state, icon_cache, actions));
+    table(ui, palette, graph_palette_id, display, snapshot, records, state, icon_cache, actions);
 }
 
 /// One line of the machine at a glance, each figure a link back to its
@@ -370,7 +336,6 @@ fn toolbar(
     records: &[ProcessRecord],
     state: &mut ProcessTableState,
     actions: &mut Vec<AppAction>,
-    show_inspector: bool,
 ) {
     ui.horizontal(|ui| {
         // The right-hand cluster (count, selection, Compare) is laid
@@ -396,7 +361,7 @@ fn toolbar(
         if state.selected_pids.len() >= 2 {
             right += 90.0; // the Compare button
         }
-        let chips = text_width("Grouped by app") + text_width("‹ Inspector") + 4.0 * spacing + 16.0;
+        let chips = text_width("Grouped by app") + text_width("Inspect…") + 4.0 * spacing + 24.0;
         let filter_edit = egui::TextEdit::singleline(&mut state.filter)
             .hint_text("Filter by name, command, user, or PID…")
             .desired_width((ui.available_width() - right - chips - 12.0).max(140.0));
@@ -413,13 +378,18 @@ fn toolbar(
         {
             actions.push(AppAction::SetGroupByApp(!state.group_by_app));
         }
-        let inspector_label = if show_inspector { "Inspector ›" } else { "‹ Inspector" };
+        // The way in for a mouse that doesn't double-click: the
+        // selection's Inspector windows (one each, at most five).
+        let any_selected = !state.selected_pids.is_empty();
         if ui
-            .selectable_label(show_inspector, RichText::new(inspector_label).size(11.0))
-            .on_hover_text("Show or hide the process Inspector (needs a wide window)")
+            .add_enabled(any_selected, egui::Button::new(RichText::new("Inspect…").size(11.0)))
+            .on_hover_text("Open the selected process in its own Inspector window (or double-click a row)")
+            .on_disabled_hover_text("Select a process first (or double-click a row)")
             .clicked()
         {
-            actions.push(AppAction::SetInspector(!show_inspector));
+            for pid in state.selected_pids.clone() {
+                actions.push(AppAction::Inspect(pid));
+            }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(count_label).color(palette.muted).size(11.0));
@@ -533,7 +503,7 @@ fn table(
                             if *sort_column == SortColumn::Cpu {
                                 response.on_hover_text(
                                     "100% is one whole CPU, so a process with several busy threads passes 100%. \
-                                     Click a row: the Inspector's Threads & CPUs shows which CPUs.",
+                                     Double-click a row: its Inspector's Threads & CPUs shows which CPUs.",
                                 );
                             }
                         });
@@ -562,8 +532,7 @@ fn table(
                     body.rows(text_height, rows.len(), |mut row| {
                         let (record, count) = rows[row.index()];
                         let selection_slot = state.selected_pids.iter().position(|p| *p == record.pid);
-                        let inspected = state.inspector.pid == Some(record.pid);
-                        row.set_selected(selection_slot.is_some() || inspected);
+                        row.set_selected(selection_slot.is_some());
                         // Keyed by row index, like egui_extras' own hover
                         // tint: in a live-sorted table the row under the
                         // pointer is a place, not a process.
@@ -576,9 +545,8 @@ fn table(
                             // A hovered row that isn't selected wears a
                             // thin accent edge in the same place. Both sit
                             // inside the cell (the icon starts 2 px in):
-                            // with the Inspector docked the table clips at
-                            // the cell's left edge, and a mark outside it
-                            // never showed.
+                            // the table clips at the cell's left edge, so
+                            // a mark outside it never shows.
                             let cell = ui.max_rect();
                             let mark = Rect::from_min_max(pos2(cell.min.x, cell.min.y - 2.0), pos2(cell.max.x, cell.max.y + 2.0));
                             if let Some(slot) = selection_slot {
@@ -650,11 +618,10 @@ fn table(
                                 range_select(state, &visible, record.pid, actions);
                             } else {
                                 state.selected_pids = vec![record.pid];
-                                actions.push(AppAction::Inspect(record.pid));
                             }
                         }
                         if row_response.double_clicked() {
-                            actions.push(AppAction::OpenDetails(record.pid));
+                            actions.push(AppAction::Inspect(record.pid));
                         }
                         process_context_menu(&row_response, actions, record, &state.selected_pids, true);
                     });

@@ -68,3 +68,7 @@ Rules:
 - 2026-10-16 [bugfix] hovering a process row in the table makes its text impossible to read; fix the theming and make the hover highlight gentler on the eyes while staying legible
 - 2026-10-16 [feature] pop-out windows and windows a process action opens must never open tiled: SysMon and all its windows open floating by default
 - 2026-10-22 [feature] show the NVIDIA GPU inside sysmon: "I want the nvidia gpu displayed inside sysmon" (the RTX 3070, a headless CUDA card beside the R9700)
+- 2026-11-02 [ui] merge "details" and "inspect" into one thing (Ben: I need you to merge the "details" and "inspect" into one thing); the right-click menu offered both Inspect and Details window…
+- 2026-11-02 [bugfix] the Inspector is "*really* annoying to use because it only shows up when the window is really wide"
+- 2026-11-02 [ui] the Inspector should pop out into a new window: going to the Processes tab and scrolling all the way right to reach it feels unintuitive
+- 2026-11-02 [ask] remove duplicate functionality; keep it understandable, keep the good info, make it easy to use

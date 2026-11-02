@@ -26,7 +26,7 @@ use super::theme::{
     GRAPH_SERIES_CPU, GRAPH_SERIES_GPU, GRAPH_SERIES_MEMORY, GRAPH_SERIES_NET_DOWN,
     GRAPH_SERIES_NET_UP, Palette, card_frame, graph_color, thread_colors,
 };
-use super::widgets::{ButtonGlyph, glyph_button, paint_row_hover, stone_switch};
+use super::widgets::{ButtonGlyph, GLYPH_BUTTON_WIDTH, glyph_button, paint_row_hover, stone_switch};
 
 pub const FULL_GRAPH_HEIGHT: f32 = 66.0;
 pub const COMPACT_GRAPH_HEIGHT: f32 = 36.0;
@@ -61,7 +61,6 @@ pub struct CardContext<'a> {
 #[derive(Clone, Debug)]
 pub enum AppAction {
     TogglePopOut(&'static str),
-    OpenDetails(i32),
     /// A small window with only that pid's Threads & CPUs (3.8: the
     /// right-click way to it from any process row).
     OpenThreads(i32),
@@ -73,10 +72,9 @@ pub enum AppAction {
     ShowProcessesBy(SortColumn),
     /// Back to the Overview, scrolled to a card (the summary strip).
     ShowOverview(&'static str),
-    /// Select a pid in the Inspector (and the table).
+    /// Open this pid's Inspector window, or raise it when it's open.
     Inspect(i32),
     SetGroupByApp(bool),
-    SetInspector(bool),
     ConfirmTerminate(i32, String),
     ConfirmKill(i32, String),
     SetPriority(i32, String, i32),
@@ -236,35 +234,36 @@ fn card_header(
     subtitle: &str,
     headline: &str,
 ) {
-    // What the row needs before the subtitle starts truncating to
-    // nothing: glyph, title, a stub of subtitle, headline, two buttons.
     let headline_font = egui::FontId::monospace(12.5);
     let spacing = ui.spacing().item_spacing.x;
-    let subtitle_stub = if !subtitle.is_empty() && !cx.compact { 60.0 + spacing } else { 0.0 };
+    let popped = cx.popped_out.iter().any(|s| s == section_key);
+    let headline_width = text_width(ui, headline, headline_font);
+    let right_width = header_right_width(headline_width, popped, spacing);
+    // What the row asks for: glyph, title, subtitle, the right side.
+    // A pop-out window is the card's own room, so it asks for the
+    // whole subtitle (10-30: "4 × 32 GB D…" in a window that could
+    // have opened wide enough to read it). Docked, a stub, so a long
+    // device name never widens the main window.
+    let subtitle_want = if subtitle.is_empty() || cx.compact {
+        0.0
+    } else if popped {
+        text_width(ui, subtitle, egui::FontId::proportional(11.0)) + spacing
+    } else {
+        60.0 + spacing
+    };
     want_width(
         &cx.want_width,
-        14.0 + text_width(ui, title, egui::FontId::proportional(13.0))
-            + subtitle_stub
-            + text_width(ui, headline, headline_font)
-            + 2.0 * 26.0
-            + 24.0
-            + 3.0 * spacing,
+        14.0 + spacing + text_width(ui, title, egui::FontId::proportional(13.0)) + spacing + subtitle_want + right_width,
     );
     ui.horizontal(|ui| {
         glyphs::show(ui, glyphs::for_section(section_key), 14.0, cx.palette.title);
         ui.label(RichText::new(title).color(cx.palette.title).strong().size(13.0));
         if !subtitle.is_empty() && !cx.compact {
-            // Give the subtitle only what the right-side headline +
-            // pop-out button won't need, so it truncates instead of
-            // running underneath them.
-            let headline_width = ui.fonts_mut(|fonts| {
-                fonts
-                    .layout_no_wrap(headline.to_string(), egui::FontId::monospace(12.5), cx.palette.value)
-                    .size()
-                    .x
-            });
-            let reserved = headline_width + 2.0 * 26.0 + 24.0; // two buttons + spacing
-            let subtitle_width = (ui.available_width() - reserved).max(0.0);
+            // Give the subtitle everything the right side won't use,
+            // so it truncates only when it truly can't fit. (Until
+            // 10-30 this reserved two buttons + 24 px always: a popped
+            // card has one, so ~38 px sat empty beside an elided label.)
+            let subtitle_width = (ui.available_width() - right_width).max(0.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(subtitle_width, 16.0),
                 Layout::left_to_right(Align::Center),
@@ -280,7 +279,6 @@ fn card_header(
             );
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let popped = cx.popped_out.iter().any(|s| s == section_key);
             let tooltip = if popped {
                 "Return to the main window"
             } else {
@@ -300,6 +298,16 @@ fn card_header(
             ui.label(RichText::new(headline).color(cx.palette.value).monospace().size(12.5));
         });
     });
+}
+
+/// The header's right side, laid out right to left: the pop-out
+/// toggle, the copy button (docked only: popped out, the window's own
+/// row carries copy), the headline, plus the gap between that group
+/// and the subtitle. One px of slack for rounding, so the subtitle
+/// never runs under the headline.
+fn header_right_width(headline_width: f32, popped: bool, spacing: f32) -> f32 {
+    let buttons = if popped { 1.0 } else { 2.0 };
+    headline_width + buttons * (GLYPH_BUTTON_WIDTH + spacing) + spacing + 1.0
 }
 
 /// Grid of dim label / mono value pairs (v1's StatGrid): two pairs a
@@ -543,7 +551,7 @@ fn top_process_row(ui: &mut Ui, cx: &mut CardContext, rank: usize, record: &Proc
     }
 
     let response = response.on_hover_text(format!(
-        "{} · PID {} — click to inspect, Ctrl+click to select, right-click for actions",
+        "{} · PID {} — click to inspect (its own window), Ctrl+click to select, right-click for actions",
         record.name, record.pid
     ));
     if response.clicked() {
@@ -613,12 +621,8 @@ pub fn process_context_menu(
             }
         }
         ui.separator();
-        if ui.button("Inspect").clicked() {
+        if ui.button("Inspect…").clicked() {
             actions.push(AppAction::Inspect(pid));
-            ui.close();
-        }
-        if ui.button("Details window…").clicked() {
-            actions.push(AppAction::OpenDetails(pid));
             ui.close();
         }
         if ui.button("Threads & CPUs…").clicked() {
@@ -1538,5 +1542,19 @@ mod tests {
         let note = installed_note(&memory, 128 << 30, units::Units::Decimal);
         assert!(note.starts_with("137.4 GB of sticks. The box, the BIOS and MemTest86 call it \"128 GB\""), "{note}");
         assert!(note.contains("(128.0 GiB)") && note.contains("Usable 135.0 GB"), "{note}");
+    }
+
+    /// The subtitle's budget is what the right side really draws: a
+    /// popped card has no copy button, so it reserves one button less
+    /// (10-30: the old flat "two buttons + 24" left ~38 px empty).
+    #[test]
+    fn header_reserves_only_the_buttons_it_draws() {
+        let spacing = 8.0;
+        let docked = header_right_width(100.0, false, spacing);
+        let popped = header_right_width(100.0, true, spacing);
+        assert_eq!(docked - popped, GLYPH_BUTTON_WIDTH + spacing);
+        // [pop][gap][copy][gap][headline][gap]subtitle, +1 slack
+        assert_eq!(docked, 100.0 + 2.0 * (GLYPH_BUTTON_WIDTH + spacing) + spacing + 1.0);
+        assert!(popped < 100.0 + 2.0 * 26.0 + 24.0 - 30.0, "popped must free the copy button's room");
     }
 }

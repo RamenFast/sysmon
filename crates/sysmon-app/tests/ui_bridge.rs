@@ -6,10 +6,13 @@
 //!
 //! Failure modes this walks (docs/dev/FAILURE-MODES.md):
 //!   P5  a top-3 row click inspects the slot's pid after a re-rank
+//!       (3.9: in that pid's own Inspector window)
 //!   P6  "all by memory" lands sorted by something else / ascending
 //!   P7  a summary-strip chip lands on the Overview, not its card
 //!   P8  group-by-app's ×N disagrees with the rows it summed
-//!   P12 group-by / Inspector toggles don't survive a restart
+//!   P12 the group-by toggle doesn't survive a restart
+//!   P13 a row click opens a window (it should only select; double-
+//!       click or Inspect… opens the Inspector)
 //!
 //! Like ui_menu_target, the sampler is paused and the test owns the
 //! snapshot, so ranks are deterministic. Isolation law: scratch
@@ -120,7 +123,6 @@ fn overview_and_processes_flow_both_ways() {
     let shared = Arc::new(SharedUi::new(0.5));
     let control = shared.clone();
     let (_command_tx, command_rx) = std::sync::mpsc::channel();
-    // Wide enough that the Inspector docks beside the table.
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
         .build_eframe(|cc| {
@@ -159,28 +161,23 @@ fn overview_and_processes_flow_both_ways() {
         });
     }
     harness.run_steps(8);
-    assert_eq!(harness.state().page, Page::Processes, "a row click opens Processes");
-    assert_eq!(harness.state().table_state.inspector.pid, Some(ROOT), "P5: Inspector holds the clicked pid");
-    assert_eq!(harness.state().table_state.selected_pids, vec![ROOT], "the table row is selected too");
-    // The Inspector shows the parent chain and the children.
+    assert_eq!(harness.state().page, Page::Overview, "the Inspector pops out; the page stays put");
+    assert_eq!(harness.state().inspectors_open(), [ROOT], "P5: the clicked pid's Inspector opened");
+    // The Inspector window shows the parent chain and the children.
     settle_until(&mut harness, "Children (2)");
     receipt.insert("P5_inspect_clicked_pid".into(), true.into());
 
-    // Drill down: a child row retargets the Inspector...
+    // Drill down: a child row opens that child's own Inspector...
     harness.get_by_label(&format!("Inspect orchard — PID {WORKER_A}")).click();
     harness.run_steps(8);
-    assert_eq!(harness.state().table_state.inspector.pid, Some(WORKER_A), "child row drills down");
-    // ...and the breadcrumb climbs back to the parent.
-    harness.get_by_label(&format!("Breadcrumb orchard — PID {ROOT}")).click();
+    assert_eq!(harness.state().inspectors_open(), [ROOT, WORKER_A], "child row opens its own window");
+    // ...and its breadcrumb back to the parent raises the open one: one
+    // window per process, never a second copy.
+    let crumb = format!("Breadcrumb orchard — PID {ROOT}");
+    harness.query_all_by_label(&crumb).last().expect("a crumb back to the root").click();
     harness.run_steps(8);
-    assert_eq!(harness.state().table_state.inspector.pid, Some(ROOT), "breadcrumb climbs back");
+    assert_eq!(harness.state().inspectors_open(), [ROOT, WORKER_A], "breadcrumb raises, doesn't duplicate");
     receipt.insert("drill_down_and_back".into(), true.into());
-
-    // ---- P7: a summary chip goes back to the Overview, to its card.
-    harness.get_by_label("Overview memory").click();
-    harness.run_steps(8);
-    assert_eq!(harness.state().page, Page::Overview, "P7: chip returns to the Overview");
-    receipt.insert("P7_chip_returns".into(), true.into());
 
     // ---- P6: "all by memory" lands sorted by memory, biggest first.
     harness.get_by_label("Processes by memory").click();
@@ -190,7 +187,33 @@ fn overview_and_processes_flow_both_ways() {
     assert!(harness.state().table_state.sort_descending, "P6: biggest first");
     receipt.insert("P6_more_link_sort".into(), true.into());
 
+    // ---- P13: a click selects a row and opens nothing; the toolbar's
+    // Inspect… opens the selection's window (as double-click does).
+    harness.get_by_label("loner").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().table_state.selected_pids, vec![LONER], "the click selects");
+    assert_eq!(harness.state().inspectors_open(), [ROOT, WORKER_A], "a single click opens no window");
+    harness.get_by_label("Inspect…").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().inspectors_open(), [ROOT, WORKER_A, LONER], "P13: Inspect… opens the selection");
+    receipt.insert("P13_select_then_inspect".into(), true.into());
+
+    // Esc closes an Inspector. (kittest embeds child viewports in the
+    // main one and they share its input, so one Esc closes all three;
+    // on a desktop each window takes its own keys.)
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(8);
+    assert!(harness.state().inspectors_open().is_empty(), "Esc closes the Inspector");
+
+    // ---- P7: a summary chip goes back to the Overview, to its card.
+    harness.get_by_label("Overview memory").click();
+    harness.run_steps(8);
+    assert_eq!(harness.state().page, Page::Overview, "P7: chip returns to the Overview");
+    receipt.insert("P7_chip_returns".into(), true.into());
+
     // ---- P8: group by app — orchard ×3 sums its three processes.
+    harness.get_by_label("Processes by memory").click();
+    harness.run_steps(8);
     harness.get_by_label("Group by app").click();
     harness.run_steps(8);
     assert!(harness.state().table_state.group_by_app, "grouping on");
@@ -199,15 +222,12 @@ fn overview_and_processes_flow_both_ways() {
     assert!(harness.query_by_label("orchard ×2").is_none(), "P8: the count covers every orchard process");
     receipt.insert("P8_group_count".into(), "orchard ×3".into());
 
-    // ---- P12: toggles persist.
-    harness.get_by_label("Inspector ›").click();
-    harness.run_steps(8);
+    // ---- P12: the group-by toggle persists.
     let saved: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(config.join("sysmon/settings.json")).expect("settings written to scratch"),
     )
     .unwrap();
     assert_eq!(saved["group_by_app"], true, "P12: group-by persisted");
-    assert_eq!(saved["show_inspector"], false, "P12: inspector toggle persisted");
     receipt.insert("P12_persisted".into(), true.into());
 
     // Ungroup: the per-process rows come back.
