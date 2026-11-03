@@ -291,10 +291,10 @@ Packages and checksums on the
 
 ```bash
 # Debian / Ubuntu / Mint
-sudo apt install ./sysmon_3.9.1_amd64.deb
+sudo apt install ./sysmon_3.9.2_amd64.deb
 
 # Fedora / RHEL (built on Mint, rpm --test verified — reports welcome)
-sudo dnf install ./sysmon-3.9.1-1.x86_64.rpm
+sudo dnf install ./sysmon-3.9.2-1.x86_64.rpm
 
 # from source
 sudo apt install build-essential curl git            # apt
@@ -304,7 +304,7 @@ git clone https://github.com/RamenFast/sysmon && cd sysmon
 cargo build --release && sudo install -m755 target/release/sysmon /usr/local/bin/
 ```
 
-Verify: `sysmon --version` → `sysmon 3.9.1 (v3)`.
+Verify: `sysmon --version` → `sysmon 3.9.2 (v3)`.
 
 Runs everywhere a Linux desktop runs; the GPU card wants an amdgpu
 card, the NVIDIA card the proprietary driver's libnvidia-ml, and
