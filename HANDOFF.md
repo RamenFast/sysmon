@@ -105,6 +105,17 @@ version. Version law: workspace == `--version` == filenames == tag.
 
 ## Known edges & next-session ideas
 
+- **3.9.2 the glass reads at bar size** (`assets/sysmon.svg`): Ben
+  saw the app icon in his bar and said "the magnifying glass needs to
+  be a little bit more distinct". At 16-32 px the ice-blue ring sank
+  into the green trace. It is now a honey ring and handle on a black
+  moat, with weights set for 16 px (16 units = 1 px). Edge, outside the
+  repo: v1 left `~/.local/share/icons/hicolor/*/apps/sysmon.png` (and
+  a scalable SVG) behind, and launchers find those before the packaged
+  `/usr/share/icons/hicolor/scalable/apps/sysmon.svg`. On Ben's machine
+  they moved to `~/Nexus/archive/🏮Nexus/2026-11-02/sysmon-june-icons/`.
+  On another machine that ran v1, delete them and run
+  `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`.
 - **3.9.1 process icons by name** (`apps.rs::icon_for_named_process`,
   `process_icon_names`): an icon in `$XDG_DATA_HOME/sysmon/process-icons/`
   (default `~/.local/share/sysmon/process-icons/`) named after the

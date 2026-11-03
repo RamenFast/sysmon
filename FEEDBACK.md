@@ -73,3 +73,4 @@ Rules:
 - 2026-11-02 [ui] the Inspector should pop out into a new window: going to the Processes tab and scrolling all the way right to reach it feels unintuitive
 - 2026-11-02 [ask] remove duplicate functionality; keep it understandable, keep the good info, make it easy to use
 - 2026-11-02 [feature] custom icons for Nexus's named processes in the process list, not the stock letter tiles: "please make some icons for your various processes. Don't want just the plain/stock sysmon ones, if you got a named process seen in the second image, please make something for it"
+- 2026-11-02 [ui] the app icon's magnifying glass is hard to see at bar size: "the magnifying glass needs to be a little bit more distinct, then I feel it's a ok"; keep the packaged phosphor art ("I like the "today packaged" one best") over new designs and over the June icon that shadowed it
